@@ -7,6 +7,23 @@ export interface ProjectCreateReadiness {
   }
 }
 
+export interface ProjectCreateOverrides {
+  templateName?: string
+  displayName?: string
+}
+
+/**
+ * Template inference is only for callers that did not provide creation
+ * overrides at all. The wizard always supplies an overrides object after the
+ * user has reviewed the plan, including when they explicitly chose no
+ * template, so its empty templateName must not re-enable inference.
+ */
+export function shouldInferDevelopmentTemplate(
+  createOverrides: ProjectCreateOverrides | undefined,
+): boolean {
+  return createOverrides === undefined
+}
+
 export interface CreateSetupItemsInput {
   readiness: ProjectCreateReadiness | null
   llmConfigured: boolean

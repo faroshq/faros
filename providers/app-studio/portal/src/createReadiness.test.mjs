@@ -17,6 +17,7 @@ const {
   canSubmitCreatePrompt,
   createSetupItems,
   createPromptBlockedMessage,
+  shouldInferDevelopmentTemplate,
 } = await import(moduleURL)
 
 test('blocks project creation when no validated Git connection is ready', () => {
@@ -141,9 +142,15 @@ test('new-project route has one setup surface and a stable wizard entry label', 
   assert.match(appSource, />\s*Continue\s*</)
 })
 
-test('new-project stream explicitly authorizes development-template inference when no template is selected', () => {
+test('template inference is enabled only when creation overrides are absent', () => {
+  assert.equal(shouldInferDevelopmentTemplate(undefined), true)
+  assert.equal(shouldInferDevelopmentTemplate({}), false)
+  assert.equal(shouldInferDevelopmentTemplate({ templateName: 'simple-webapp' }), false)
+})
+
+test('new-project stream bases development-template inference on override presence', () => {
   assert.match(
     appSource,
-    /api\.createProjectStream\(props\.ctx,\s*\{[\s\S]*prompt:\s*content,[\s\S]*inferDevelopmentTemplate:\s*!createOverrides\?\.templateName,[\s\S]*\}, \(message\) =>/,
+    /api\.createProjectStream\(props\.ctx,\s*\{[\s\S]*prompt:\s*content,[\s\S]*inferDevelopmentTemplate:\s*shouldInferDevelopmentTemplate\(createOverrides\),[\s\S]*\}, \(message\) =>/,
   )
 })

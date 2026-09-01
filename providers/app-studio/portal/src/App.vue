@@ -51,6 +51,8 @@ import {
   canSubmitCreatePrompt,
   createSetupItems,
   gitConnectionReady,
+  shouldInferDevelopmentTemplate,
+  type ProjectCreateOverrides,
   type ProjectCreateReadiness,
 } from './createReadiness'
 import { parseAssistantActionFeed } from './assistantActionFeed'
@@ -4779,7 +4781,7 @@ async function startPreProjectAssistantTurn(
 
 async function createProjectAndStartConversation(
   content: string,
-  createOverrides?: { templateName?: string; displayName?: string },
+  createOverrides?: ProjectCreateOverrides,
 ) {
   const pendingForContent = pendingFirstProjectSubmission?.content === content ? pendingFirstProjectSubmission : null
   const pendingProjectName = pendingForContent?.projectName ?? ''
@@ -4846,7 +4848,7 @@ async function createProjectAndStartConversation(
         prompt: content,
         templateName: createOverrides?.templateName,
         displayName: createOverrides?.displayName,
-        inferDevelopmentTemplate: !createOverrides?.templateName,
+        inferDevelopmentTemplate: shouldInferDevelopmentTemplate(createOverrides),
       }, (message) => {
         if (current()) conversationStatus.value = message
       })
