@@ -227,6 +227,11 @@ func projectEinoAssistantCompactionMiddleware(
 			if err != nil {
 				return nil, runtime.fail(finalizeCtx, err)
 			}
+			// Codex compaction rebuilds older history as text-only context. Keep
+			// image receipts only when they belong to the active incoming turn that
+			// triggered this pre-model compaction; all older images leave context
+			// with their compacted message payloads.
+			finalized = projectEinoAssistantRetainCurrentCompactionImages(finalized, runState)
 
 			summaryText := projectEinoAssistantSummaryText(summary)
 			attempt, ok := runtime.activeAttempt()
@@ -283,6 +288,40 @@ func projectEinoAssistantCompactionMiddleware(
 		ChatModelAgentMiddleware: base,
 		runtime:                  runtime,
 	}, nil
+}
+
+func projectEinoAssistantRetainCurrentCompactionImages(
+	messages []*schema.Message,
+	runState *projectEinoAssistantRunState,
+) []*schema.Message {
+	current := make(map[string]struct{})
+	if runState != nil {
+		for _, receipt := range projectAssistantImageAttachmentReceipts(runState.ContentParts()) {
+			current[receipt.ID] = struct{}{}
+		}
+	}
+	out := make([]*schema.Message, 0, len(messages))
+	for _, message := range messages {
+		if !projectEinoAssistantHistoricalAttachmentMessage(message) {
+			out = append(out, message)
+			continue
+		}
+		receipts, err := projectAssistantAttachmentReceiptsFromEinoMessageChecked(message)
+		if err != nil {
+			continue
+		}
+		keep := false
+		for _, receipt := range receipts {
+			if _, exists := current[receipt.ID]; exists {
+				keep = true
+				break
+			}
+		}
+		if keep {
+			out = append(out, message)
+		}
+	}
+	return out
 }
 
 func projectEinoAssistantCompactionTokenCounter(

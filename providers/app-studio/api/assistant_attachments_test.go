@@ -323,6 +323,32 @@ func TestProjectEinoAssistantCompactionKeepsReceiptOnlyWithRetainedUserMessage(t
 	}
 }
 
+func TestProjectEinoAssistantCompactionDropsOldImagesAndKeepsCurrentTurnImage(t *testing.T) {
+	oldReceipt := attachmentReceiptForTest("image-old-compaction", "old.png", "image/png", []byte("old"))
+	currentReceipt := attachmentReceiptForTest("image-current-compaction", "current.png", "image/png", []byte("current"))
+	messages, err := projectChatMessagesToEino([]chatMessage{
+		{Role: "user", Content: "old image", Attachments: []projectAssistantAttachmentReceipt{oldReceipt}},
+		{Role: "assistant", Content: "old response"},
+		{Role: "user", Content: "current image", Attachments: []projectAssistantAttachmentReceipt{currentReceipt}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(currentReceipt)})
+	filtered := projectEinoAssistantRetainCurrentCompactionImages(messages, runState)
+	projected := projectEinoMessagesToChat(filtered)
+	if len(projected) != 3 {
+		t.Fatalf("compacted projection = %#v, want all text messages", projected)
+	}
+	if len(projected[0].Attachments) != 0 {
+		t.Fatalf("old compacted image receipt survived: %#v", projected[0].Attachments)
+	}
+	if len(projected[2].Attachments) != 1 || projected[2].Attachments[0].ID != currentReceipt.ID {
+		t.Fatalf("current image receipt = %#v, want %q", projected[2].Attachments, currentReceipt.ID)
+	}
+}
+
 func TestProjectAssistantModelImageBoundsDeduplicateAndFailClosed(t *testing.T) {
 	image := []byte("image")
 	duplicate := attachmentReceiptForTest("image-duplicate", "screen.png", "image/png", image)
