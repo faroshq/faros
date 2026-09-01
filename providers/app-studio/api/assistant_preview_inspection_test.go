@@ -167,6 +167,40 @@ func TestInspectProjectDevelopmentPreviewRejectsUnsynchronizedMutation(t *testin
 	}
 }
 
+func TestInspectProjectDevelopmentPreviewUsesCheckpointedUniversalSandboxWithoutLegacySync(t *testing.T) {
+	inspector := &fakeProjectAssistantPreviewInspector{result: projectAssistantPreviewInspectionResult{Status: "succeeded"}}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetTurnPolicy(projectAssistantTurnPolicyForProfile(projectAssistantTurnProfileImplementation))
+	runState.RecordSourceMutation()
+	project := &aiv1alpha1.Project{}
+	project.Name = "shop"
+	runState.SetSandbox(&projectAssistantRunSandbox{
+		project:  project,
+		runState: runState,
+		metadata: projectAssistantRunSandboxMetadata{Status: "active"},
+	})
+	server := &Server{
+		previewInspector: inspector,
+		previewInspectionResolveURL: func(context.Context, identity, *aiv1alpha1.Project) (string, error) {
+			return "https://demo.preview.example/", nil
+		},
+	}
+	raw, err := server.inspectProjectDevelopmentPreview(context.Background(), projectAssistantToolCallRequest{
+		Project:  project,
+		RunState: runState,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result projectAssistantPreviewInspectionResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "succeeded" || inspector.calls != 1 {
+		t.Fatalf("result = %#v; worker calls = %d, want checkpoint-current universal preview inspection", result, inspector.calls)
+	}
+}
+
 func TestProjectAssistantPreviewInspectionCapabilityFollowsHealth(t *testing.T) {
 	inspector := &fakeProjectAssistantPreviewInspector{}
 	server := &Server{previewInspector: inspector}

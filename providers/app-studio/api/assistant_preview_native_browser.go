@@ -1325,7 +1325,7 @@ func (s *Server) ensureProjectAssistantPreviewCurrent(ctx context.Context, req p
 		return fmt.Errorf("current workspace mutation is not synchronized: %w", checkpointErr)
 	}
 	revision, _ := req.RunState.SourceMutationRevisions()
-	if revision == 0 {
+	if revision == 0 || !projectAssistantPreviewRequiresDevelopmentSync(req) {
 		return nil
 	}
 	status, failure := req.RunState.DevelopmentSyncEvidence(revision)
@@ -1339,6 +1339,20 @@ func (s *Server) ensureProjectAssistantPreviewCurrent(ctx context.Context, req p
 		return errors.New(failure)
 	}
 	return nil
+}
+
+// projectAssistantPreviewRequiresDevelopmentSync distinguishes the two source
+// topologies. A hosted Template preview is a separate runtime and needs an
+// observed FileStore-to-runtime synchronization receipt. A template-less
+// DevelopmentService runs inside the active project-scoped universal sandbox;
+// after checkpointProjectAssistantRunSandboxIfDirty succeeds, an additional
+// legacy sync is neither scheduled nor necessary. Without an active sandbox,
+// retain the fail-closed sync requirement.
+func projectAssistantPreviewRequiresDevelopmentSync(req projectAssistantToolCallRequest) bool {
+	if projectAssistantDevelopmentTemplateBound(req.Project) {
+		return true
+	}
+	return projectAssistantRunSandboxForRequest(req) == nil
 }
 
 func validateProjectAssistantNativeBrowserArguments(name string, args map[string]any, baseURL string) error {

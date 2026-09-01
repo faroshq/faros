@@ -239,7 +239,7 @@ func (s *Server) inspectProjectDevelopmentPreviewResult(ctx context.Context, req
 			}, nil
 		}
 		revision, _ := req.RunState.SourceMutationRevisions()
-		if revision > 0 {
+		if revision > 0 && projectAssistantPreviewRequiresDevelopmentSync(req) {
 			status, failure := req.RunState.DevelopmentSyncEvidence(revision)
 			if checkpointed || status != "succeeded" {
 				if checkpointed {

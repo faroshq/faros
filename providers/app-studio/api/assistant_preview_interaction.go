@@ -71,7 +71,7 @@ func (s *Server) interactProjectDevelopmentPreviewResult(ctx context.Context, re
 				},
 			}, nil
 		}
-		if revision, _ := req.RunState.SourceMutationRevisions(); revision > 0 {
+		if revision, _ := req.RunState.SourceMutationRevisions(); revision > 0 && projectAssistantPreviewRequiresDevelopmentSync(req) {
 			status, failure := req.RunState.DevelopmentSyncEvidence(revision)
 			if checkpointed {
 				status, failure = req.RunState.WaitForDevelopmentSync(ctx, revision, projectSandboxSyncTimeout+time.Second)
