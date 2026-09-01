@@ -181,9 +181,11 @@ spec:
                   uid:
                     description: UID is the Project UID observed at binding time.
                     maxLength: 128
+                    minLength: 1
                     type: string
                 required:
                 - name
+                - uid
                 type: object
               restartPolicy:
                 default: Always
@@ -210,9 +212,11 @@ spec:
                     description: UID is the sandbox Instance UID observed at binding
                       time.
                     maxLength: 128
+                    minLength: 1
                     type: string
                 required:
                 - name
+                - uid
                 type: object
             required:
             - command

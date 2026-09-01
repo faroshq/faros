@@ -6,7 +6,7 @@ spec:
   resources:
   - group: ai.faros.sh
     name: projects
-    schema: v260901-9ac5b75d.projects.ai.faros.sh
+    schema: v260901-f0e37b77.projects.ai.faros.sh
     storage:
       crd: {}
   - group: ai.faros.sh

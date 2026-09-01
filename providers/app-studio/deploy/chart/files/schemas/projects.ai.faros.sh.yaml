@@ -1,7 +1,7 @@
 apiVersion: apis.kcp.io/v1alpha1
 kind: APIResourceSchema
 metadata:
-  name: v260901-9ac5b75d.projects.ai.faros.sh
+  name: v260901-f0e37b77.projects.ai.faros.sh
 spec:
   group: ai.faros.sh
   names:
@@ -50,6 +50,24 @@ spec:
         spec:
           description: ProjectSpec defines user-authored Project state.
           properties:
+            build:
+              description: |-
+                Build identifies the repository-owned CI workflow for a Project whose
+                development environment is not backed by an infrastructure Template.
+                Template-backed Projects continue to resolve this contract from their
+                selected Template's development.build block.
+              properties:
+                workflowPath:
+                  description: |-
+                    WorkflowPath is the repository-relative GitHub Actions workflow file.
+                    It must be directly under .github/workflows so Code can dispatch the
+                    corresponding workflow by filename without allowing path traversal.
+                  maxLength: 256
+                  pattern: ^\.github/workflows/[^/]+\.ya?ml$
+                  type: string
+              required:
+              - workflowPath
+              type: object
             components:
               description: |-
                 Components are the stable source and build units that make up this
@@ -337,6 +355,108 @@ spec:
                       - provider
                       type: object
                     type: array
+                  connections:
+                    description: |-
+                      Connections bind provider-resource outputs to a consuming binding or
+                      DevelopmentService in this environment. They are logical, secret-free
+                      intent: the Project controller resolves exact object identities and owns
+                      the derived Infrastructure Connection resources.
+                    items:
+                      description: |-
+                        ProjectEnvironmentConnectionSpec is generic environment-scoped dependency
+                        wiring. It contains no credentials or provider runtime identity.
+                      properties:
+                        mappings:
+                          items:
+                            description: |-
+                              ProjectConnectionMappingSpec narrows one provider-declared connection
+                              mapping. Empty mappings select the target interface's provider-owned
+                              defaults.
+                            properties:
+                              sourceKey:
+                                pattern: ^[A-Za-z0-9._-]+$
+                                type: string
+                              targetKey:
+                                pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+                                type: string
+                            required:
+                            - sourceKey
+                            - targetKey
+                            type: object
+                          maxItems: 32
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - targetKey
+                          x-kubernetes-list-type: map
+                        name:
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        sourceInterface:
+                          pattern: ^[a-z][a-z0-9-]*$
+                          type: string
+                        sourceRef:
+                          description: |-
+                            ProjectConnectionEndpointReference names a logical Project-owned endpoint.
+                            Physical object names and UIDs are deliberately controller-owned.
+                          properties:
+                            kind:
+                              description: |-
+                                ProjectConnectionReferenceKind identifies a logical endpoint within a
+                                Project environment. Source references are always bindings; targets may be
+                                bindings or logical DevelopmentServices.
+                              enum:
+                              - binding
+                              - developmentService
+                              type: string
+                            name:
+                              maxLength: 63
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        targetInterface:
+                          pattern: ^[a-z][a-z0-9-]*$
+                          type: string
+                        targetRef:
+                          description: |-
+                            ProjectConnectionEndpointReference names a logical Project-owned endpoint.
+                            Physical object names and UIDs are deliberately controller-owned.
+                          properties:
+                            kind:
+                              description: |-
+                                ProjectConnectionReferenceKind identifies a logical endpoint within a
+                                Project environment. Source references are always bindings; targets may be
+                                bindings or logical DevelopmentServices.
+                              enum:
+                              - binding
+                              - developmentService
+                              type: string
+                            name:
+                              maxLength: 63
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                      required:
+                      - name
+                      - sourceInterface
+                      - sourceRef
+                      - targetInterface
+                      - targetRef
+                      type: object
+                    maxItems: 32
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
                   mode:
                     description: |-
                       Mode distinguishes artifact-based environments from live development
@@ -536,6 +656,25 @@ spec:
                         provider:
                           type: string
                         url:
+                          type: string
+                      type: object
+                    type: array
+                  connections:
+                    items:
+                      description: |-
+                        ProjectEnvironmentConnectionStatus mirrors only secret-free Infrastructure
+                        Connection state. Secret references, paths, and values never cross into the
+                        Project API.
+                      properties:
+                        message:
+                          type: string
+                        name:
+                          type: string
+                        phase:
+                          type: string
+                        reason:
+                          type: string
+                        revision:
                           type: string
                       type: object
                     type: array
