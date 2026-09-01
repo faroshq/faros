@@ -22,11 +22,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
+	einomodel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/faroshq/provider-app-studio/store"
 )
@@ -136,6 +139,306 @@ func TestProjectAssistantAttachmentMessagesKeepImagesMultimodalAndTextBounded(t 
 	second, err := projectAssistantAttachmentMessages(context.Background(), req, state)
 	if err != nil || len(second) != 2 || len(second[0].UserInputMultiContent) != 2 {
 		t.Fatalf("resume attachment messages = %#v, err=%v", second, err)
+	}
+}
+
+func assistantAttachmentUserEventForTest(t *testing.T, threadID, turnID, itemID string, sequence int64, parts []projectAssistantContentPart) store.AssistantThreadEvent {
+	t.Helper()
+	item := assistantThreadItem{
+		ID: itemID, TurnID: turnID, Type: assistantThreadEventUserMessage, Status: "completed",
+		Data: projectAssistantThreadSelectionDataWithParts(nil, nil, parts),
+	}
+	payload, err := json.Marshal(map[string]any{"item": item})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store.AssistantThreadEvent{
+		ThreadID: threadID, TurnID: turnID, Sequence: sequence,
+		Type: assistantThreadEventItemCompleted, ItemID: itemID, Payload: payload,
+	}
+}
+
+func assistantAttachmentUserEventWithRawDataForTest(t *testing.T, threadID, turnID, itemID string, sequence int64, rawData string) store.AssistantThreadEvent {
+	t.Helper()
+	item := assistantThreadItem{
+		ID: itemID, TurnID: turnID, Type: assistantThreadEventUserMessage, Status: "completed",
+		Data: json.RawMessage(rawData),
+	}
+	payload, err := json.Marshal(map[string]any{"item": item})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store.AssistantThreadEvent{
+		ThreadID: threadID, TurnID: turnID, Sequence: sequence,
+		Type: assistantThreadEventItemCompleted, ItemID: itemID, Payload: payload,
+	}
+}
+
+func TestProjectAssistantImageContentPartsRetainsLatestPriorImageTurn(t *testing.T) {
+	older := attachmentReceiptForTest("image-older", "older.png", "image/png", []byte("older"))
+	latest := attachmentReceiptForTest("image-latest", "latest.png", "image/png", []byte("latest"))
+	events := []store.AssistantThreadEvent{
+		assistantAttachmentUserEventForTest(t, "thread-1", "turn-older", "user-older", 1, []projectAssistantContentPart{
+			projectAssistantContentPartAttachment(older),
+		}),
+		assistantAttachmentUserEventForTest(t, "thread-1", "turn-text", "user-text", 2, []projectAssistantContentPart{
+			projectAssistantContentPartText("follow up"),
+		}),
+		assistantAttachmentUserEventForTest(t, "thread-1", "turn-latest", "user-latest", 3, []projectAssistantContentPart{
+			projectAssistantContentPartAttachment(latest),
+			projectAssistantContentPartAttachment(latest),
+		}),
+	}
+	parts, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
+	if err != nil {
+		t.Fatalf("retain latest prior image: %v", err)
+	}
+	if len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != latest.ID {
+		t.Fatalf("retained prior image parts = %#v, want latest image only", parts)
+	}
+	if _, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-latest"); err != nil {
+		t.Fatalf("skip current image turn: %v", err)
+	}
+	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-latest")
+	if err != nil || len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != older.ID {
+		t.Fatalf("prior image after skipping current turn = %#v, err=%v", parts, err)
+	}
+}
+
+func TestProjectAssistantImageContentPartsFailsClosedOnLatestMalformedAttachmentCandidate(t *testing.T) {
+	older := attachmentReceiptForTest("image-older-malformed", "older.png", "image/png", []byte("older"))
+	latest := attachmentReceiptForTest("image-latest-malformed", "latest.png", "image/png", []byte("latest"))
+	receiptJSON, err := json.Marshal(latest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := string(receiptJSON)
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{name: "malformed content parts JSON", data: `{"contentParts":"not-an-array"}`},
+		{name: "attachment without type", data: `{"contentParts":[{"attachment":` + receipt + `}]}`},
+		{name: "attachment without receipt", data: `{"contentParts":[{"type":"attachment"}]}`},
+		{name: "attachment on text part", data: `{"contentParts":[{"type":"text","text":"follow up","attachment":` + receipt + `}]}`},
+		{name: "null content parts", data: `{"contentParts":null}`},
+		{name: "malformed item data without content parts marker", data: `[]`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			events := []store.AssistantThreadEvent{
+				assistantAttachmentUserEventForTest(t, "thread-malformed", "turn-older", "user-older", 1, []projectAssistantContentPart{
+					projectAssistantContentPartAttachment(older),
+				}),
+				assistantAttachmentUserEventWithRawDataForTest(t, "thread-malformed", "turn-latest", "user-latest", 2, test.data),
+			}
+			if _, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-current"); err == nil {
+				t.Fatal("malformed latest attachment candidate was accepted and older image was used")
+			}
+		})
+	}
+
+	// A legacy user item without contentParts carries no attachment claim and
+	// remains skippable, so a still-valid older image can be retained.
+	events := []store.AssistantThreadEvent{
+		assistantAttachmentUserEventForTest(t, "thread-legacy", "turn-older", "user-older", 1, []projectAssistantContentPart{
+			projectAssistantContentPartAttachment(older),
+		}),
+		assistantAttachmentUserEventWithRawDataForTest(t, "thread-legacy", "turn-legacy", "user-legacy", 2, `{"legacy":"item"}`),
+	}
+	parts, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
+	if err != nil || len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != older.ID {
+		t.Fatalf("legacy no-contentParts candidate = %#v, err=%v; want older image", parts, err)
+	}
+}
+
+func TestProjectAssistantModelImageBoundsDeduplicateAndFailClosed(t *testing.T) {
+	image := []byte("image")
+	duplicate := attachmentReceiptForTest("image-duplicate", "screen.png", "image/png", image)
+	parts, err := projectAssistantAttachmentReceiptsForModel([]projectAssistantContentPart{
+		projectAssistantContentPartAttachment(duplicate),
+		projectAssistantContentPartAttachment(duplicate),
+	})
+	if err != nil || len(parts) != 1 || parts[0].ID != duplicate.ID {
+		t.Fatalf("deduplicated image receipts = %#v, err=%v", parts, err)
+	}
+	overCount := make([]projectAssistantContentPart, 0, projectAssistantRetainedImageMaxCount+1)
+	for index := 0; index <= projectAssistantRetainedImageMaxCount; index++ {
+		receipt := attachmentReceiptForTest(fmt.Sprintf("image-%d", index), "screen.png", "image/png", image)
+		overCount = append(overCount, projectAssistantContentPartAttachment(receipt))
+	}
+	if _, err := projectAssistantAttachmentReceiptsForModel(overCount); err == nil || !strings.Contains(err.Error(), "more than 4 images") {
+		t.Fatalf("image count bounds error = %v", err)
+	}
+	overBytes := []projectAssistantContentPart{
+		projectAssistantContentPartAttachment(attachmentReceiptForTest("image-big-1", "screen.png", "image/png", image)),
+		projectAssistantContentPartAttachment(attachmentReceiptForTest("image-big-2", "screen.png", "image/png", image)),
+	}
+	overBytes[0].Attachment.SizeBytes = projectAssistantRetainedImageMaxBytes
+	overBytes[1].Attachment.SizeBytes = 1
+	if _, err := projectAssistantAttachmentReceiptsForModel(overBytes); err == nil || !strings.Contains(err.Error(), "exceed") {
+		t.Fatalf("image aggregate bounds error = %v", err)
+	}
+
+	state := newProjectEinoAssistantRunState()
+	missing := attachmentReceiptForTest("image-missing", "missing.png", "image/png", image)
+	state.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(missing)})
+	_, err = projectAssistantAttachmentMessages(context.Background(), projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{}},
+	}, state)
+	if err == nil || !strings.Contains(err.Error(), "not returned as one complete bounded object") {
+		t.Fatalf("missing retained bytes error = %v", err)
+	}
+}
+
+func TestProjectEinoAssistantLifecycleRehydratesVerifiedImageAfterRewrite(t *testing.T) {
+	oldImage := []byte("stale image")
+	newImage := []byte("fresh image")
+	receipt := attachmentReceiptForTest("image-rewrite", "screen.png", "image/png", newImage)
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(receipt)})
+	reader := projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{receipt.ID: newImage}}
+	staleBase64 := base64.StdEncoding.EncodeToString(oldImage)
+	stale := schema.UserMessage("")
+	stale.Extra = map[string]any{
+		projectAssistantAttachmentMessageKindKey:     true,
+		projectAssistantAttachmentMessageIDKey:       receipt.ID,
+		projectAssistantAttachmentMessageFilenameKey: receipt.Filename,
+	}
+	stale.UserInputMultiContent = []schema.MessageInputPart{{
+		Type:  schema.ChatMessagePartTypeImageURL,
+		Image: &schema.MessageInputImage{MessagePartCommon: schema.MessagePartCommon{Base64Data: &staleBase64, MIMEType: receipt.ContentType}},
+	}}
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{
+		schema.SystemMessage("authoritative context"), stale, schema.UserMessage("what is in the photo?"),
+	}}
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		AttachmentReader: reader,
+	}, runState).(*projectEinoAssistantLifecycle)
+	if err := lifecycle.rehydrateAttachmentMessages(context.Background(), state); err != nil {
+		t.Fatalf("rehydrate image message: %v", err)
+	}
+	var fresh *schema.Message
+	for _, message := range state.Messages {
+		if !projectEinoAssistantAttachmentMessage(message) {
+			continue
+		}
+		if fresh != nil {
+			t.Fatal("rehydration retained more than one synthetic image message")
+		}
+		fresh = message
+	}
+	if fresh == nil || len(fresh.UserInputMultiContent) != 2 || fresh.UserInputMultiContent[1].Image == nil || fresh.UserInputMultiContent[1].Image.Base64Data == nil {
+		t.Fatalf("rehydrated image message = %#v", fresh)
+	}
+	if *fresh.UserInputMultiContent[1].Image.Base64Data != base64.StdEncoding.EncodeToString(newImage) {
+		t.Fatalf("rehydrated image bytes = %q, want fresh bytes", *fresh.UserInputMultiContent[1].Image.Base64Data)
+	}
+	if *fresh.UserInputMultiContent[1].Image.Base64Data == staleBase64 {
+		t.Fatal("rehydration retained stale image bytes")
+	}
+	if _, _, err := lifecycle.AfterModelRewriteState(context.Background(), state, nil); err != nil {
+		t.Fatalf("strip model-only image message: %v", err)
+	}
+	for _, message := range state.Messages {
+		if projectEinoAssistantAttachmentMessage(message) {
+			t.Fatal("model-only image message remained in Eino state after model response")
+		}
+	}
+	projected := projectEinoMessagesToChat(state.Messages)
+	if len(projected) != 2 || strings.Contains(fmt.Sprint(projected), staleBase64) || strings.Contains(fmt.Sprint(projected), string(newImage)) {
+		t.Fatalf("durable projection leaked image bytes: %#v", projected)
+	}
+}
+
+func TestProjectEinoAssistantLifecycleReportsImageRehydrateFailureBeforeModelCallback(t *testing.T) {
+	image := []byte("image bytes")
+	receipt := attachmentReceiptForTest("image-pre-callback-failure", "screen.png", "image/png", image)
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(receipt)})
+	var events []projectAssistantModelInputEvent
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{}},
+		StreamCallbacks: projectAssistantStreamCallbacks{
+			OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+		},
+	}, runState).(*projectEinoAssistantLifecycle)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("what is in the image?")}}
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err == nil {
+		t.Fatal("expected model-input rehydration failure")
+	}
+	if len(events) != 1 {
+		t.Fatalf("pre-callback image failure events = %#v, want one", events)
+	}
+	event := events[0]
+	if event.ID != "image-input-"+receipt.ID || event.Filename != receipt.Filename || event.ContentType != receipt.ContentType || event.Status != "failed" {
+		t.Fatalf("pre-callback image failure event = %#v", event)
+	}
+	if event.Error != "image attachment could not be included in model input" || strings.Contains(event.Error, receipt.SHA256) {
+		t.Fatalf("pre-callback image failure error = %q", event.Error)
+	}
+	// Re-entering the same failed boundary must not append another failure.
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err == nil {
+		t.Fatal("second model-input rehydration unexpectedly succeeded")
+	}
+	if len(events) != 1 {
+		t.Fatalf("repeated pre-callback image failure events = %#v, want one", events)
+	}
+}
+
+func TestProjectEinoAssistantLifecycleReportsLaterRehydrateFailureAfterPriorImageWasViewed(t *testing.T) {
+	image := []byte("image bytes")
+	receipt := attachmentReceiptForTest("image-later-pre-callback-failure", "screen.png", "image/png", image)
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(receipt)})
+	reader := projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{receipt.ID: image}}
+	var events []projectAssistantModelInputEvent
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		AttachmentReader: reader,
+		StreamCallbacks: projectAssistantStreamCallbacks{
+			OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+		},
+	}, runState).(*projectEinoAssistantLifecycle)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("what is in the image?")}}
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err != nil {
+		t.Fatalf("first model boundary: %v", err)
+	}
+	handler := newProjectEinoAssistantModelCallbackHandler(projectAssistantStreamCallbacks{
+		OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+	}, runState, nil)
+	ctx := handler.OnStart(context.Background(), nil, &einomodel.CallbackInput{Messages: state.Messages})
+	handler.OnEnd(ctx, nil, &einomodel.CallbackOutput{Message: schema.AssistantMessage("I can see it.", nil)})
+	if len(events) != 2 || events[0].Status != "started" || events[1].Status != "completed" {
+		t.Fatalf("first image lifecycle events = %#v, want started then completed", events)
+	}
+
+	// The next lifecycle boundary runs rehydration before allocating its next
+	// model-call ordinal. A prior callback's ordinal must not suppress this
+	// boundary's failure evidence.
+	lifecycle.req.AttachmentReader = projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{}}
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err == nil {
+		t.Fatal("second model boundary unexpectedly succeeded")
+	}
+	if len(events) != 3 || events[2].Status != "failed" || events[2].ID != events[0].ID {
+		t.Fatalf("second image lifecycle events = %#v, want a failed event for the same image", events)
+	}
+}
+
+func TestProjectEinoAssistantInputMessagesKeepAttachmentBytesOutOfEinoRootInput(t *testing.T) {
+	image := []byte("root input image")
+	receipt := attachmentReceiptForTest("image-root-input", "screen.png", "image/png", image)
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(receipt)})
+	messages, err := projectEinoAssistantInputMessages(context.Background(), projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{receipt.ID: image}},
+		Conversation:     []chatMessage{{Role: "user", Content: "what is in the photo?"}},
+	}, runState, false)
+	if err != nil {
+		t.Fatalf("build Eino root input: %v", err)
+	}
+	for _, message := range messages {
+		if projectEinoAssistantAttachmentMessage(message) {
+			t.Fatal("attachment bytes were placed in Eino root input; they must be added only at model boundary")
+		}
 	}
 }
 

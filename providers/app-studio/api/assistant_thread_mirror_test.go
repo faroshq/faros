@@ -304,6 +304,110 @@ func TestProjectAssistantThreadSnapshotScopesReusedActionIDPerSegment(t *testing
 	}
 }
 
+func TestProjectAssistantThreadSnapshotMirrorsImageModelInputWithoutDuplicateAfterReload(t *testing.T) {
+	inner := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, inner, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	now := time.Now().UTC()
+	thread := store.AssistantThread{ID: "thread-image-model-input", ActorID: "alice", CreatedAt: now, UpdatedAt: now}
+	if _, err := inner.CreateAssistantThread(context.Background(), scope, thread, nil); err != nil {
+		t.Fatal(err)
+	}
+	turn := store.AssistantTurn{ID: "turn-image-model-input", ThreadID: thread.ID, Mode: store.AssistantRunModeDefault}
+	run := store.AssistantRun{ID: turn.ID, ActiveMessageID: "assistant-image-model-input", Status: store.AssistantRunStatusRunning}
+	action := projectAssistantActionFeedItem{
+		ID: "feed-image-model-input", Kind: projectAssistantActionFeedItemInspect,
+		MediaKind: projectAssistantActionFeedMediaImage, Status: projectAssistantActionFeedStatusRunning,
+		Title: "Viewing image", Target: "screen.png", Severity: projectAssistantActionFeedSeverityNormal, Sequence: 1,
+	}
+	snapshot := func(action projectAssistantActionFeedItem) projectAssistantRunSnapshot {
+		return projectAssistantRunSnapshot{Run: run, Message: store.Message{
+			ID:       run.ActiveMessageID,
+			Metadata: map[string]any{projectMessageMetadataAssistantActionFeed: []projectAssistantActionFeedItem{action}},
+		}}
+	}
+	state := assistantThreadMirrorState{actionStatuses: map[string]string{}}
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, run, &state, snapshot(action)); err != nil {
+		t.Fatal(err)
+	}
+	modelInputID := assistantThreadModelInputItemID(run.ActiveMessageID, action.ID)
+	events, err := inner.ListAssistantThreadEvents(context.Background(), scope, thread.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countAssistantThreadMirrorTestEvents(events, assistantThreadEventItemStarted, modelInputID); got != 1 {
+		t.Fatalf("model-input started events = %d, want one: %#v", got, events)
+	}
+	var started assistantThreadItem
+	for _, event := range events {
+		if event.ItemID != modelInputID || event.Type != assistantThreadEventItemStarted {
+			continue
+		}
+		var envelope struct {
+			Item assistantThreadItem `json:"item"`
+		}
+		if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		started = envelope.Item
+	}
+	if started.Type != assistantThreadEventModelInput || started.Status != "in_progress" {
+		t.Fatalf("started model-input item = %#v", started)
+	}
+
+	// A fresh mirror process must reconstruct the model-input status and avoid
+	// appending another item.started event when it observes the same snapshot.
+	reloaded, err := server.loadAssistantThreadMirrorState(context.Background(), scope, thread.ID, run.ActiveMessageID, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.actionStatuses[modelInputID] != projectAssistantActionFeedStatusRunning {
+		t.Fatalf("reloaded model-input status = %#v", reloaded.actionStatuses)
+	}
+	eventCount := len(events)
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, run, &reloaded, snapshot(action)); err != nil {
+		t.Fatal(err)
+	}
+	events, err = inner.ListAssistantThreadEvents(context.Background(), scope, thread.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != eventCount {
+		t.Fatalf("reloaded running model-input snapshot appended duplicate: before=%d after=%d", eventCount, len(events))
+	}
+
+	action.Status = projectAssistantActionFeedStatusSucceeded
+	action.Title = "Viewed image"
+	if err := server.projectAssistantThreadSnapshot(context.Background(), scope, thread.ID, turn, run, &reloaded, snapshot(action)); err != nil {
+		t.Fatal(err)
+	}
+	modelInputEvents, err := inner.ListAssistantThreadEvents(context.Background(), scope, thread.ID, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countAssistantThreadMirrorTestEvents(modelInputEvents, assistantThreadEventItemCompleted, modelInputID); got != 1 {
+		t.Fatalf("model-input completed events = %d, want one: %#v", got, modelInputEvents)
+	}
+	items := materializeAssistantThreadItems(modelInputEvents)
+	var terminal *assistantThreadItem
+	for i := range items {
+		if items[i].ID == modelInputID {
+			terminal = &items[i]
+			break
+		}
+	}
+	if terminal == nil || terminal.Type != assistantThreadEventModelInput || terminal.Status != "completed" {
+		t.Fatalf("reloaded terminal model-input item = %#v", terminal)
+	}
+	var terminalAction projectAssistantActionFeedItem
+	if err := json.Unmarshal(terminal.Data, &terminalAction); err != nil {
+		t.Fatal(err)
+	}
+	if terminalAction.Title != "Viewed image" || terminalAction.MediaKind != projectAssistantActionFeedMediaImage {
+		t.Fatalf("terminal model-input action = %#v", terminalAction)
+	}
+}
+
 func TestProjectAssistantThreadSnapshotMirrorsAcceptedProgressAsTypedCommentary(t *testing.T) {
 	inner := store.NewMemoryStore()
 	server := NewWithWorkspace(nil, inner, nil, "", false)

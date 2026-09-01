@@ -47,6 +47,7 @@ type projectEinoAssistantLifecycle struct {
 	steering              <-chan projectAssistantSteeringInput
 	activateSteering      func(context.Context, []projectAssistantSteeringInput) error
 	managedToolNames      map[string]struct{}
+	modelInputFailureIDs  map[string]struct{}
 	liveContext           string
 	liveContextReady      bool
 	liveContextGeneration uint64
@@ -138,6 +139,13 @@ func (m *projectEinoAssistantLifecycle) BeforeModelRewriteState(
 	if err := m.rewriteLiveContext(ctx, state); err != nil {
 		return ctx, state, err
 	}
+	// rewriteLiveContext round-trips model state through the durable chat
+	// projection, which intentionally drops binary content. Rebuild the
+	// attachment messages after that authoritative rewrite on every boundary;
+	// this also replaces stale synthetic messages left by a retry or compaction.
+	if err := m.rehydrateAttachmentMessages(ctx, state); err != nil {
+		return ctx, state, err
+	}
 	ordinal := m.runState.NextModelCallOrdinal()
 	if m.auditRecorder != nil {
 		sourceRevision, verifiedRevision := m.runState.SourceMutationRevisions()
@@ -155,6 +163,105 @@ func (m *projectEinoAssistantLifecycle) BeforeModelRewriteState(
 		}
 	}
 	return ctx, state, nil
+}
+
+func (m *projectEinoAssistantLifecycle) rehydrateAttachmentMessages(ctx context.Context, state *adk.ChatModelAgentState) error {
+	if m == nil || state == nil || m.runState == nil {
+		return nil
+	}
+	withoutAttachments := projectEinoAssistantMessagesWithoutAttachments(state.Messages)
+	attachments, err := projectAssistantAttachmentMessages(ctx, m.req, m.runState)
+	if err != nil {
+		m.emitAttachmentRehydrateFailure(err)
+		return err
+	}
+	state.Messages = append(withoutAttachments, attachments...)
+	return nil
+}
+
+func (m *projectEinoAssistantLifecycle) emitAttachmentRehydrateFailure(err error) {
+	if m == nil || m.runState == nil || m.req.StreamCallbacks.OnModelInput == nil {
+		return
+	}
+	parts := projectAssistantRunContentParts(m.req, m.runState)
+	var failedReceipt projectAssistantAttachmentReceipt
+	var found bool
+	var modelInputErr *projectAssistantAttachmentModelInputError
+	if errors.As(err, &modelInputErr) && modelInputErr != nil {
+		failedReceipt = modelInputErr.receipt
+		found = projectAssistantAttachmentIsImage(failedReceipt)
+	}
+	if !found {
+		for _, part := range parts {
+			if part.Type != projectAssistantContentPartAttachmentType || part.Attachment == nil || !projectAssistantAttachmentIsImage(*part.Attachment) {
+				continue
+			}
+			failedReceipt = *part.Attachment
+			found = true
+			break
+		}
+	}
+	if !found || strings.TrimSpace(failedReceipt.ID) == "" {
+		return
+	}
+	normalized, normalizeErr := normalizeProjectAssistantAttachmentReceipt(&failedReceipt)
+	receiptID := strings.TrimSpace(failedReceipt.ID)
+	filename := projectAssistantActionSafeTarget(failedReceipt.Filename)
+	contentType := projectAssistantActionSafeTarget(failedReceipt.ContentType)
+	if normalizeErr == nil && normalized != nil {
+		receiptID = normalized.ID
+		filename = projectAssistantActionSafeTarget(normalized.Filename)
+		contentType = projectAssistantActionSafeTarget(normalized.ContentType)
+	} else {
+		// Invalid receipt IDs cannot reach a provider callback. Keep their
+		// pre-callback diagnostic identity opaque and bounded.
+		receiptID = projectAssistantActionPublicID(receiptID)
+	}
+	eventID := "image-input-" + receiptID
+	ordinal := m.runState.CurrentModelCallOrdinal()
+	if m.modelInputFailureIDs == nil {
+		m.modelInputFailureIDs = map[string]struct{}{}
+	}
+	if _, exists := m.modelInputFailureIDs[eventID]; exists {
+		return
+	}
+	m.modelInputFailureIDs[eventID] = struct{}{}
+	m.req.StreamCallbacks.OnModelInput(projectAssistantModelInputEvent{
+		ID:          eventID,
+		Filename:    filename,
+		ContentType: contentType,
+		Status:      "failed",
+		Error:       "image attachment could not be included in model input",
+		Ordinal:     ordinal,
+	})
+}
+
+// AfterModelRewriteState runs after a provider response has been accepted. The
+// attachment messages are model-input-only: keeping them on Eino's session
+// state would make the framework's opaque interrupt checkpoint serialize the
+// verified image bytes. The next model boundary rehydrates them from the
+// receipt metadata through projectAssistantAttachmentMessages.
+func (m *projectEinoAssistantLifecycle) AfterModelRewriteState(
+	ctx context.Context,
+	state *adk.ChatModelAgentState,
+	modelCtx *adk.ModelContext,
+) (context.Context, *adk.ChatModelAgentState, error) {
+	if state == nil {
+		return ctx, state, nil
+	}
+	state.Messages = projectEinoAssistantMessagesWithoutAttachments(state.Messages)
+	return ctx, state, nil
+}
+
+func projectEinoAssistantMessagesWithoutAttachments(messages []*schema.Message) []*schema.Message {
+	withoutAttachments := make([]*schema.Message, 0, len(messages))
+	for _, message := range messages {
+		if projectEinoAssistantAttachmentMessage(message) {
+			continue
+		}
+		withoutAttachments = append(withoutAttachments, message)
+	}
+	return withoutAttachments
 }
 
 func (m *projectEinoAssistantLifecycle) refreshExecutableToolContext(

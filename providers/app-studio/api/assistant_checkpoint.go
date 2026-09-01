@@ -1052,6 +1052,16 @@ func (s *Server) resumeClaimedProjectAssistantRunWithEinoCheckpoint(
 				streamToolCall(toolCall)
 				persistMetadata(ctx, nil)
 			},
+			OnModelInput: func(event projectAssistantModelInputEvent) {
+				callbackMu.Lock()
+				defer callbackMu.Unlock()
+				if callbacksClosed {
+					return
+				}
+				syncSteeringSegment()
+				metadataState.upsertModelInput(event)
+				persistMetadata(ctx, nil)
+			},
 			OnAssistantEvent: emitAssistantEvent,
 		},
 	}

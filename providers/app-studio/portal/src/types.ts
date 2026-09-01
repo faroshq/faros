@@ -279,6 +279,7 @@ export interface ProjectAssistantRunStart {
 }
 
 export type ProjectAssistantActionKind = 'inspect' | 'clarify' | 'edit' | 'run' | 'commit' | 'plan' | 'other'
+export type ProjectAssistantActionMediaKind = 'image'
 export type ProjectAssistantActionStatus = 'running' | 'waiting' | 'succeeded' | 'skipped' | 'failed' | 'rejected' | 'canceled' | 'retrying' | 'recovered'
 export type ProjectAssistantActionSeverity = 'normal' | 'attention' | 'error'
 export type ProjectAssistantDiagnosticCategory = 'timeout' | 'permission' | 'validation' | 'runtime' | 'provider' | 'unknown'
@@ -316,6 +317,7 @@ export interface ProjectAssistantExecDisclosure {
 export interface ProjectAssistantActionFeedItem {
   id: string
   kind: ProjectAssistantActionKind
+  mediaKind?: ProjectAssistantActionMediaKind
   status: ProjectAssistantActionStatus
   title: string
   target?: string

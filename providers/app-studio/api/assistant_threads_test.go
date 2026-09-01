@@ -119,6 +119,73 @@ func TestMaterializeAssistantThreadItemsPreservesTypedCommentaryAndTerminalPhase
 	}
 }
 
+func TestMaterializeAssistantThreadItemsRepairsUnfinishedImageModelInputOnTerminalReload(t *testing.T) {
+	action := projectAssistantActionFeedItem{
+		ID:        "feed-image-reload",
+		Kind:      projectAssistantActionFeedItemInspect,
+		MediaKind: projectAssistantActionFeedMediaImage,
+		Status:    projectAssistantActionFeedStatusRunning,
+		Title:     "Viewing image",
+		Target:    "screen.png",
+		Severity:  projectAssistantActionFeedSeverityNormal,
+		Sequence:  1,
+	}
+	actionData, err := json.Marshal(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name              string
+		terminalEventType string
+		wantItemStatus    string
+		wantActionStatus  string
+		wantTitle         string
+	}{
+		{name: "completed turn without accepted image result", terminalEventType: assistantThreadEventTurnCompleted, wantItemStatus: "failed", wantActionStatus: projectAssistantActionFeedStatusFailed, wantTitle: "Image view failed"},
+		{name: "failed turn", terminalEventType: assistantThreadEventTurnFailed, wantItemStatus: "failed", wantActionStatus: projectAssistantActionFeedStatusFailed, wantTitle: "Image view failed"},
+		{name: "interrupted turn", terminalEventType: assistantThreadEventTurnInterrupted, wantItemStatus: "canceled", wantActionStatus: projectAssistantActionFeedStatusCanceled, wantTitle: "Image view canceled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			item := assistantThreadItem{
+				ID: "model-input-assistant-feed-image-reload", TurnID: "turn-image-reload", Type: assistantThreadEventModelInput,
+				Status: "in_progress", Content: "Viewing image", Data: actionData,
+			}
+			itemPayload, marshalErr := json.Marshal(map[string]any{"item": item})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			events := []store.AssistantThreadEvent{
+				{TurnID: item.TurnID, Sequence: 1, Type: assistantThreadEventItemStarted, ItemID: item.ID, Payload: itemPayload},
+				{TurnID: item.TurnID, Sequence: 2, Type: test.terminalEventType, Payload: []byte(`{}`)},
+			}
+			items := materializeAssistantThreadItems(events)
+			if len(items) != 1 {
+				t.Fatalf("materialized terminal items = %#v", items)
+			}
+			got := items[0]
+			if got.Status != test.wantItemStatus || got.Content != test.wantTitle {
+				t.Fatalf("materialized image item = %#v, want status=%q title=%q", got, test.wantItemStatus, test.wantTitle)
+			}
+			var gotAction projectAssistantActionFeedItem
+			if err := json.Unmarshal(got.Data, &gotAction); err != nil {
+				t.Fatal(err)
+			}
+			if gotAction.Status != test.wantActionStatus || gotAction.Title != test.wantTitle || gotAction.MediaKind != projectAssistantActionFeedMediaImage {
+				t.Fatalf("materialized image action = %#v", gotAction)
+			}
+			if gotAction.Title == "Viewed image" || gotAction.Outcome != "" {
+				t.Fatalf("terminal image action falsely claims viewed: %#v", gotAction)
+			}
+			// Re-materializing after a reload is deterministic and does not
+			// resurrect the in-progress synthetic item.
+			reloaded := materializeAssistantThreadItems(events)
+			if len(reloaded) != 1 || reloaded[0].Status != test.wantItemStatus || reloaded[0].Content != test.wantTitle {
+				t.Fatalf("reloaded image item = %#v", reloaded)
+			}
+		})
+	}
+}
+
 func TestAttachAssistantThreadMessagePresentationRepairsHistoricalItems(t *testing.T) {
 	memoryStore := store.NewMemoryStore()
 	server := NewWithWorkspace(nil, memoryStore, nil, "", false)

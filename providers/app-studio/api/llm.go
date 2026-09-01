@@ -247,6 +247,18 @@ type projectAssistantReply struct {
 	ToolCalls []chatToolCall
 }
 
+// projectAssistantModelInputEvent is server-owned evidence that a receipt was
+// included in a provider request. It is intentionally separate from tool-call
+// events: direct multimodal input is not a model-authored view_image call.
+type projectAssistantModelInputEvent struct {
+	ID          string
+	Filename    string
+	ContentType string
+	Status      string
+	Error       string
+	Ordinal     int
+}
+
 type projectAssistantStreamCallbacks struct {
 	OnChunk func(string)
 	// OnCommentary carries one completed, tool-adjacent assistant prose block.
@@ -260,6 +272,7 @@ type projectAssistantStreamCallbacks struct {
 	OnStatus           func(string)
 	OnPlan             func(projectAssistantPlanSnapshot)
 	OnToolCall         func(projectToolCallStreamEvent)
+	OnModelInput       func(projectAssistantModelInputEvent)
 	OnAssistantEvent   func(projectAssistantEvent)
 }
 
@@ -453,6 +466,13 @@ func (s *Server) generateProjectAssistantResultWithStart(
 		profile = projectAssistantTurnProfileDebugging
 	}
 	turnPolicy := projectAssistantTurnPolicyForProfile(profile)
+	var modelContentParts []projectAssistantContentPart
+	if start != nil {
+		modelContentParts, err = s.projectAssistantModelContentPartsForStart(ctx, messageScope, start.ThreadID, start.ContentParts)
+		if err != nil {
+			return projectAssistantRunResult{}, err
+		}
+	}
 	req := projectAssistantRunRequest{
 		Identity:                 id,
 		ToolPort:                 newProjectAssistantHTTPToolPort(s, r),
@@ -496,7 +516,7 @@ func (s *Server) generateProjectAssistantResultWithStart(
 	}
 	if start != nil {
 		req.SelectedContextResources = cloneProjectAssistantContextResourceReceipts(start.SelectedContextResources)
-		req.ContentParts = cloneProjectAssistantContentParts(start.ContentParts)
+		req.ContentParts = cloneProjectAssistantContentParts(modelContentParts)
 	}
 	result, err := s.projectAssistantEngine().StreamProjectAssistant(ctx, req)
 	if err != nil {

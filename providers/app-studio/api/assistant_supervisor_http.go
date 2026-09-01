@@ -597,6 +597,7 @@ type projectAssistantDurableMetadataState struct {
 	status             string
 	provisional        bool
 	toolCalls          []projectToolCallStreamEvent
+	modelInputs        []projectAssistantActionFeedItem
 	plan               *projectAssistantPlanSnapshot
 	initialBuild       bool
 	progressMessages   []string
@@ -688,6 +689,33 @@ func (s *projectAssistantDurableMetadataState) upsertToolCall(event projectToolC
 		s.actionSequences[publicID] = event.Sequence
 	}
 	s.toolCalls = upsertProjectToolCallStreamEvent(s.toolCalls, event)
+}
+
+func (s *projectAssistantDurableMetadataState) upsertModelInput(event projectAssistantModelInputEvent) {
+	if s == nil || strings.TrimSpace(event.ID) == "" {
+		return
+	}
+	action := projectAssistantActionFeedItemFromModelInput(event)
+	if action.ID == "" {
+		return
+	}
+	// Model callback ordinals identify provider calls, not durable action-feed
+	// order. Allocate this action's sequence from the same server-owned trace
+	// counter as tool activity and retain it by stable public ID on updates.
+	action.Sequence = 0
+	if sequence, ok := s.actionSequences[action.ID]; ok {
+		action.Sequence = sequence
+	}
+	if action.Sequence == 0 {
+		action.Sequence = s.nextSequence()
+	}
+	if s.actionSequences == nil {
+		s.actionSequences = map[string]int{}
+	}
+	if action.Sequence > 0 {
+		s.actionSequences[action.ID] = action.Sequence
+	}
+	s.modelInputs = upsertProjectAssistantActionFeedItem(s.modelInputs, action)
 }
 
 func (s *projectAssistantDurableMetadataState) nextSequence() int {
@@ -785,6 +813,9 @@ func (s *Server) persistProjectAssistantDurableMetadataWith(ctx context.Context,
 		// Keep that history and only upsert new action updates.
 		actions := projectAssistantActionFeedFromMetadata(message.Metadata[projectMessageMetadataAssistantActionFeed])
 		for _, action := range projectAssistantActionFeedUpdatesFromToolCalls(state.toolCalls) {
+			actions = applyProjectAssistantActionFeedUpdate(actions, action)
+		}
+		for _, action := range state.modelInputs {
 			actions = applyProjectAssistantActionFeedUpdate(actions, action)
 		}
 		if assistantRunTerminal(run.Status) {
@@ -953,6 +984,18 @@ func (s *Server) runProjectAssistantWorker(ctx context.Context, accumulator *pro
 				if projectAssistantToolCallCanSettleStopping(event.Status) {
 					return s.persistProjectAssistantStoppingToolMetadata(persistCtx, accumulator, workspaceScope, state)
 				}
+				return s.persistProjectAssistantDurableMetadata(persistCtx, accumulator, workspaceScope, state, nil)
+			}))
+		},
+		OnModelInput: func(event projectAssistantModelInputEvent) {
+			callbackMu.Lock()
+			defer callbackMu.Unlock()
+			if callbacksClosed {
+				return
+			}
+			syncSteeringSegment()
+			state.upsertModelInput(event)
+			recordSnapshotErr(persistProjectAssistantToolCallSnapshot(ctx, func(persistCtx context.Context) error {
 				return s.persistProjectAssistantDurableMetadata(persistCtx, accumulator, workspaceScope, state, nil)
 			}))
 		},

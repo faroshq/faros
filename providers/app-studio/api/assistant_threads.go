@@ -52,6 +52,7 @@ const (
 	assistantThreadEventUserMessage           = "userMessage"
 	assistantThreadEventAssistantMessageDelta = "agentMessageDelta"
 	assistantThreadEventDynamicToolCall       = "dynamicToolCall"
+	assistantThreadEventModelInput            = "modelInput"
 	assistantThreadEventPlan                  = "plan"
 )
 
@@ -603,6 +604,7 @@ func (s *Server) startProjectAssistantThreadExecution(w http.ResponseWriter, r *
 	},
 		func(created store.AssistantRun, assistant store.Message, transcriptEmpty bool) (callbackErr error) {
 			start := &projectAssistantStreamStart{
+				ThreadID:      thread.ID,
 				SkillSnapshot: &skillSnapshot, SelectedSkills: cloneProjectAssistantSkillReceipts(selectedSkills),
 				SelectedContextResources: cloneProjectAssistantContextResourceReceipts(selectedContextResources),
 				ContentParts:             cloneProjectAssistantContentParts(request.ContentParts),
@@ -1396,6 +1398,8 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 				switch items[index].Type {
 				case "approval", "input":
 					items[index].Status = "completed"
+				case assistantThreadEventModelInput:
+					repairMaterializedAssistantModelInput(&items[index], terminalStatus)
 				case assistantThreadEventAssistantMessage:
 					if items[index].Phase == "commentary" {
 						items[index].Status = "completed"
@@ -1407,6 +1411,10 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 					}
 				}
 			}
+			if items[index].Type == assistantThreadEventModelInput &&
+				items[index].Status != "in_progress" && assistantThreadModelInputItemIsInProgress(items[index]) {
+				repairMaterializedAssistantModelInput(&items[index], terminalStatus)
+			}
 			if items[index].Type == assistantThreadEventAssistantMessage && items[index].Phase == "" &&
 				(items[index].Status == "completed" || items[index].Status == "failed" || items[index].Status == "interrupted") {
 				items[index].Phase = "final_answer"
@@ -1414,6 +1422,62 @@ func materializeAssistantThreadItems(events []store.AssistantThreadEvent) []assi
 		}
 	}
 	return items
+}
+
+func assistantThreadModelInputItemIsInProgress(item assistantThreadItem) bool {
+	if item.Status == "in_progress" {
+		return true
+	}
+	var action projectAssistantActionFeedItem
+	if len(item.Data) == 0 || json.Unmarshal(item.Data, &action) != nil {
+		return false
+	}
+	return action.Status == projectAssistantActionFeedStatusRunning ||
+		action.Status == projectAssistantActionFeedStatusRetrying ||
+		action.Status == projectAssistantActionFeedStatusWaiting
+}
+
+// repairMaterializedAssistantModelInput closes a model-input item when its
+// turn reached a terminal event before the provider callback could publish a
+// terminal image result. A completed turn is still treated as failed here:
+// without accepted provider evidence it must never be presented as viewed.
+func repairMaterializedAssistantModelInput(item *assistantThreadItem, terminalStatus string) {
+	if item == nil {
+		return
+	}
+	actionStatus := projectAssistantActionFeedStatusFailed
+	threadStatus := "failed"
+	title := "Image view failed"
+	if terminalStatus == "interrupted" {
+		actionStatus = projectAssistantActionFeedStatusCanceled
+		threadStatus = "canceled"
+		title = "Image view canceled"
+	}
+	item.Status = threadStatus
+	item.Content = title
+
+	var action projectAssistantActionFeedItem
+	if len(item.Data) > 0 {
+		_ = json.Unmarshal(item.Data, &action)
+	}
+	if action.ID == "" {
+		action.ID = projectAssistantActionPublicID(item.ID)
+	}
+	if action.Kind == "" {
+		action.Kind = projectAssistantActionFeedItemInspect
+	}
+	action.MediaKind = projectAssistantActionFeedMediaImage
+	action.Status = actionStatus
+	action.Title = title
+	action.Outcome = ""
+	action.Severity = projectAssistantActionFeedItemSeverity(actionStatus)
+	action.Diagnostic = nil
+	if actionStatus == projectAssistantActionFeedStatusFailed {
+		action.Diagnostic = projectAssistantActionFeedDiagnostic(action.ID, "assistant turn ended before the image was accepted")
+	}
+	if data, err := json.Marshal(action); err == nil {
+		item.Data = data
+	}
 }
 
 // assistantThreadItemWithMessagePresentation carries the durable presentation

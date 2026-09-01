@@ -1043,6 +1043,9 @@ func appendProjectUserMessage(ctx context.Context, msgStore store.Store, scope s
 }
 
 type projectAssistantStreamStart struct {
+	// ThreadID lets the model boundary recover the latest prior image receipt
+	// without placing thread routing state in the provider-facing request.
+	ThreadID                 string
 	InitialApprovedPlan      *projectAssistantApprovedPlan
 	SkillSnapshot            *appskills.Snapshot
 	SelectedSkills           []projectAssistantSkillReceipt
@@ -1359,6 +1362,9 @@ func applyProjectAssistantActionFeedUpdate(actions []projectAssistantActionFeedI
 func mergeProjectAssistantActionFeedItem(existing, next projectAssistantActionFeedItem) projectAssistantActionFeedItem {
 	if next.Kind == "" {
 		next.Kind = existing.Kind
+	}
+	if next.MediaKind == "" {
+		next.MediaKind = existing.MediaKind
 	}
 	if next.Status == "" {
 		next.Status = existing.Status

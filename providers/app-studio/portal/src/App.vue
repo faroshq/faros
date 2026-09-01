@@ -89,7 +89,6 @@ import {
   assistantContentPartsFromThreadItem,
   assistantContextResourcesFromThreadItem,
   assistantSkillsFromThreadItem,
-  assistantThreadItemIdentity,
   assistantThreadItemToRun,
   assistantThreadItemsToMessages,
   assistantThreadItemsToRuns,
@@ -98,6 +97,7 @@ import {
   maxAssistantThreadSequence,
   projectAssistantSkills,
   projectAssistantContextResources,
+  upsertAssistantActionFeed,
 } from './assistantThreadProjection'
 import {
   assistantThreadFocusStorageKey,
@@ -7492,13 +7492,8 @@ function applyAssistantThreadEvent(event: ProjectAssistantThreadEvent, projectNa
       const next = [...messages.value]
       const assistant = next[assistantIndex]
       const metadata = { ...(assistant.metadata ?? {}) }
-      if (rawItem.type === 'dynamicToolCall' && rawItem.data) {
-        const actions = Array.isArray(metadata.assistantActionFeed) ? [...metadata.assistantActionFeed] : []
-        const identity = assistantThreadItemIdentity(rawItem)
-        const actionIndex = actions.findIndex((action) => typeof action === 'object' && action !== null && (action as { id?: string }).id === identity)
-        if (actionIndex >= 0) actions[actionIndex] = rawItem.data
-        else actions.push(rawItem.data)
-        metadata.assistantActionFeed = actions
+      if ((rawItem.type === 'dynamicToolCall' || rawItem.type === 'modelInput') && rawItem.data) {
+        metadata.assistantActionFeed = upsertAssistantActionFeed(metadata.assistantActionFeed, rawItem)
       } else if (rawItem.type === 'plan' && rawItem.data) {
         if (assistantPlanEventIsNewer(metadata, rawItem, event)) {
           const version = assistantPlanEventVersion(rawItem, event)
