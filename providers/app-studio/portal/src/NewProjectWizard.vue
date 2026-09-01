@@ -303,8 +303,8 @@ onMounted(async () => {
         <p class="mt-1 text-[13px] leading-5 text-text-secondary">Share the app, dashboard, workflow, or API you want to make in this Faros workspace. You can review the suggested starting point before anything is created.</p>
       </div>
 
-      <label for="new-project-prompt" class="grid gap-2">
-        <span class="text-[11px] font-semibold uppercase tracking-[0.1em] text-text-secondary">Project description</span>
+      <div class="grid gap-2">
+        <label for="new-project-prompt" class="text-[11px] font-semibold uppercase tracking-[0.1em] text-text-secondary">Project description</label>
         <AssistantPreProjectComposer
           v-model="prompt"
           input-id="new-project-prompt"
@@ -316,7 +316,7 @@ onMounted(async () => {
           @retry-attachment="emit('retry-attachment', $event)"
           @submit="runPlan"
         />
-      </label>
+      </div>
 
       <p v-if="error" role="alert" class="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[12px] text-danger">{{ error }}</p>
 

@@ -468,7 +468,7 @@ func (s *Server) generateProjectAssistantResultWithStart(
 	turnPolicy := projectAssistantTurnPolicyForProfile(profile)
 	var modelContentParts []projectAssistantContentPart
 	if start != nil {
-		modelContentParts, err = s.projectAssistantModelContentPartsForStart(ctx, messageScope, start.ThreadID, start.ContentParts)
+		modelContentParts, err = s.projectAssistantModelContentPartsForStart(ctx, messageScope, start.ThreadID, durable.ID, start.ContentParts)
 		if err != nil {
 			return projectAssistantRunResult{}, err
 		}

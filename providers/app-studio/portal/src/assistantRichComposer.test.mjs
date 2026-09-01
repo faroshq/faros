@@ -109,6 +109,11 @@ test('Add flyouts dismiss on outside pointer/focus while preserving in-composer 
     assert.match(source, /useDismissibleAddMenu\(\{[\s\S]*open: attachmentMenuOpen,[\s\S]*root: addMenuRootRef,[\s\S]*onClose: closeAttachmentMenu/)
     assert.match(source, /role="menu"[\s\S]*aria-label="Add"/)
     assert.match(source, /@click="openAttachmentPicker"/)
+    assert.match(source, /useAssistantFilePickerFocus/)
+    assert.match(source, /waitForPicker\(\)[\s\S]*input\.click\(\)/)
+    assert.match(source, /input\.value = ''[\s\S]*restorePickerFocus\(\)/)
+    assert.match(source, /AssistantAttachmentTextPreview/)
+    assert.match(source, /class="flex min-w-0 max-w-full flex-col items-stretch rounded-sm border/)
   }
   assert.match(rich, /ref="rootRef" class="relative min-h-\[72px\]"[\s\S]*ref="addMenuRootRef" class="contents"/)
   assert.match(preProject, /ref="rootRef"[\s\S]*@paste\.self="handlePaste"[\s\S]*ref="addMenuRootRef" class="contents"/)
@@ -166,7 +171,7 @@ test('regular receipt recovery reuploads retained Files and clears receipt-only 
 })
 
 test('Add menu keyboard navigation wraps, skips disabled entries, and restores trigger focus on Escape', async () => {
-  const { dismissibleMenuNavigationIndex } = await vite.ssrLoadModule('/src/useDismissibleAddMenu.ts')
+  const { dismissibleMenuNavigationIndex, shouldDismissAddMenuEscape } = await vite.ssrLoadModule('/src/useDismissibleAddMenu.ts')
   assert.equal(dismissibleMenuNavigationIndex('ArrowDown', -1, 3), 0)
   assert.equal(dismissibleMenuNavigationIndex('ArrowDown', 2, 3), 0)
   assert.equal(dismissibleMenuNavigationIndex('ArrowUp', -1, 3), 2)
@@ -175,6 +180,11 @@ test('Add menu keyboard navigation wraps, skips disabled entries, and restores t
   assert.equal(dismissibleMenuNavigationIndex('End', 0, 3), 2)
   assert.equal(dismissibleMenuNavigationIndex('ArrowDown', 0, 0), null)
   assert.equal(dismissibleMenuNavigationIndex('PageDown', 0, 3), null)
+  const nestedDialogTarget = { closest: (selector) => selector === '[role="dialog"]' ? {} : null }
+  const menuTarget = { closest: () => null }
+  assert.equal(shouldDismissAddMenuEscape({ key: 'Escape', target: nestedDialogTarget }), false)
+  assert.equal(shouldDismissAddMenuEscape({ key: 'Escape', target: menuTarget }), true)
+  assert.equal(shouldDismissAddMenuEscape({ key: 'Enter', target: menuTarget }), false)
 
   const [rich, preProject, dismiss] = await Promise.all([
     readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8'),
@@ -186,6 +196,8 @@ test('Add menu keyboard navigation wraps, skips disabled entries, and restores t
     assert.match(source, /trigger: attachmentMenuTriggerRef/)
   }
   assert.match(dismiss, /event\.key !== 'Escape'/)
+  assert.match(dismiss, /shouldDismissAddMenuEscape\(event\)/)
+  assert.match(dismiss, /closest\('\[role="dialog"\]'\)/)
   assert.match(dismiss, /onClose\(\)[\s\S]*trigger\.value\?\.focus/)
   assert.match(dismiss, /key === 'ArrowDown'/)
   assert.match(dismiss, /key === 'ArrowUp'/)

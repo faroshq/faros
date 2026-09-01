@@ -4,6 +4,7 @@ import { FileText, Image, Loader2, Paperclip, Plus, RotateCcw, Upload, X } from 
 import { api, isProjectAPINotFoundError } from './api'
 import AssistantCommandPalette from './AssistantCommandPalette.vue'
 import AssistantAttachmentPreview from './AssistantAttachmentPreview.vue'
+import AssistantAttachmentTextPreview from './AssistantAttachmentTextPreview.vue'
 import AssistantMessageAnnotations from './AssistantMessageAnnotations.vue'
 import {
   assistantComposerPlainContent,
@@ -25,6 +26,7 @@ import {
   type AssistantAttachmentStatus,
 } from './assistantAttachments'
 import { useDismissibleAddMenu } from './useDismissibleAddMenu'
+import { useAssistantFilePickerFocus } from './useAssistantFilePickerFocus'
 import type {
   FarosContext,
   ProjectAssistantAttachmentReceipt,
@@ -106,6 +108,12 @@ interface AssistantAttachmentChip {
 }
 
 const attachmentChips = ref<AssistantAttachmentChip[]>([])
+
+const { waitForPicker, restorePickerFocus } = useAssistantFilePickerFocus(() => {
+  const editor = editorRef.value
+  if (editor && editor.contentEditable !== 'false') return editor
+  return attachmentMenuTriggerRef.value
+})
 
 const localAnnotations = computed(() => localParts.value
   .filter((part): part is Extract<ProjectAssistantContentPart, { type: 'annotation' }> => part.type === 'annotation')
@@ -551,6 +559,7 @@ function openAttachmentPicker() {
   const input = attachmentInputRef.value
   if (!input) return
   input.value = ''
+  waitForPicker()
   input.click()
 }
 
@@ -708,6 +717,7 @@ function handleAttachmentInput(event: Event) {
     for (const file of files) await uploadAttachment(file)
   })()
   if (input) input.value = ''
+  restorePickerFocus()
 }
 
 function retryAttachment(chip: AssistantAttachmentChip) {
@@ -1049,7 +1059,7 @@ defineExpose({
         />
         <div
           v-else
-          class="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-sm border px-2 py-1 text-[11px] font-mono"
+          class="flex min-w-0 max-w-full flex-col items-stretch rounded-sm border px-2 py-1 text-[11px] font-mono"
           :class="chip.status === 'error'
             ? 'border-danger/40 bg-danger-subtle text-danger'
             : chip.status === 'ready'
@@ -1057,31 +1067,40 @@ defineExpose({
               : 'border-border-subtle bg-surface-raised text-text-secondary'"
           :title="chip.error || attachmentStatusLabel(chip)"
         >
-          <Loader2 v-if="chip.status === 'uploading' || chip.status === 'deleting'" class="h-3 w-3 shrink-0 animate-spin" :stroke-width="1.75" />
-          <Image v-else-if="chip.receipt?.contentType.startsWith('image/') || (chip.file && assistantAttachmentIsImage(chip.file))" class="h-3 w-3 shrink-0" :stroke-width="1.75" />
-          <FileText v-else class="h-3 w-3 shrink-0" :stroke-width="1.75" />
-          <span class="max-w-48 truncate">{{ attachmentLabel(chip) }}</span>
-          <span class="text-[10px] opacity-75">{{ attachmentStatusLabel(chip) }}</span>
-          <button
-            v-if="chip.status === 'error' && chip.retryAction"
-            type="button"
-            class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-            :aria-label="chip.retryAction === 'delete' ? 'Retry attachment removal' : 'Retry attachment upload'"
-            :title="chip.retryAction === 'delete' ? 'Retry removal' : 'Retry upload'"
-            @click="retryAttachment(chip)"
-          >
-            <RotateCcw class="h-3 w-3" :stroke-width="1.75" />
-          </button>
-          <button
-            v-if="chip.status !== 'deleting'"
-            type="button"
-            class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-            aria-label="Remove attachment"
-            title="Remove attachment"
-            @click="removeAttachment(chip)"
-          >
-            <X class="h-3 w-3" :stroke-width="1.75" />
-          </button>
+          <div class="flex min-w-0 items-center gap-1.5">
+            <Loader2 v-if="chip.status === 'uploading' || chip.status === 'deleting'" class="h-3 w-3 shrink-0 animate-spin" :stroke-width="1.75" />
+            <Image v-else-if="chip.receipt?.contentType.startsWith('image/') || (chip.file && assistantAttachmentIsImage(chip.file))" class="h-3 w-3 shrink-0" :stroke-width="1.75" />
+            <FileText v-else class="h-3 w-3 shrink-0" :stroke-width="1.75" />
+            <span class="max-w-48 truncate">{{ attachmentLabel(chip) }}</span>
+            <span class="text-[10px] opacity-75">{{ attachmentStatusLabel(chip) }}</span>
+            <div class="ml-auto flex shrink-0 items-center gap-0.5">
+              <button
+                v-if="chip.status === 'error' && chip.retryAction"
+                type="button"
+                class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                :aria-label="chip.retryAction === 'delete' ? 'Retry attachment removal' : 'Retry attachment upload'"
+                :title="chip.retryAction === 'delete' ? 'Retry removal' : 'Retry upload'"
+                @click="retryAttachment(chip)"
+              >
+                <RotateCcw class="h-3 w-3" :stroke-width="1.75" />
+              </button>
+              <button
+                v-if="chip.status !== 'deleting'"
+                type="button"
+                class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                aria-label="Remove attachment"
+                title="Remove attachment"
+                @click="removeAttachment(chip)"
+              >
+                <X class="h-3 w-3" :stroke-width="1.75" />
+              </button>
+            </div>
+          </div>
+          <AssistantAttachmentTextPreview
+            v-if="chip.file && !assistantAttachmentIsImage(chip.file)"
+            :file="chip.file"
+            :label="attachmentLabel(chip)"
+          />
         </div>
       </template>
     </div>

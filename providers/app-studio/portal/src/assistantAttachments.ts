@@ -7,6 +7,10 @@ export const MAX_ASSISTANT_ATTACHMENTS_PER_TURN = 8
 export const MAX_ASSISTANT_ATTACHMENT_AGGREGATE_BYTES = 20 << 20
 /** Keep ordinary paste inline; larger content becomes a durable text receipt. */
 export const ASSISTANT_LARGE_PASTE_BYTES = 10 << 10
+/** Read only a small browser-side window when showing a text attachment card. */
+export const ASSISTANT_TEXT_PREVIEW_MAX_BYTES = 4 << 10
+/** Keep the visible text card compact even when its first line is very long. */
+export const ASSISTANT_TEXT_PREVIEW_MAX_CHARS = 180
 export const ASSISTANT_IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp'
 export const ASSISTANT_TEXT_ACCEPT = '.md,.txt,text/plain,text/markdown'
 export const ASSISTANT_ATTACHMENT_ACCEPT = `${ASSISTANT_IMAGE_ACCEPT},${ASSISTANT_TEXT_ACCEPT}`
@@ -119,6 +123,33 @@ export function assistantAttachmentMaxBytes(file: Pick<File, 'name' | 'type'>): 
 
 export function assistantAttachmentPart(receipt: ProjectAssistantAttachmentReceipt) {
   return { type: 'attachment' as const, attachment: receipt }
+}
+
+export interface AssistantAttachmentTextPreview {
+  text: string
+  truncated: boolean
+}
+
+/**
+ * Read a bounded first-line excerpt for a text attachment card. The returned
+ * value is plain text; Vue callers must render it with interpolation rather
+ * than v-html so untrusted file contents stay escaped.
+ */
+export async function readAssistantAttachmentTextPreview(
+  file: Pick<File, 'size' | 'slice'>,
+): Promise<AssistantAttachmentTextPreview> {
+  const source = await file.slice(0, ASSISTANT_TEXT_PREVIEW_MAX_BYTES).text()
+  const normalized = source.replace(/\r\n?/gu, '\n')
+  const lines = normalized.split('\n')
+  const firstContentLine = lines.findIndex((line) => line.trim().length > 0)
+  const firstLine = firstContentLine >= 0 ? lines[firstContentLine].trim() : ''
+  const excerpt = firstLine || (source.trim() ? source.trim().replace(/\s+/gu, ' ') : 'Empty text file')
+  const bounded = Array.from(excerpt).slice(0, ASSISTANT_TEXT_PREVIEW_MAX_CHARS).join('')
+  const hasAdditionalLines = firstContentLine >= 0 && firstContentLine < lines.length - 1
+  return {
+    text: bounded,
+    truncated: bounded !== excerpt || hasAdditionalLines || file.size > ASSISTANT_TEXT_PREVIEW_MAX_BYTES,
+  }
 }
 
 export interface AssistantAttachmentCandidate {

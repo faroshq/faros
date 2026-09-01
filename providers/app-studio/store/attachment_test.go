@@ -366,6 +366,30 @@ func TestParseAttachmentQuotaBytes(t *testing.T) {
 	}
 }
 
+func TestValidateAttachmentIDRejectsReceiptUnsafeCharacters(t *testing.T) {
+	for _, id := range []string{
+		"attachment with spaces",
+		"attachment\twith-tab",
+		"attachment\u2003with-unicode-space",
+		"attachment\x01with-control",
+		"attachment\x7fwith-delete",
+		"attachment?query",
+		"attachment#fragment",
+	} {
+		t.Run(fmt.Sprintf("reject-%q", id), func(t *testing.T) {
+			if err := ValidateAttachmentID(id); err == nil {
+				t.Fatalf("ValidateAttachmentID(%q) unexpectedly succeeded", id)
+			}
+		})
+	}
+
+	for _, id := range []string{"att-1", "attachment:stable-upload", "attachment_2"} {
+		if err := ValidateAttachmentID(id); err != nil {
+			t.Fatalf("ValidateAttachmentID(%q) = %v, want success", id, err)
+		}
+	}
+}
+
 func TestEncryptedStoreEncryptsAttachmentBytesAndVerifiesReceipt(t *testing.T) {
 	ctx := context.Background()
 	base := NewMemoryStore()

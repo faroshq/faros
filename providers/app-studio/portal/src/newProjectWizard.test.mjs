@@ -266,6 +266,12 @@ test('landing intake uses a compact Faros composer with concrete prompts and a r
 })
 
 test('pre-project attachments stay parent-owned across both intake surfaces and hand off receipts with the prompt', () => {
+  const describeStart = wizardSource.indexOf('<div class="grid gap-2">')
+  const describeEnd = wizardSource.indexOf('\n      <p v-if="error"', describeStart)
+  assert.ok(describeStart >= 0 && describeEnd > describeStart, 'project description controls should remain a bounded block')
+  const describeBlock = wizardSource.slice(describeStart, describeEnd)
+  assert.match(describeBlock, /<label for="new-project-prompt"[^>]*>Project description<\/label>\s*<AssistantPreProjectComposer/)
+  assert.doesNotMatch(describeBlock, /<label for="new-project-prompt"[^>]*>[\s\S]*<AssistantPreProjectComposer[\s\S]*<\/label>/)
   assert.match(wizardSource, /AssistantPreProjectComposer/)
   assert.match(wizardSource, /:attachments="attachments"/)
   assert.match(wizardSource, /attachment-only/)

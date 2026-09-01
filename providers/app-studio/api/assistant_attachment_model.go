@@ -319,9 +319,13 @@ func projectAssistantAttachmentReceipts(parts []projectAssistantContentPart) []p
 }
 
 // projectAssistantImageContentPartsFromThreadEvents extracts immutable image
-// receipts from the latest prior user item. Thread items are the canonical
-// conversation projection; the bytes are deliberately not copied here and
-// are verified by AttachmentReader only at the model boundary.
+// receipts from the immediately preceding non-legacy user item. Thread items
+// are the canonical conversation projection; the bytes are deliberately not
+// copied here and are verified by AttachmentReader only at the model boundary.
+// A text-only contentParts item is authoritative evidence that the preceding
+// turn did not carry an image, so the scan must stop there instead of replaying
+// an older screenshot forever. Legacy items without contentParts are the only
+// user items that remain skippable.
 func projectAssistantImageContentPartsFromThreadEvents(events []store.AssistantThreadEvent, currentTurnID string) ([]projectAssistantContentPart, error) {
 	currentTurnID = strings.TrimSpace(currentTurnID)
 	for index := len(events) - 1; index >= 0; index-- {
@@ -405,21 +409,24 @@ func projectAssistantImageContentPartsFromThreadEvents(events []store.AssistantT
 				images = append(images, projectAssistantContentPartAttachment(*receipt))
 			}
 		}
-		if len(images) > 0 {
-			return images, nil
-		}
+		// This is the immediately preceding non-legacy user item. Returning an
+		// empty result is intentional: a valid text-only turn must suppress an
+		// older image rather than causing it to be replayed indefinitely.
+		return images, nil
 	}
 	return nil, nil
 }
 
 // projectAssistantModelContentPartsForStart chooses the content that belongs
 // in the model-facing attachment context. A new image-bearing turn replaces
-// prior image context; a text-only turn keeps the latest prior image turn so a
-// follow-up such as "what about the photo?" remains answerable.
+// prior image context; a text-only turn can retain an immediately preceding
+// image turn so a follow-up such as "what about the photo?" remains answerable,
+// but never crosses a newer non-legacy text-only turn to replay an old image.
 func (s *Server) projectAssistantModelContentPartsForStart(
 	ctx context.Context,
 	scope store.Scope,
 	threadID string,
+	currentTurnID string,
 	current []projectAssistantContentPart,
 ) ([]projectAssistantContentPart, error) {
 	current = cloneProjectAssistantContentParts(current)
@@ -430,7 +437,7 @@ func (s *Server) projectAssistantModelContentPartsForStart(
 	if err != nil {
 		return nil, fmt.Errorf("load prior image attachment context: %w", err)
 	}
-	prior, err := projectAssistantImageContentPartsFromThreadEvents(events, "")
+	prior, err := projectAssistantImageContentPartsFromThreadEvents(events, currentTurnID)
 	if err != nil {
 		return nil, err
 	}

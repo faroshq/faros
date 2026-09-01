@@ -52,6 +52,36 @@ test('accepts screenshot/text inputs while keeping server text limits visible to
   assert.equal(assistantAttachmentMaxBytes({ name: 'notes.txt', type: '' }), MAX_ASSISTANT_TEXT_ATTACHMENT_BYTES)
 })
 
+test('text attachment previews stay bounded, use the first meaningful line, and render as escaped text', async () => {
+  const {
+    ASSISTANT_TEXT_PREVIEW_MAX_CHARS,
+    readAssistantAttachmentTextPreview,
+  } = await vite.ssrLoadModule('/src/assistantAttachments.ts')
+  const source = new Blob(['\r\n  <b>Keep this literal</b>  \r\nsecond line\r\n'], { type: 'text/plain' })
+  const file = { size: source.size, slice: (start, end) => source.slice(start, end) }
+  assert.deepEqual(await readAssistantAttachmentTextPreview(file), {
+    text: '<b>Keep this literal</b>',
+    truncated: true,
+  })
+
+  const longSource = new Blob(['x'.repeat(ASSISTANT_TEXT_PREVIEW_MAX_CHARS + 20)], { type: 'text/plain' })
+  const longFile = { size: longSource.size, slice: (start, end) => longSource.slice(start, end) }
+  const longPreview = await readAssistantAttachmentTextPreview(longFile)
+  assert.equal(longPreview.text, 'x'.repeat(ASSISTANT_TEXT_PREVIEW_MAX_CHARS))
+  assert.equal(longPreview.truncated, true)
+
+  const emoji = '😀'.repeat(200)
+  const emojiSource = new Blob([emoji], { type: 'text/plain' })
+  const emojiFile = { size: emojiSource.size, slice: (start, end) => emojiSource.slice(start, end) }
+  const emojiPreview = await readAssistantAttachmentTextPreview(emojiFile)
+  assert.equal(emojiPreview.text, '😀'.repeat(ASSISTANT_TEXT_PREVIEW_MAX_CHARS))
+  assert.equal(emojiPreview.truncated, true)
+
+  const previewSource = await readFile(new URL('./AssistantAttachmentTextPreview.vue', import.meta.url), 'utf8')
+  assert.match(previewSource, /\{\{ preview\.text \}\}/)
+  assert.doesNotMatch(previewSource, /v-html/)
+})
+
 test('derives attachment errors from the candidates that are still present', async () => {
   const {
     ASSISTANT_ATTACHMENT_RESOLUTION_ERROR,

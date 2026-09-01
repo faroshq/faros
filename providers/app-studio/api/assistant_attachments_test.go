@@ -174,30 +174,67 @@ func assistantAttachmentUserEventWithRawDataForTest(t *testing.T, threadID, turn
 	}
 }
 
-func TestProjectAssistantImageContentPartsRetainsLatestPriorImageTurn(t *testing.T) {
+func TestProjectAssistantImageContentPartsStopsAtLatestPriorTextTurn(t *testing.T) {
 	older := attachmentReceiptForTest("image-older", "older.png", "image/png", []byte("older"))
-	latest := attachmentReceiptForTest("image-latest", "latest.png", "image/png", []byte("latest"))
+	text := func(turnID string, sequence int64, content string) store.AssistantThreadEvent {
+		return assistantAttachmentUserEventForTest(t, "thread-1", turnID, "user-"+turnID, sequence, []projectAssistantContentPart{
+			projectAssistantContentPartText(content),
+		})
+	}
+
+	// An image followed by a text turn must not keep replaying the image for
+	// every later text-only follow-up.
 	events := []store.AssistantThreadEvent{
-		assistantAttachmentUserEventForTest(t, "thread-1", "turn-older", "user-older", 1, []projectAssistantContentPart{
+		assistantAttachmentUserEventForTest(t, "thread-1", "turn-image", "user-image", 1, []projectAssistantContentPart{
 			projectAssistantContentPartAttachment(older),
 		}),
-		assistantAttachmentUserEventForTest(t, "thread-1", "turn-text", "user-text", 2, []projectAssistantContentPart{
-			projectAssistantContentPartText("follow up"),
-		}),
-		assistantAttachmentUserEventForTest(t, "thread-1", "turn-latest", "user-latest", 3, []projectAssistantContentPart{
-			projectAssistantContentPartAttachment(latest),
-			projectAssistantContentPartAttachment(latest),
-		}),
+		text("turn-text", 2, "what changed?"),
 	}
 	parts, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
 	if err != nil {
-		t.Fatalf("retain latest prior image: %v", err)
+		t.Fatalf("inspect latest prior text turn: %v", err)
 	}
-	if len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != latest.ID {
-		t.Fatalf("retained prior image parts = %#v, want latest image only", parts)
+	if len(parts) != 0 {
+		t.Fatalf("retained image after text turn = %#v, want none", parts)
 	}
-	if _, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-latest"); err != nil {
-		t.Fatalf("skip current image turn: %v", err)
+
+	// The current turn is skipped by its durable ID; the immediately preceding
+	// non-legacy text turn still stops the search before the older image.
+	events = append(events, text("turn-current", 3, "another follow-up"))
+	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
+	if err != nil || len(parts) != 0 {
+		t.Fatalf("current turn skip after text turn = %#v, err=%v; want none", parts, err)
+	}
+
+	// A legacy item without contentParts is the one compatibility case that may
+	// be skipped while looking for the latest non-legacy item.
+	events = []store.AssistantThreadEvent{
+		assistantAttachmentUserEventForTest(t, "thread-1", "turn-image", "user-image", 1, []projectAssistantContentPart{
+			projectAssistantContentPartAttachment(older),
+		}),
+		assistantAttachmentUserEventWithRawDataForTest(t, "thread-1", "turn-legacy", "user-legacy", 2, `{"legacy":"item"}`),
+		text("turn-text", 3, "still text-only"),
+	}
+	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
+	if err != nil || len(parts) != 0 {
+		t.Fatalf("legacy skip before text turn = %#v, err=%v; want none", parts, err)
+	}
+
+	// Skipping the current image turn leaves an immediately preceding image
+	// available, and duplicate receipts remain deduplicated.
+	latest := attachmentReceiptForTest("image-latest", "latest.png", "image/png", []byte("latest"))
+	events = []store.AssistantThreadEvent{
+		assistantAttachmentUserEventForTest(t, "thread-1", "turn-image", "user-image", 1, []projectAssistantContentPart{
+			projectAssistantContentPartAttachment(older),
+		}),
+		assistantAttachmentUserEventForTest(t, "thread-1", "turn-latest", "user-latest", 2, []projectAssistantContentPart{
+			projectAssistantContentPartAttachment(latest),
+			projectAssistantContentPartAttachment(latest),
+		}),
+	}
+	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
+	if err != nil || len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != latest.ID {
+		t.Fatalf("latest prior image parts = %#v, err=%v", parts, err)
 	}
 	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-latest")
 	if err != nil || len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != older.ID {

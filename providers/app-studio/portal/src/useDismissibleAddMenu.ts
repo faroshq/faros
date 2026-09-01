@@ -17,6 +17,17 @@ export function dismissibleMenuNavigationIndex(key: string, currentIndex: number
   return null
 }
 
+/** Nested modal/dialog controls own Escape before the surrounding Add menu. */
+export function shouldDismissAddMenuEscape(event: Pick<KeyboardEvent, 'key' | 'target'>): boolean {
+  if (event.key !== 'Escape') return false
+  const target = event.target
+  if (target && typeof target === 'object' && 'closest' in target && typeof target.closest === 'function') {
+    const closest = (target as { closest: (selector: string) => unknown }).closest('[role="dialog"]')
+    if (closest) return false
+  }
+  return true
+}
+
 /**
  * Keep the compact Add menu open while its trigger or any menu content owns
  * the interaction, and dismiss it when the user leaves the Add control. Capture
@@ -57,7 +68,7 @@ export function useDismissibleAddMenu({ open, root, trigger, onClose }: Dismissi
   }
 
   function handleKeydown(event: KeyboardEvent) {
-    if (!open.value || event.key !== 'Escape') return
+    if (!open.value || !shouldDismissAddMenuEscape(event)) return
     event.preventDefault()
     event.stopPropagation()
     onClose()

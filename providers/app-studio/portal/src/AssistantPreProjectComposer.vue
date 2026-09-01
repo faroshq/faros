@@ -10,7 +10,9 @@ import {
   type AssistantStagedAttachment,
 } from './assistantAttachments'
 import AssistantAttachmentPreview from './AssistantAttachmentPreview.vue'
+import AssistantAttachmentTextPreview from './AssistantAttachmentTextPreview.vue'
 import { useDismissibleAddMenu } from './useDismissibleAddMenu'
+import { useAssistantFilePickerFocus } from './useAssistantFilePickerFocus'
 
 const props = withDefaults(defineProps<{
   modelValue: string
@@ -45,6 +47,12 @@ const editorRef = ref<HTMLTextAreaElement | null>(null)
 const attachmentMenuOpen = ref(false)
 const attachmentInputRef = ref<HTMLInputElement | null>(null)
 
+const { waitForPicker, restorePickerFocus } = useAssistantFilePickerFocus(() => {
+  const editor = editorRef.value
+  if (editor && !editor.disabled) return editor
+  return attachmentMenuTriggerRef.value || rootRef.value
+})
+
 function focus() {
   const target = editorRef.value || rootRef.value
   target?.focus()
@@ -78,6 +86,7 @@ function openAttachmentPicker() {
   const input = attachmentInputRef.value
   if (!input) return
   input.value = ''
+  waitForPicker()
   input.click()
 }
 
@@ -98,6 +107,7 @@ function handleAttachmentInput(event: Event) {
     existing = [...existing, staged]
   }
   if (input) input.value = ''
+  restorePickerFocus()
 }
 
 function clipboardImageFile(event: ClipboardEvent): File | null {
@@ -179,7 +189,7 @@ onBeforeUnmount(() => {
         />
         <div
           v-else
-          class="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-sm border px-2 py-1 text-[11px] font-mono"
+          class="flex min-w-0 max-w-full flex-col items-stretch rounded-sm border px-2 py-1 text-[11px] font-mono"
           :class="attachment.status === 'error'
             ? 'border-danger/40 bg-danger-subtle text-danger'
             : attachment.status === 'ready'
@@ -187,29 +197,38 @@ onBeforeUnmount(() => {
               : 'border-border-subtle bg-surface text-text-secondary'"
           :title="attachment.error || statusLabel(attachment)"
         >
-          <FileText class="h-3 w-3 shrink-0" :stroke-width="1.75" aria-hidden="true" />
-          <span class="max-w-48 truncate">{{ attachmentLabel(attachment) }}</span>
-          <span class="text-[10px] opacity-75">{{ statusLabel(attachment) }}</span>
-          <button
-            v-if="attachment.status === 'error' && attachment.retryable"
-            type="button"
-            class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-            :aria-label="attachment.retryAction === 'delete' ? 'Retry attachment removal' : 'Retry attachment upload'"
-            :title="attachment.retryAction === 'delete' ? 'Retry removal' : 'Retry upload'"
-            @click="emit('retry-attachment', attachment.clientID)"
-          >
-            <RotateCcw class="h-3 w-3" :stroke-width="1.75" />
-          </button>
-          <button
-            v-if="attachment.status !== 'deleting'"
-            type="button"
-            class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-            aria-label="Remove attachment"
-            title="Remove attachment"
-            @click="emit('remove-attachment', attachment.clientID)"
-          >
-            <X class="h-3 w-3" :stroke-width="1.75" />
-          </button>
+          <div class="flex min-w-0 items-center gap-1.5">
+            <FileText class="h-3 w-3 shrink-0" :stroke-width="1.75" aria-hidden="true" />
+            <span class="max-w-48 truncate">{{ attachmentLabel(attachment) }}</span>
+            <span class="text-[10px] opacity-75">{{ statusLabel(attachment) }}</span>
+            <div class="ml-auto flex shrink-0 items-center gap-0.5">
+              <button
+                v-if="attachment.status === 'error' && attachment.retryable"
+                type="button"
+                class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                :aria-label="attachment.retryAction === 'delete' ? 'Retry attachment removal' : 'Retry attachment upload'"
+                :title="attachment.retryAction === 'delete' ? 'Retry removal' : 'Retry upload'"
+                @click="emit('retry-attachment', attachment.clientID)"
+              >
+                <RotateCcw class="h-3 w-3" :stroke-width="1.75" />
+              </button>
+              <button
+                v-if="attachment.status !== 'deleting'"
+                type="button"
+                class="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                aria-label="Remove attachment"
+                title="Remove attachment"
+                @click="emit('remove-attachment', attachment.clientID)"
+              >
+                <X class="h-3 w-3" :stroke-width="1.75" />
+              </button>
+            </div>
+          </div>
+          <AssistantAttachmentTextPreview
+            v-if="!assistantAttachmentIsImage(attachment.file)"
+            :file="attachment.file"
+            :label="attachmentLabel(attachment)"
+          />
         </div>
       </template>
     </div>

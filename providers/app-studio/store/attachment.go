@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -326,8 +327,13 @@ func NormalizeAttachmentContentType(raw string) (string, error) {
 // rather than surfacing as a storage conflict.
 func ValidateAttachmentID(id string) error {
 	id = strings.TrimSpace(id)
-	if id == "" || len([]byte(id)) > AttachmentMaxIDBytes || strings.ContainsAny(id, "/\\"+"\x00\r\n") || id == "." || id == ".." {
+	if id == "" || !utf8.ValidString(id) || len([]byte(id)) > AttachmentMaxIDBytes || id == "." || id == ".." {
 		return fmt.Errorf("attachment ID must be a safe non-empty value of at most %d bytes", AttachmentMaxIDBytes)
+	}
+	for _, character := range id {
+		if unicode.IsSpace(character) || unicode.IsControl(character) || strings.ContainsRune("/\\?#", character) {
+			return fmt.Errorf("attachment ID must be a safe non-empty value of at most %d bytes", AttachmentMaxIDBytes)
+		}
 	}
 	return nil
 }

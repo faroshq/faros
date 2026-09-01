@@ -292,6 +292,10 @@ func TestProjectAssistantAttachmentHTTPStableClientIDIsIdempotentAndDeletable(t 
 	if status != http.StatusBadRequest {
 		t.Fatalf("invalid stable ID = %d, body=%s", status, body)
 	}
+	status, _, body = upload("screen.png", "attachment?query", "alice")
+	if status != http.StatusBadRequest {
+		t.Fatalf("query-bearing stable ID = %d, body=%s", status, body)
+	}
 
 	request := httptest.NewRequest(http.MethodDelete, "/api/projects/demo/assistant/attachments/"+clientID, nil)
 	request.Header.Set("X-Faros-Tenant", "root:faros:tenants:org:workspace")
