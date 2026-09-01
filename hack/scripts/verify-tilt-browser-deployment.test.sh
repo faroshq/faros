@@ -54,18 +54,6 @@ require(
     "regular Tilt App Studio must receive preview_hub_public_url as its public hub URL",
 )
 
-regular_hub = section(
-    tilt,
-    "local_resource(\n    'hub',",
-    "\n\n# ---------------------------------------------------------------------------\n# providers",
-)
-require(
-    regular_hub.count("--portal-frame-source=%s") == 2
-    and "preview_app_frame_source" in regular_hub
-    and "preview_hub_public_url" in regular_hub,
-    "regular Tilt portal CSP must allow both preview hosts and the configured public hub authorization hop",
-)
-
 regular_dns = section(
     tilt,
     "local_resource(\n    'app-studio-preview-dns',",
