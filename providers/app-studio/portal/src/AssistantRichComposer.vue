@@ -101,6 +101,10 @@ interface AssistantAttachmentChip {
   clientID: string
   file?: File
   receipt?: ProjectAssistantAttachmentReceipt
+  /** Project that accepted the upload; cleanup must not follow a later route. */
+  projectName?: string
+  /** The accepted turn now owns this receipt; the composer must not delete it. */
+  committed?: boolean
   status: AssistantAttachmentStatus
   error?: string
   retryAction?: 'upload' | 'delete'
@@ -139,9 +143,29 @@ async function bestEffortDeleteAttachment(
     try {
       await api.deleteAssistantAttachment(props.ctx, projectName, attachmentID)
     } catch {
-      // The candidate remains locally recoverable; cleanup must not replace a
-      // useful retry with a second, ambiguous error state.
+      // A 409 is expected when the receipt was bound by an accepted turn:
+      // bound attachment bytes are immutable. A 404 is expected when a draft
+      // already expired or was removed. Network failures are also swallowed;
+      // lifecycle cleanup must never replace a useful retry with an ambiguous
+      // error state.
     }
+  }
+}
+
+/**
+ * Release browser-owned candidates without treating immutable receipts as a
+ * lifecycle failure. The project captured on each chip is authoritative when
+ * a route switch has already changed props.projectName.
+ */
+function cleanupAttachmentChips(chips: readonly AssistantAttachmentChip[], fallbackProjectName: string) {
+  for (const chip of chips) {
+    chip.controller?.abort()
+    // App commits receipts at the POST acceptance boundary before clearing its
+    // contentParts prop. They are no longer browser-owned, even if the server
+    // has not finished binding them when a route/unmount cleanup runs.
+    if (chip.committed) continue
+    if (chip.status === 'deleting') continue
+    void bestEffortDeleteAttachment(chip, chip.projectName || fallbackProjectName)
   }
 }
 
@@ -175,11 +199,21 @@ function reconcileAttachmentChips(parts: readonly ProjectAssistantContentPart[])
     .filter((part): part is Extract<ProjectAssistantContentPart, { type: 'attachment' }> => part.type === 'attachment')
     .map((part) => part.attachment)
   const receiptIDs = new Set(receipts.map((receipt) => receipt.id))
+  // `contentParts` can be cleared before the project watcher runs (for
+  // example, when accepted-submit state is reset). A receipt handed to an
+  // accepted turn is no longer browser-owned and must not be deleted while the
+  // server finishes binding it. Unsubmitted ready drafts still get a
+  // best-effort cleanup here before they leave the local chip set.
+  for (const chip of attachmentChips.value) {
+    if (chip.status === 'ready' && !chip.committed && chip.receipt && !receiptIDs.has(chip.receipt.id)) {
+      void bestEffortDeleteAttachment(chip, chip.projectName || props.projectName)
+    }
+  }
   const retained = attachmentChips.value.filter((chip) => chip.status !== 'ready' || (chip.receipt && receiptIDs.has(chip.receipt.id)))
   const knownIDs = new Set(retained.flatMap((chip) => chip.receipt ? [chip.receipt.id] : []))
   for (const receipt of receipts) {
     if (knownIDs.has(receipt.id)) continue
-    retained.push({ clientID: `receipt:${receipt.id}`, receipt, status: 'ready' })
+    retained.push({ clientID: `receipt:${receipt.id}`, receipt, projectName: props.projectName, status: 'ready' })
     knownIDs.add(receipt.id)
   }
   attachmentChips.value = retained
@@ -610,8 +644,10 @@ async function uploadAttachment(file: File, existingClientID?: string, allowWhil
     return
   }
   const controller = new AbortController()
-  const chip: AssistantAttachmentChip = existingChip || { clientID, file, status: 'uploading', retryAction: 'upload', controller }
+  const chip: AssistantAttachmentChip = existingChip || { clientID, file, projectName, status: 'uploading', retryAction: 'upload', controller }
   chip.file = file
+  chip.projectName = projectName
+  chip.committed = false
   chip.status = 'uploading'
   chip.error = undefined
   chip.retryAction = 'upload'
@@ -708,6 +744,20 @@ async function recoverUnavailableAttachments(receiptIDs: readonly string[]): Pro
     else unresolved += 1
   }
   return { recovered, removed, unresolved }
+}
+
+/**
+ * Transfer selected receipts to the accepted turn before the host clears its
+ * contentParts prop. This is intentionally an exposed imperative seam: the
+ * host's POST acceptance continuation is the only layer that knows when a
+ * submission crossed the durable boundary.
+ */
+function commitAttachments(receiptIDs: readonly string[]) {
+  const committedIDs = new Set(receiptIDs.map((id) => id.trim()).filter(Boolean))
+  if (!committedIDs.size) return
+  for (const chip of attachmentChips.value) {
+    if (chip.status === 'ready' && chip.receipt && committedIDs.has(chip.receipt.id)) chip.committed = true
+  }
 }
 
 function handleAttachmentInput(event: Event) {
@@ -994,10 +1044,7 @@ function syncFromProps() {
 watch(() => [props.modelValue, partSignature(props.contentParts), props.selectedSkills.map((skill) => skill.id).join(','), props.selectedResources.map(assistantResourceSelectionKey).join(',')], syncFromProps)
 watch(() => props.projectName, (current, previous) => {
   if (current === previous) return
-  for (const chip of attachmentChips.value) {
-    chip.controller?.abort()
-    if (chip.status !== 'ready') void bestEffortDeleteAttachment(chip, previous)
-  }
+  cleanupAttachmentChips(attachmentChips.value, previous)
   attachmentChips.value = []
   emitAttachmentPending()
 })
@@ -1015,10 +1062,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   document.removeEventListener('selectionchange', saveSelection)
-  for (const chip of attachmentChips.value) {
-    chip.controller?.abort()
-    if (chip.status !== 'ready') void bestEffortDeleteAttachment(chip, props.projectName)
-  }
+  cleanupAttachmentChips(attachmentChips.value, props.projectName)
 })
 
 defineExpose({
@@ -1026,6 +1070,7 @@ defineExpose({
   openPalette,
   closePalette,
   recoverUnavailableAttachments,
+  commitAttachments,
 })
 </script>
 

@@ -1205,6 +1205,64 @@ func TestProjectAssistantStartFailureCompensatesAndRepairsCanonicalTurn(t *testi
 	}
 }
 
+func TestProjectAssistantStartFailureDoesNotProjectImageReceipt(t *testing.T) {
+	ctx := context.Background()
+	inner := store.NewMemoryStore()
+	server := NewWithWorkspace(nil, inner, nil, "", false)
+	scope := store.Scope{OrgUUID: "org", WorkspaceUUID: "workspace", ProjectName: "demo", ProjectUID: "uid"}
+	receipt := attachmentReceiptForTest("image-start-failure", "screen.png", "image/png", []byte("image bytes"))
+	startErr := errors.New("provider turn startup failed")
+	started, err := server.startProjectAssistantRunDurablyWithModeAndSkills(
+		ctx,
+		scope,
+		"alice",
+		"inspect this image",
+		"start-failure-image",
+		store.AssistantRunModeDefault,
+		projectAssistantDurableSkillSelection{ContentParts: []projectAssistantContentPart{projectAssistantContentPartAttachment(receipt)}},
+		func(store.AssistantRun, store.Message, bool) error { return startErr },
+	)
+	if !errors.Is(err, startErr) {
+		t.Fatalf("start error = %v, want %v", err, startErr)
+	}
+	if started.Run.Status != store.AssistantRunStatusFailed {
+		t.Fatalf("compensated run status = %q, want failed", started.Run.Status)
+	}
+
+	projection, err := loadProjectAssistantConversationProjection(ctx, inner, scope)
+	if err != nil {
+		t.Fatalf("load failed-start projection: %v", err)
+	}
+	if len(projection.messages) != 0 {
+		t.Fatalf("failed-start projection = %#v, want failed user item omitted", projection.messages)
+	}
+
+	items, err := inner.ListAssistantConversationItems(ctx, scope, 0, 10)
+	if err != nil {
+		t.Fatalf("list raw conversation items: %v", err)
+	}
+	if len(items) != 2 || items[0].Type != projectAssistantConversationUser || items[1].Type != projectAssistantConversationStartFailure {
+		t.Fatalf("failed-start raw conversation items = %#v, want user plus scrub marker", items)
+	}
+	var rawUser chatMessage
+	if err := json.Unmarshal(items[0].Payload, &rawUser); err != nil {
+		t.Fatalf("decode raw user item: %v", err)
+	}
+	if len(rawUser.Attachments) != 1 || rawUser.Attachments[0].ID != receipt.ID {
+		t.Fatalf("raw failed-start receipt = %#v, want durable receipt retained as append-only evidence", rawUser.Attachments)
+	}
+	if err := appendProjectAssistantConversationMessage(ctx, inner, scope, "run-later", "message-later", projectAssistantConversationUser, chatMessage{Role: "user", Content: "later successful turn"}); err != nil {
+		t.Fatalf("append later successful user item: %v", err)
+	}
+	projection, err = loadProjectAssistantConversationProjection(ctx, inner, scope)
+	if err != nil {
+		t.Fatalf("reload after later successful turn: %v", err)
+	}
+	if len(projection.messages) != 1 || projection.messages[0].Content != "later successful turn" {
+		t.Fatalf("projection after later successful turn = %#v, want only later user item", projection.messages)
+	}
+}
+
 func TestProjectAssistantThreadSnapshotRetryDoesNotDuplicateTerminalEvents(t *testing.T) {
 	inner := store.NewMemoryStore()
 	failing := &failingAssistantThreadProjectionStore{Store: inner, saveFailures: 1}

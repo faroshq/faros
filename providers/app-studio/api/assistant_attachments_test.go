@@ -287,6 +287,11 @@ func TestProjectEinoAssistantCurrentImageStillReportsModelInputProgress(t *testi
 	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err != nil {
 		t.Fatalf("current image model boundary: %v", err)
 	}
+	for _, message := range state.Messages {
+		if len(message.UserInputMultiContent) > 0 && message.Content != "" {
+			t.Fatalf("rehydrated image message sets both Content and UserInputMultiContent: %#v", message)
+		}
+	}
 	runState.NextModelCallOrdinal()
 	handler := newProjectEinoAssistantModelCallbackHandler(projectAssistantStreamCallbacks{
 		OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
@@ -295,6 +300,60 @@ func TestProjectEinoAssistantCurrentImageStillReportsModelInputProgress(t *testi
 	handler.OnEnd(ctx, nil, &einomodel.CallbackOutput{Message: schema.AssistantMessage("I can see it.", nil)})
 	if len(events) != 2 || events[0].Status != "started" || events[1].Status != "completed" || events[0].ID != "image-input-"+receipt.ID {
 		t.Fatalf("current image lifecycle events = %#v", events)
+	}
+}
+
+func TestProjectEinoAssistantMultipleCurrentImagesEmitOneOrderedLifecycleWithoutHistoricalProgress(t *testing.T) {
+	oldBytes := []byte("old image bytes")
+	firstBytes := []byte("first current image bytes")
+	secondBytes := []byte("second current image bytes")
+	old := attachmentReceiptForTest("image-history-lifecycle", "old.png", "image/png", oldBytes)
+	first := attachmentReceiptForTest("image-current-lifecycle-1", "first.png", "image/png", firstBytes)
+	second := attachmentReceiptForTest("image-current-lifecycle-2", "second.png", "image/png", secondBytes)
+	conversation, err := projectChatMessagesToEino([]chatMessage{
+		{Role: "user", Content: "inspect the old image", Attachments: []projectAssistantAttachmentReceipt{old}},
+		{Role: "assistant", Content: "I inspected it."},
+		{Role: "user", Content: "compare these new images", Attachments: []projectAssistantAttachmentReceipt{first, second}},
+	})
+	if err != nil {
+		t.Fatalf("project mixed image conversation: %v", err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{
+		projectAssistantContentPartAttachment(first),
+		projectAssistantContentPartAttachment(second),
+	})
+	var events []projectAssistantModelInputEvent
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{
+			old.ID: oldBytes, first.ID: firstBytes, second.ID: secondBytes,
+		}},
+		StreamCallbacks: projectAssistantStreamCallbacks{OnModelInput: func(event projectAssistantModelInputEvent) {
+			events = append(events, event)
+		}},
+	}, runState).(*projectEinoAssistantLifecycle)
+	state := &adk.ChatModelAgentState{Messages: conversation}
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err != nil {
+		t.Fatalf("mixed image model boundary: %v", err)
+	}
+	handler := newProjectEinoAssistantModelCallbackHandler(projectAssistantStreamCallbacks{
+		OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+	}, runState, nil)
+	callbackCtx := handler.OnStart(context.Background(), nil, &einomodel.CallbackInput{Messages: state.Messages})
+	handler.OnEnd(callbackCtx, nil, &einomodel.CallbackOutput{Message: schema.AssistantMessage("Compared them.", nil)})
+
+	if len(events) != 4 {
+		t.Fatalf("mixed image lifecycle events = %#v, want one start/end pair per current image", events)
+	}
+	wantIDs := []string{"image-input-" + first.ID, "image-input-" + second.ID, "image-input-" + first.ID, "image-input-" + second.ID}
+	wantStatuses := []string{"started", "started", "completed", "completed"}
+	for index, event := range events {
+		if event.ID != wantIDs[index] || event.Status != wantStatuses[index] {
+			t.Fatalf("mixed image event %d = %#v, want id %q/status %q", index, event, wantIDs[index], wantStatuses[index])
+		}
+		if event.Filename == old.Filename || strings.Contains(event.ID, old.ID) {
+			t.Fatalf("historical image emitted lifecycle event: %#v", event)
+		}
 	}
 }
 
@@ -346,6 +405,30 @@ func TestProjectEinoAssistantCompactionDropsOldImagesAndKeepsCurrentTurnImage(t 
 	}
 	if len(projected[2].Attachments) != 1 || projected[2].Attachments[0].ID != currentReceipt.ID {
 		t.Fatalf("current image receipt = %#v, want %q", projected[2].Attachments, currentReceipt.ID)
+	}
+}
+
+func TestProjectEinoAssistantCompactionFiltersMixedReceiptPlaceholderPerReceipt(t *testing.T) {
+	old := attachmentReceiptForTest("image-mixed-old", "old.png", "image/png", []byte("old"))
+	current := attachmentReceiptForTest("image-mixed-current", "current.png", "image/png", []byte("current"))
+	text := attachmentReceiptForTest("text-mixed", "notes.txt", "text/plain", []byte("notes"))
+	mixed := projectAssistantAttachmentPlaceholderMessage(old)
+	mixed.Extra[projectAssistantAttachmentMessageReceiptsKey] = []projectAssistantAttachmentReceipt{old, current, text}
+	messages := []*schema.Message{schema.UserMessage("mixed receipts"), mixed, schema.UserMessage("latest request")}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(current)})
+	filtered := projectEinoAssistantRetainCurrentCompactionImages(messages, runState)
+	projected := projectEinoMessagesToChat(filtered)
+	if len(projected) != 2 {
+		t.Fatalf("mixed receipt compaction projection = %#v, want original user plus latest request", projected)
+	}
+	if len(projected[0].Attachments) != 2 || projected[0].Attachments[0].ID != current.ID || projected[0].Attachments[1].ID != text.ID {
+		t.Fatalf("mixed receipt compaction attachments = %#v, want current image then text receipt", projected[0].Attachments)
+	}
+	for _, receipt := range projected[0].Attachments {
+		if receipt.ID == old.ID {
+			t.Fatalf("old image receipt survived mixed placeholder filtering: %#v", projected[0].Attachments)
+		}
 	}
 }
 
@@ -571,6 +654,119 @@ func TestProjectAssistantReadAttachmentToolReadsOnlySelectedBoundedText(t *testi
 	})
 	if err == nil || !strings.Contains(err.Error(), "not selected") {
 		t.Fatalf("unselected attachment error = %v", err)
+	}
+}
+
+func TestProjectAssistantHistoricalTextReceiptSurvivesCheckpointAndRemainsReadable(t *testing.T) {
+	content := []byte(strings.Repeat("historical text ", 4096))
+	receipt := attachmentReceiptForTest("text-history-resume", "notes.txt", "text/plain", content)
+	conversation := []chatMessage{{Role: "user", Content: "inspect the notes", Attachments: []projectAssistantAttachmentReceipt{receipt}}}
+	modelMessages, err := projectChatMessagesToEino(conversation)
+	if err != nil {
+		t.Fatalf("project historical text receipt: %v", err)
+	}
+	if len(modelMessages) != 2 || modelMessages[1].Content != projectAssistantHistoricalTextAttachmentModelText(receipt) {
+		t.Fatalf("historical text placeholder = %#v, want bounded attachment marker", modelMessages)
+	}
+	if !strings.Contains(modelMessages[1].Content, "call read_attachment") || !strings.Contains(modelMessages[1].Content, receipt.ID) {
+		t.Fatalf("historical text placeholder = %q, want actionable tool guidance", modelMessages[1].Content)
+	}
+	checkpointMessages := projectEinoAssistantMessagesWithoutAttachments(modelMessages)
+	encoded, err := json.Marshal(checkpointMessages)
+	if err != nil {
+		t.Fatalf("encode metadata-only checkpoint: %v", err)
+	}
+	if strings.Contains(string(encoded), string(content)) {
+		t.Fatal("historical text bytes were inlined into checkpoint state")
+	}
+	resumedConversation := projectEinoMessagesToChat(checkpointMessages)
+	if len(resumedConversation) != 1 || len(resumedConversation[0].Attachments) != 1 || resumedConversation[0].Attachments[0].ID != receipt.ID {
+		t.Fatalf("resumed historical text conversation = %#v, want receipt on originating user", resumedConversation)
+	}
+	reader := projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{receipt.ID: content}}
+	request := projectAssistantRunRequest{AttachmentReader: reader, Conversation: resumedConversation}
+	prompt := projectAssistantHistoricalTextAttachmentsPrompt(resumedConversation)
+	if !strings.Contains(prompt, receipt.ID) || !strings.Contains(prompt, receipt.Filename) || !strings.Contains(prompt, "call read_attachment") {
+		t.Fatalf("historical text live prompt = %q, want exact actionable receipt guidance", prompt)
+	}
+	if !projectAssistantAttachmentSelectionAvailable(request, newProjectEinoAssistantRunState()) {
+		t.Fatal("historical text receipt did not keep read_attachment available on a later turn")
+	}
+	result, err := projectAssistantReadAttachmentTool(context.Background(), projectAssistantToolCallRequest{
+		AttachmentReader: reader,
+		Conversation:     resumedConversation,
+		Arguments:        map[string]any{"attachmentID": receipt.ID, "offset": float64(7), "limit": float64(16)},
+	})
+	if err != nil {
+		t.Fatalf("read historical text receipt after resume: %v", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(result), &envelope); err != nil {
+		t.Fatalf("decode historical text read result: %v", err)
+	}
+	if envelope["content"] != string(content[7:23]) || envelope["offset"] != float64(7) {
+		t.Fatalf("historical text read envelope = %#v, want bounded resumed range", envelope)
+	}
+}
+
+func TestProjectEinoAssistantHistoricalSmallTextRehydratesOnlyAtModelBoundary(t *testing.T) {
+	content := []byte("LIVE-TILT-START-4821\nsmall historical attachment\nLIVE-TILT-END-7390")
+	receipt := attachmentReceiptForTest("text-history-inline", "pasted-text.txt", "text/plain", content)
+	conversation := []chatMessage{{Role: "user", Content: "inspect the pasted text", Attachments: []projectAssistantAttachmentReceipt{receipt}}}
+	messages, err := projectChatMessagesToEino(conversation)
+	if err != nil {
+		t.Fatalf("project historical text receipt: %v", err)
+	}
+	checkpoint := projectEinoAssistantMessagesWithoutAttachments(messages)
+	encoded, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatalf("encode metadata-only checkpoint: %v", err)
+	}
+	if strings.Contains(string(encoded), string(content)) {
+		t.Fatal("historical text bytes were inlined into checkpoint state")
+	}
+	lifecycle := &projectEinoAssistantLifecycle{req: projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{receipt.ID: content}},
+		Conversation:     conversation,
+	}}
+	historicalIDs, err := lifecycle.rehydrateHistoricalAttachmentMessages(context.Background(), messages, nil)
+	if err != nil {
+		t.Fatalf("rehydrate historical text: %v", err)
+	}
+	if _, ok := historicalIDs[receipt.ID]; !ok {
+		t.Fatalf("historical IDs = %#v, want %q", historicalIDs, receipt.ID)
+	}
+	if !strings.Contains(messages[1].Content, "LIVE-TILT-END-7390") || !strings.Contains(messages[1].Content, "untrusted data") {
+		t.Fatalf("historical model content = %q, want transient guarded text", messages[1].Content)
+	}
+	checkpointAfterSample := projectEinoAssistantMessagesWithoutAttachments(messages)
+	checkpointAfterSampleJSON, err := json.Marshal(checkpointAfterSample)
+	if err != nil {
+		t.Fatalf("encode checkpoint after model sample: %v", err)
+	}
+	if strings.Contains(string(checkpointAfterSampleJSON), string(content)) || !strings.Contains(string(checkpointAfterSampleJSON), receipt.ID) {
+		t.Fatalf("checkpoint after model sample = %s, want receipt metadata without attachment bytes", checkpointAfterSampleJSON)
+	}
+	projected := projectEinoMessagesToChat(checkpointAfterSample)
+	projectedJSON, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatalf("encode projected history: %v", err)
+	}
+	if strings.Contains(string(projectedJSON), string(content)) {
+		t.Fatal("rehydrated historical text leaked into durable chat projection")
+	}
+
+	currentMessages, err := projectChatMessagesToEino(conversation)
+	if err != nil {
+		t.Fatalf("project current text receipt: %v", err)
+	}
+	currentIDs := map[string]struct{}{receipt.ID: {}}
+	currentHistoricalIDs, err := lifecycle.rehydrateHistoricalAttachmentMessages(context.Background(), currentMessages, currentIDs)
+	if err != nil {
+		t.Fatalf("exclude current text from historical rehydration: %v", err)
+	}
+	if len(currentHistoricalIDs) != 0 || currentMessages[1].Content != "" {
+		t.Fatalf("current text historical projection = ids %#v content %q, want metadata-only placeholder", currentHistoricalIDs, currentMessages[1].Content)
 	}
 }
 

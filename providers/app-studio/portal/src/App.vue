@@ -762,6 +762,7 @@ const assistantComposerRef = ref<{
   openPalette: () => void
   closePalette: (restoreFocus?: boolean) => void
   recoverUnavailableAttachments?: (receiptIDs: readonly string[]) => Promise<AssistantAttachmentRecoveryCounts>
+  commitAttachments?: (receiptIDs: readonly string[]) => void
 } | null>(null)
 const threadRailRef = ref<{
   open?: () => void
@@ -5181,6 +5182,11 @@ function clearSelectedTurnAttachments() {
   assistantComposerAttachmentsPending.value = false
 }
 
+function commitAttachments(parts: readonly ProjectAssistantContentPart[]) {
+  const receiptIDs = parts.flatMap((part) => part.type === 'attachment' ? [part.attachment.id] : [])
+  assistantComposerRef.value?.commitAttachments?.(receiptIDs)
+}
+
 function persistCurrentAssistantAnnotationDraft(parts: readonly ProjectAssistantContentPart[] = assistantComposerParts.value) {
   writeAssistantAnnotationDraft(assistantAnnotationDraftScope(), parts)
 }
@@ -6974,6 +6980,7 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
       // stream setup failures must not make already-consumed attachments look
       // available for a second turn.
       clearStoredAssistantAnnotationDraft(projectName, requestedThreadID)
+      commitAttachments(turnContentParts)
       clearSelectedTurnAttachments()
       if (canonicalThreadID !== requestedThreadID) {
         assistantThreads.value = [
@@ -7052,6 +7059,7 @@ async function sendMessage(activeRunIntent: 'queue' | 'steer' = 'queue'): Promis
           recoveredSameRequest = true
           pendingMessageSubmission = null
           clearStoredAssistantAnnotationDraft(projectName, activeAssistantThreadID.value)
+          commitAttachments(turnContentParts)
           clearSelectedTurnAttachments()
           if (firstProjectPending && firstProjectSubmissionAccepted(firstProjectPending, persistedPrompt)) pendingFirstProjectSubmission = null
         } else {

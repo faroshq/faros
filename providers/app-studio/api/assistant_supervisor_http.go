@@ -245,7 +245,8 @@ func (s *Server) startProjectAssistantRunDurablyWithModeAndSkills(ctx context.Co
 		}
 		return projectAssistantDurableStartResult{Run: created}, nil
 	}
-	if err := appendProjectAssistantConversationMessage(ctx, s.store, scope, created.ID, "message-"+user.ID, projectAssistantConversationUser, chatMessage{Role: "user", Content: user.Content, Attachments: projectAssistantImageAttachmentReceipts(parts)}); err != nil {
+	conversationUser := chatMessage{Role: "user", Content: user.Content, Attachments: projectAssistantAttachmentReceipts(parts)}
+	if err := appendProjectAssistantConversationMessage(ctx, s.store, scope, created.ID, "message-"+user.ID, projectAssistantConversationUser, conversationUser); err != nil {
 		persistErr := fmt.Errorf("persist assistant conversation user item: %w", err)
 		failedRun := created
 		failedMessage := assistant
@@ -261,7 +262,7 @@ func (s *Server) startProjectAssistantRunDurablyWithModeAndSkills(ctx context.Co
 		return projectAssistantDurableStartResult{Run: failedRun, User: user, Assistant: failedMessage}, persistErr
 	}
 	if err := start(created, assistant, transcriptEmpty); err != nil {
-		failedRun, failedMessage, compensateErr := s.compensateProjectAssistantStartFailure(ctx, scope, created, assistant, err)
+		failedRun, failedMessage, compensateErr := s.compensateProjectAssistantStartFailure(ctx, scope, created, assistant, conversationUser, err)
 		if compensateErr != nil {
 			return projectAssistantDurableStartResult{Run: failedRun, User: user, Assistant: failedMessage}, errors.Join(err, compensateErr)
 		}
@@ -275,7 +276,7 @@ func (s *Server) startProjectAssistantRunDurablyWithModeAndSkills(ctx context.Co
 // example, before a canonical thread turn or worker is attached). Without
 // this transition the retry identity would point at a permanently running
 // orphan until a later reconciliation pass happened to observe it.
-func (s *Server) compensateProjectAssistantStartFailure(ctx context.Context, scope store.Scope, run store.AssistantRun, message store.Message, startErr error) (store.AssistantRun, store.Message, error) {
+func (s *Server) compensateProjectAssistantStartFailure(ctx context.Context, scope store.Scope, run store.AssistantRun, message store.Message, conversationUser chatMessage, startErr error) (store.AssistantRun, store.Message, error) {
 	if assistantRunTerminal(run.Status) {
 		return run, message, nil
 	}
@@ -292,6 +293,9 @@ func (s *Server) compensateProjectAssistantStartFailure(ctx context.Context, sco
 	defer cancel()
 	if err := s.store.SaveAssistantRunSnapshot(persistCtx, scope, run, []store.Message{message}, run.Revision-1); err != nil {
 		return run, message, fmt.Errorf("compensate assistant start failure: %w", err)
+	}
+	if err := appendProjectAssistantStartFailureMarker(persistCtx, s.store, scope, run.ID, run.UserMessageID); err != nil {
+		return run, message, fmt.Errorf("persist assistant start-failure marker: %w", err)
 	}
 	return run, message, nil
 }

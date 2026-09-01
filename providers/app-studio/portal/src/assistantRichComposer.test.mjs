@@ -159,6 +159,65 @@ test('cancelled uploads retain a recoverable File and treat absent draft deletes
   assert.match(removeBody, /attachmentChips\.value = attachmentChips\.value\.filter/)
 })
 
+test('composer commits accepted receipts before clearing parts and cleans only abandoned drafts', async () => {
+  const source = await readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8')
+  assert.match(source, /projectName\?: string/)
+  assert.match(source, /committed\?: boolean/)
+  assert.match(source, /function cleanupAttachmentChips\(chips: readonly AssistantAttachmentChip\[\], fallbackProjectName: string\)/)
+  assert.match(source, /chip\.projectName \|\| fallbackProjectName/)
+  assert.match(source, /function commitAttachments\(receiptIDs: readonly string\[\]\)/)
+
+  const handoffStart = source.indexOf('function commitAttachments(')
+  const handoffEnd = source.indexOf('\n}\n\nfunction handleAttachmentInput', handoffStart)
+  assert.ok(handoffStart >= 0 && handoffEnd > handoffStart, 'accepted ownership handoff must remain a bounded helper')
+  const handoffBody = source.slice(handoffStart, handoffEnd)
+  assert.match(handoffBody, /const committedIDs = new Set\(receiptIDs\.map\(\(id\) => id\.trim\(\)\)\.filter\(Boolean\)\)/)
+  assert.match(handoffBody, /chip\.status === 'ready' && chip\.receipt && committedIDs\.has\(chip\.receipt\.id\)/)
+  assert.match(handoffBody, /chip\.committed = true/)
+
+  const cleanupStart = source.indexOf('function cleanupAttachmentChips(')
+  const cleanupEnd = source.indexOf('\n}\n\nfunction isAttachmentAbortError', cleanupStart)
+  assert.ok(cleanupStart >= 0 && cleanupEnd > cleanupStart, 'teardown cleanup must remain a bounded helper')
+  const cleanupBody = source.slice(cleanupStart, cleanupEnd)
+  assert.match(cleanupBody, /if \(chip\.committed\) continue/)
+  assert.match(cleanupBody, /chip\.status === 'deleting'/)
+
+  const reconcileStart = source.indexOf('function reconcileAttachmentChips(')
+  const reconcileEnd = source.indexOf('\n}\n\nconst selectedSkillIDs', reconcileStart)
+  assert.ok(reconcileStart >= 0 && reconcileEnd > reconcileStart, 'receipt reconciliation must remain a bounded helper')
+  const reconcileBody = source.slice(reconcileStart, reconcileEnd)
+  assert.match(reconcileBody, /chip\.status === 'ready'/)
+  assert.match(reconcileBody, /!chip\.committed/)
+  assert.match(reconcileBody, /!receiptIDs\.has\(chip\.receipt\.id\)/)
+  assert.match(reconcileBody, /bestEffortDeleteAttachment\(chip, chip\.projectName \|\| props\.projectName\)/)
+
+  // Model the two ownership outcomes at the acceptance boundary: the host
+  // commits the accepted receipt before clearing parts, while an abandoned
+  // receipt remains eligible for the next teardown cleanup.
+  const accepted = { status: 'ready', receipt: { id: 'accepted' }, committed: false }
+  const abandoned = { status: 'ready', receipt: { id: 'abandoned' }, committed: false }
+  const committedIDs = new Set(['accepted'])
+  for (const chip of [accepted, abandoned]) {
+    if (chip.receipt && committedIDs.has(chip.receipt.id)) chip.committed = true
+  }
+  assert.equal(accepted.committed, true)
+  assert.equal(abandoned.committed, false)
+  assert.deepEqual([accepted, abandoned].filter((chip) => !chip.committed).map((chip) => chip.receipt.id), ['abandoned'])
+  assert.match(source, /defineExpose\(\{[\s\S]*commitAttachments/)
+
+  const projectWatcherStart = source.indexOf('watch(() => props.projectName')
+  const projectWatcherEnd = source.indexOf('\n})\nwatch(() => \[props.disabled', projectWatcherStart)
+  assert.ok(projectWatcherStart >= 0 && projectWatcherEnd > projectWatcherStart, 'project watcher must remain a bounded helper')
+  const projectWatcher = source.slice(projectWatcherStart, projectWatcherEnd)
+  assert.match(projectWatcher, /cleanupAttachmentChips\(attachmentChips\.value, previous\)/)
+
+  const unmountStart = source.indexOf('onBeforeUnmount(() => {')
+  const unmountEnd = source.indexOf('\n})\n\ndefineExpose', unmountStart)
+  assert.ok(unmountStart >= 0 && unmountEnd > unmountStart, 'unmount cleanup must remain explicit')
+  assert.match(source.slice(unmountStart, unmountEnd), /cleanupAttachmentChips\(attachmentChips\.value, props\.projectName\)/)
+  assert.match(source, /A 409 is expected when the receipt was bound/)
+})
+
 test('regular receipt recovery reuploads retained Files and clears receipt-only chips', async () => {
   const source = await readFile(new URL('./AssistantRichComposer.vue', import.meta.url), 'utf8')
   assert.match(source, /interface UnavailableAttachmentRecovery/)

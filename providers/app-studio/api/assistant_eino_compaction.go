@@ -310,15 +310,17 @@ func projectEinoAssistantRetainCurrentCompactionImages(
 		if err != nil {
 			continue
 		}
-		keep := false
 		for _, receipt := range receipts {
-			if _, exists := current[receipt.ID]; exists {
-				keep = true
-				break
+			// Text receipts are metadata-only mentions and remain selectable
+			// after compaction. Images are retained only for the current incoming
+			// turn; filtering per receipt is important when an older checkpoint
+			// grouped old and current images in one placeholder.
+			if projectAssistantAttachmentIsImage(receipt) {
+				if _, exists := current[receipt.ID]; !exists {
+					continue
+				}
 			}
-		}
-		if keep {
-			out = append(out, message)
+			out = append(out, projectAssistantAttachmentPlaceholderMessage(receipt))
 		}
 	}
 	return out
@@ -857,7 +859,11 @@ func projectEinoAssistantRecentUserMessages(messages []*schema.Message, maxToken
 				pendingAttachments = nil
 				break
 			}
-			attachmentTokens += len(receipts) * projectEinoAssistantHistoricalImageTokenEstimate
+			for _, receipt := range receipts {
+				if projectAssistantAttachmentIsImage(receipt) {
+					attachmentTokens += projectEinoAssistantHistoricalImageTokenEstimate
+				}
+			}
 		}
 		keepAttachments := attachmentTokens < remaining
 		if keepAttachments {
@@ -900,7 +906,11 @@ func projectEinoAssistantMessagesTokenEstimate(messages []*schema.Message) int {
 		if projectEinoAssistantHistoricalAttachmentMessage(message) {
 			receipts, receiptErr := projectAssistantAttachmentReceiptsFromEinoMessageChecked(message)
 			if receiptErr == nil {
-				total += len(receipts) * projectEinoAssistantHistoricalImageTokenEstimate
+				for _, receipt := range receipts {
+					if projectAssistantAttachmentIsImage(receipt) {
+						total += projectEinoAssistantHistoricalImageTokenEstimate
+					}
+				}
 			}
 			continue
 		}

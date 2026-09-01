@@ -130,9 +130,12 @@ type projectAssistantToolCallRequest struct {
 	AssistantRunID       string
 	InitialBuild         bool
 	RunState             *projectEinoAssistantRunState
-	AttachmentReader     projectAssistantAttachmentReader
-	AttachmentScope      store.Scope
-	Arguments            map[string]any
+	// Conversation carries the durable metadata-only history for tools that
+	// need to address a receipt selected on an earlier user turn.
+	Conversation     []chatMessage
+	AttachmentReader projectAssistantAttachmentReader
+	AttachmentScope  store.Scope
+	Arguments        map[string]any
 }
 
 func refreshProjectToolSnapshot(current, updated *aiv1alpha1.Project) {

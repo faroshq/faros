@@ -94,7 +94,7 @@ export function projectAssistantAttachmentReceipt(value: unknown): ProjectAssist
   const sha256 = typeof raw.sha256 === 'string' ? raw.sha256.trim().toLowerCase() : ''
   const createdAt = typeof raw.createdAt === 'string' ? raw.createdAt.trim() : ''
   const supportedContentType = contentType === 'image/png' || contentType === 'image/jpeg' || contentType === 'image/webp' || contentType === 'text/plain' || contentType === 'text/markdown'
-  if (!id || !filename || !supportedContentType || sizeBytes < 0 || sizeBytes > MAX_ASSISTANT_ATTACHMENT_BYTES || (contentType.startsWith('text/') && sizeBytes > MAX_ASSISTANT_TEXT_ATTACHMENT_BYTES) || !/^[a-f0-9]{64}$/u.test(sha256) || !createdAt) return null
+  if (!id || !filename || !supportedContentType || sizeBytes <= 0 || sizeBytes > MAX_ASSISTANT_ATTACHMENT_BYTES || (contentType.startsWith('text/') && sizeBytes > MAX_ASSISTANT_TEXT_ATTACHMENT_BYTES) || !/^[a-f0-9]{64}$/u.test(sha256) || !createdAt) return null
   return { id, filename, contentType, sizeBytes, sha256, createdAt }
 }
 

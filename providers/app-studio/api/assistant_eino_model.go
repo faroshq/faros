@@ -446,9 +446,6 @@ func projectChatMessagesToEino(messages []chatMessage) ([]*schema.Message, error
 			if err != nil {
 				return nil, fmt.Errorf("invalid conversation attachment receipt: %w", err)
 			}
-			if !projectAssistantAttachmentIsImage(*receipt) {
-				continue
-			}
 			if _, duplicate := seen[receipt.ID]; duplicate {
 				continue
 			}

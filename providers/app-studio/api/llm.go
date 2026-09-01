@@ -203,6 +203,11 @@ type chatMessage struct {
 	// at the model boundary.
 	Attachments []projectAssistantAttachmentReceipt `json:"attachments,omitempty"`
 	Extra       map[string]any                      `json:"extra,omitempty"`
+	// conversationItemID is populated only while loading the append-only
+	// conversation projection. It lets a startup-failure marker scrub exactly
+	// its originating user item without adding an internal identifier to the
+	// durable/model-facing JSON contract.
+	conversationItemID string `json:"-"`
 }
 
 // projectAssistantDurableMessageExtra keeps only server-owned provenance that
