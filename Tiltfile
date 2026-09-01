@@ -67,12 +67,14 @@ go build -o bin/faros-hub ./cmd/faros-hub
   --graphql-playground \
   --portal-dev-url=http://localhost:3000 \
   --portal-frame-source=%s \
+  --portal-frame-source=%s \
   --published-apps-domain=%s \
   --kubeconfig=.faros-kro.kubeconfig \
   --hub-internal-url=https://host.docker.internal:9443
 ''' % (
         faros_hub_external_url,
         preview_app_frame_source,
+        preview_hub_public_url,
         preview_app_base_domain,
     )),
     deps=[
