@@ -492,6 +492,10 @@ func TestProjectPromptSeparatesCodingPreviewAndRepositoryBoundaries(t *testing.T
 		"gofmt -d rather than gofmt -w",
 		"Hosted development/preview template: NONE",
 		"lack of a hosted template is not an authoring, compiler, or test blocker",
+		"a Project-local DevelopmentService is the long-lived development process and preview contract inside the universal sandbox",
+		"configure a private DevelopmentService with upsert_development_service",
+		"wait for its observed process/port/route readiness",
+		"Bind a hosted development template only when the user needs that template's distinct environment contract, not merely to obtain a preview",
 		"Repository state prevents commit_project_files only",
 		"successful workspace checkpointing remains durable in App Studio",
 	} {
@@ -503,6 +507,7 @@ func TestProjectPromptSeparatesCodingPreviewAndRepositoryBoundaries(t *testing.T
 		"bind it before writing runtime source",
 		"do not write it anyway",
 		"Repository state does not permit a commit in this run",
+		"the project has no hosted development process or browser preview",
 	} {
 		if strings.Contains(prompt, stale) {
 			t.Fatalf("unbound prompt retained stale authoring blocker %q:\n%s", stale, prompt)
