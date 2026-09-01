@@ -59,6 +59,11 @@ const (
 	privateAppCallbackPath    = "/__faros/auth/callback"
 )
 
+var supportedBrowserMCPProtocolVersions = map[string]struct{}{
+	"2025-03-26": {},
+	"2025-06-18": {},
+}
+
 // resolveBrowserDataPlaneRef resolves the workspace's shared browser instance
 // (the Studio's Ready browser backend) into a data-plane target. ok is false
 // when the workspace has no Ready browser — the caller then reports the
@@ -82,7 +87,7 @@ func (s *Server) resolveBrowserDataPlaneRef(ctx context.Context, id identity) (d
 func (s *Server) inspectPreviewViaBrowserMCP(ctx context.Context, id identity, ref dataPlaneRef, req projectAssistantPreviewInspectionRequest) (projectAssistantPreviewInspectionResult, error) {
 	unlock := lockBrowserInstance(id.clusterID, ref)
 	defer unlock()
-	if err := s.rejectUnmanagedBrowserSession(ref); err != nil {
+	if err := s.rejectUnmanagedBrowserSession(id, ref); err != nil {
 		return projectAssistantPreviewInspectionResult{}, err
 	}
 
@@ -296,9 +301,10 @@ type browserMCPSession struct {
 	role    string
 	traceID uint64
 
-	sessionMu sync.RWMutex
-	sessionID string
-	nextID    int
+	sessionMu       sync.RWMutex
+	sessionID       string
+	protocolVersion string
+	nextID          int
 
 	streamMu     sync.Mutex
 	streamCancel context.CancelFunc
@@ -345,12 +351,24 @@ func (s *Server) newBrowserMCPSessionWithRole(ctx context.Context, id identity, 
 		RefHash:     projectAssistantBrowserTraceRef(ref),
 		CallSite:    "newBrowserMCPSessionWithRole",
 	})
-	if _, err := session.rpc(ctx, "initialize", map[string]any{
+	initializeResult, err := session.rpc(ctx, "initialize", map[string]any{
 		"protocolVersion": browserMCPProtocolVersion,
 		"clientInfo":      map[string]any{"name": "app-studio-preview", "version": "0.1.0"},
 		"capabilities":    map[string]any{},
-	}); err != nil {
+	})
+	if err != nil {
 		session.closeWithReason("initialize_failed", "newBrowserMCPSessionWithRole")
+		return nil, err
+	}
+	var initialized struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if len(initializeResult) == 0 || json.Unmarshal(initializeResult, &initialized) != nil {
+		session.closeWithReason("initialize_protocol_invalid", "newBrowserMCPSessionWithRole")
+		return nil, errors.New("preview browser initialize returned an invalid protocolVersion")
+	}
+	if err := session.setNegotiatedProtocolVersion(initialized.ProtocolVersion); err != nil {
+		session.closeWithReason("initialize_protocol_unsupported", "newBrowserMCPSessionWithRole")
 		return nil, err
 	}
 	projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
@@ -407,6 +425,38 @@ func (session *browserMCPSession) setSessionID(sessionID string) {
 	session.sessionMu.Lock()
 	session.sessionID = strings.TrimSpace(sessionID)
 	session.sessionMu.Unlock()
+}
+
+func (session *browserMCPSession) currentProtocolVersion() string {
+	if session == nil {
+		return ""
+	}
+	session.sessionMu.RLock()
+	defer session.sessionMu.RUnlock()
+	return session.protocolVersion
+}
+
+func (session *browserMCPSession) setNegotiatedProtocolVersion(protocolVersion string) error {
+	protocolVersion = strings.TrimSpace(protocolVersion)
+	if _, supported := supportedBrowserMCPProtocolVersions[protocolVersion]; !supported {
+		return fmt.Errorf("preview browser initialize negotiated unsupported protocolVersion %q", protocolVersion)
+	}
+	session.sessionMu.Lock()
+	session.protocolVersion = protocolVersion
+	session.sessionMu.Unlock()
+	return nil
+}
+
+func (session *browserMCPSession) setProtocolHeaders(req *http.Request) {
+	if session == nil || req == nil {
+		return
+	}
+	if sessionID := session.currentSessionID(); sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	if protocolVersion := session.currentProtocolVersion(); protocolVersion != "" {
+		req.Header.Set("MCP-Protocol-Version", protocolVersion)
+	}
 }
 
 func (session *browserMCPSession) nextRequestID() int {
@@ -478,8 +528,7 @@ func (session *browserMCPSession) rpc(ctx context.Context, method string, params
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if headerBefore != "" {
-		req.Header.Set("Mcp-Session-Id", headerBefore)
-		req.Header.Set("MCP-Protocol-Version", browserMCPProtocolVersion)
+		session.setProtocolHeaders(req)
 	}
 	resp, err := session.s.sandboxDataPlaneClient(dataPlaneCallTimeout).Do(req)
 	if err != nil {
@@ -574,8 +623,7 @@ func (session *browserMCPSession) openEventStream(waitCtx context.Context) error
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Mcp-Session-Id", sessionID)
-	req.Header.Set("MCP-Protocol-Version", browserMCPProtocolVersion)
+	session.setProtocolHeaders(req)
 	projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
 		Event:                   "event_stream_start",
 		Role:                    session.role,
@@ -800,10 +848,7 @@ func (session *browserMCPSession) respondToEventStreamRequest(ctx context.Contex
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	if sessionID := session.currentSessionID(); sessionID != "" {
-		req.Header.Set("Mcp-Session-Id", sessionID)
-		req.Header.Set("MCP-Protocol-Version", browserMCPProtocolVersion)
-	}
+	session.setProtocolHeaders(req)
 	projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
 		Event:       "event_stream_ping_start",
 		Role:        session.role,
@@ -986,8 +1031,7 @@ func (session *browserMCPSession) closeWithReason(reason, callSite string) {
 		})
 		return
 	}
-	req.Header.Set("Mcp-Session-Id", sessionID)
-	req.Header.Set("MCP-Protocol-Version", browserMCPProtocolVersion)
+	session.setProtocolHeaders(req)
 	if resp, err := session.s.sandboxDataPlaneClient(dataPlaneCallTimeout).Do(req); err == nil {
 		projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
 			Event:       "session_close_response",

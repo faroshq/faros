@@ -294,7 +294,7 @@ func configurePreviewInteractionBrowserTestServer(t *testing.T, server *Server, 
 			switch envelope.Method {
 			case "initialize":
 				recorder.Header().Set("Mcp-Session-Id", "preview-session")
-				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
 			case "notifications/initialized":
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":

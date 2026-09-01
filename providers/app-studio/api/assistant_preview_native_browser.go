@@ -442,10 +442,10 @@ func (p projectAssistantHTTPToolPort) DiscoverBrowser(ctx context.Context, id id
 	}
 	manager := p.server.browserSessionManager()
 	if manager != nil {
-		if catalog, cached := manager.browserCatalog(ref); cached {
+		if catalog, cached := manager.browserCatalog(id, ref); cached {
 			return projectAssistantNativeBrowserToolsForSpecs(p.server, catalog), nil
 		}
-		if manager.hasActiveRef(ref) {
+		if manager.hasActiveRef(id, ref) {
 			// Opening a discovery session here would be destructive for the
 			// manager-owned run session: the upstream Playwright transport used by
 			// the shared Browser image has one active session. Wait-free failure is
@@ -459,10 +459,10 @@ func (p projectAssistantHTTPToolPort) DiscoverBrowser(ctx context.Context, id id
 	unlockBrowser := lockBrowserInstance(id.clusterID, ref)
 	defer unlockBrowser()
 	if manager != nil {
-		if catalog, cached := manager.browserCatalog(ref); cached {
+		if catalog, cached := manager.browserCatalog(id, ref); cached {
 			return projectAssistantNativeBrowserToolsForSpecs(p.server, catalog), nil
 		}
-		if manager.hasActiveRef(ref) {
+		if manager.hasActiveRef(id, ref) {
 			return nil, errors.New("native browser discovery is unavailable while a managed browser session is active")
 		}
 	}
@@ -479,7 +479,7 @@ func (p projectAssistantHTTPToolPort) DiscoverBrowser(ctx context.Context, id id
 		return nil, err
 	}
 	if manager != nil {
-		manager.setBrowserCatalog(ref, tools)
+		manager.setBrowserCatalog(id, ref, tools)
 	}
 	return projectAssistantNativeBrowserToolsForSpecs(p.server, tools), nil
 }
@@ -520,6 +520,7 @@ type projectAssistantBrowserSessionEntry struct {
 	mu          sync.Mutex
 	owner       browserSessionOwner
 	ref         dataPlaneRef
+	scopeKey    string
 	session     *browserMCPSession
 	privateBase string
 	lastUsed    time.Time
@@ -548,11 +549,11 @@ type projectAssistantBrowserSessionManager struct {
 // the managed run releases the browser.
 var errProjectAssistantBrowserSessionBusy = errors.New("shared browser is busy with an active managed browser session")
 
-func (s *Server) rejectUnmanagedBrowserSession(ref dataPlaneRef) error {
+func (s *Server) rejectUnmanagedBrowserSession(id identity, ref dataPlaneRef) error {
 	if s == nil {
 		return nil
 	}
-	if manager := s.browserSessionManager(); manager != nil && manager.hasActiveRef(ref) {
+	if manager := s.browserSessionManager(); manager != nil && manager.hasActiveRef(id, ref) {
 		return errProjectAssistantBrowserSessionBusy
 	}
 	return nil
@@ -573,6 +574,22 @@ func newProjectAssistantBrowserSessionManager() *projectAssistantBrowserSessionM
 
 func projectAssistantBrowserSessionRefKey(ref dataPlaneRef) string {
 	parts := []string{ref.Resource, ref.Name, ref.Component}
+	for i := range parts {
+		parts[i] = fmt.Sprintf("%d:%s", len(parts[i]), parts[i])
+	}
+	return strings.Join(parts, "|")
+}
+
+// projectAssistantBrowserSessionScopeKey identifies the actual data-plane
+// browser endpoint, not merely the Kubernetes-style object reference. Browser
+// names are intentionally reused in every tenant workspace, while the proxy
+// URL is selected by clusterID. Matching that exact routing tuple both isolates
+// different workspaces and keeps all callers to one browser endpoint serialized.
+func projectAssistantBrowserSessionScopeKey(id identity, ref dataPlaneRef) string {
+	parts := []string{
+		id.clusterID,
+		projectAssistantBrowserSessionRefKey(ref),
+	}
 	for i := range parts {
 		parts[i] = fmt.Sprintf("%d:%s", len(parts[i]), parts[i])
 	}
@@ -602,9 +619,8 @@ func (m *projectAssistantBrowserSessionManager) detachLocked(key string, entry *
 		return
 	}
 	delete(m.sessions, key)
-	refKey := projectAssistantBrowserSessionRefKey(entry.ref)
-	if activeKey := m.activeByRef[refKey]; activeKey == key {
-		delete(m.activeByRef, refKey)
+	if activeKey := m.activeByRef[entry.scopeKey]; activeKey == key {
+		delete(m.activeByRef, entry.scopeKey)
 	}
 }
 
@@ -716,7 +732,7 @@ func (m *projectAssistantBrowserSessionManager) entry(owner browserSessionOwner,
 	}
 	m.reapIdle(time.Now())
 	key := owner.key()
-	refKey := projectAssistantBrowserSessionRefKey(ref)
+	scopeKey := projectAssistantBrowserSessionScopeKey(owner.Identity, ref)
 	var stale []*projectAssistantBrowserSessionEntry
 	var priorOwnerHash string
 	entryReason := "reuse"
@@ -738,7 +754,7 @@ func (m *projectAssistantBrowserSessionManager) entry(owner browserSessionOwner,
 	}
 	// The shared Chromium instance has one active owner. Handoff closes the
 	// prior MCP session before the new owner can observe its cookies or page.
-	if priorKey := m.activeByRef[refKey]; priorKey != "" && priorKey != key {
+	if priorKey := m.activeByRef[scopeKey]; priorKey != "" && priorKey != key {
 		if prior := m.sessions[priorKey]; prior != nil {
 			priorOwnerHash = projectAssistantBrowserTraceOwner(prior.owner)
 			m.detachLocked(priorKey, prior)
@@ -747,13 +763,13 @@ func (m *projectAssistantBrowserSessionManager) entry(owner browserSessionOwner,
 		}
 	}
 	if entry == nil {
-		entry = &projectAssistantBrowserSessionEntry{owner: owner, ref: ref}
+		entry = &projectAssistantBrowserSessionEntry{owner: owner, ref: ref, scopeKey: scopeKey}
 		m.sessions[key] = entry
 		if entryReason == "reuse" {
 			entryReason = "create"
 		}
 	}
-	m.activeByRef[refKey] = key
+	m.activeByRef[scopeKey] = key
 	m.resetIdleTimerLocked(entry, time.Now())
 	m.mu.Unlock()
 	projectAssistantBrowserTrace(projectAssistantBrowserTraceEvent{
@@ -782,7 +798,7 @@ func (m *projectAssistantBrowserSessionManager) entry(owner browserSessionOwner,
 	return entry
 }
 
-func (m *projectAssistantBrowserSessionManager) browserCatalog(ref dataPlaneRef) ([]projectMCPTool, bool) {
+func (m *projectAssistantBrowserSessionManager) browserCatalog(id identity, ref dataPlaneRef) ([]projectMCPTool, bool) {
 	if m == nil {
 		return nil, false
 	}
@@ -791,14 +807,14 @@ func (m *projectAssistantBrowserSessionManager) browserCatalog(ref dataPlaneRef)
 	if m.catalogs == nil {
 		return nil, false
 	}
-	catalog, ok := m.catalogs[projectAssistantBrowserSessionRefKey(ref)]
+	catalog, ok := m.catalogs[projectAssistantBrowserSessionScopeKey(id, ref)]
 	if !ok {
 		return nil, false
 	}
 	return cloneProjectMCPTools(catalog), true
 }
 
-func (m *projectAssistantBrowserSessionManager) setBrowserCatalog(ref dataPlaneRef, tools []projectMCPTool) {
+func (m *projectAssistantBrowserSessionManager) setBrowserCatalog(id identity, ref dataPlaneRef, tools []projectMCPTool) {
 	if m == nil {
 		return
 	}
@@ -811,10 +827,10 @@ func (m *projectAssistantBrowserSessionManager) setBrowserCatalog(ref dataPlaneR
 	if m.catalogs == nil {
 		m.catalogs = map[string][]projectMCPTool{}
 	}
-	m.catalogs[projectAssistantBrowserSessionRefKey(ref)] = cloneProjectMCPTools(catalog)
+	m.catalogs[projectAssistantBrowserSessionScopeKey(id, ref)] = cloneProjectMCPTools(catalog)
 }
 
-func (m *projectAssistantBrowserSessionManager) hasActiveRef(ref dataPlaneRef) bool {
+func (m *projectAssistantBrowserSessionManager) hasActiveRef(id identity, ref dataPlaneRef) bool {
 	if m == nil {
 		return false
 	}
@@ -823,7 +839,7 @@ func (m *projectAssistantBrowserSessionManager) hasActiveRef(ref dataPlaneRef) b
 	if m.activeByRef == nil {
 		return false
 	}
-	_, ok := m.activeByRef[projectAssistantBrowserSessionRefKey(ref)]
+	_, ok := m.activeByRef[projectAssistantBrowserSessionScopeKey(id, ref)]
 	return ok
 }
 
@@ -1022,11 +1038,17 @@ func (s *Server) callProjectAssistantNativeBrowserTool(ctx context.Context, req 
 	if !browserMCPResultIsSessionLoss(result, callErr) {
 		if errors.As(callErr, &safetyErr) {
 			manager.remove(owner, entry, "safety_observation_failed")
+			if risk != projectAssistantToolRiskRead {
+				return projectAssistantNativeBrowserOutcomeUnknown(callErr), nil
+			}
 			return "", callErr
 		}
 		if callErr == nil {
 			if originErr := validateProjectAssistantNativeBrowserReceiptOrigin(result, preview.PreviewURL); originErr != nil {
 				manager.remove(owner, entry, "receipt_origin_escape")
+				if risk != projectAssistantToolRiskRead {
+					return projectAssistantNativeBrowserOutcomeUnknown(originErr), nil
+				}
 				return "", originErr
 			}
 		}
@@ -1176,7 +1198,7 @@ func projectAssistantNativeBrowserOutcomeUnknown(callErr error) string {
 		"status":   "outcome_unknown",
 		"outcome":  "unknown",
 		"replayed": false,
-		"message":  "The browser session was lost before App Studio received a definitive result. The action may have been applied; App Studio did not replay it.",
+		"message":  "The browser action completed or may have completed before App Studio received a definitive safe result. The action may have been applied; App Studio did not replay it.",
 	}
 	if callErr != nil {
 		payload["error"] = projectEinoAssistantSafeErrorText(callErr)

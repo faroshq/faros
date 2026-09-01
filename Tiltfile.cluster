@@ -37,11 +37,11 @@ config.define_string('kcp-image-repo')
 # dev-token at /login. Dex itself always runs so toggling doesn't rebuild
 # the resource graph.
 config.define_bool('sso')
-# Global replica count for the hub + every faros provider Deployment (dex,
-# Postgres, and the image-cache stub stay at 1 regardless — they are dev
-# scaffolding, not HA subjects). Default 1 keeps the dev loop light; set 2 to
-# exercise the real multi-replica behavior each component documents at its
-# deploy site (leader election, tunnel-ownership relay, run claims, …):
+# Global replica count for the hub + HA-capable faros provider Deployments
+# (App Studio, dex, Postgres, and the image-cache stub stay at 1). Default 1
+# keeps the dev loop light; set 2 to exercise the real multi-replica behavior
+# each component documents at its deploy site (leader election,
+# tunnel-ownership relay, run claims, …):
 #
 #   make tilt-cluster REPLICA_COUNT=2
 #   tilt up -f Tiltfile.cluster -- --replicas=2
@@ -1515,9 +1515,10 @@ for _line in str(read_file(app_studio_hash_file, '')).splitlines():
     if _line.startswith('code=') and not app_studio_code_hash:
         app_studio_code_hash = _line[len('code='):].strip()
 
-# At REPLICA_COUNT=2: durable run claims + project affinity live in the shared
-# providers-db Postgres, workspaces are emptyDir caches rebuilt from git on
-# adoption (docs/app-studio-replica-awareness.md).
+# App Studio deliberately stays at one replica even when REPLICA_COUNT=2. Its
+# durable run claims and project affinity are replica-aware, but every workspace
+# has one shared, single-session Playwright Browser and browser ownership is
+# still process-local (docs/app-studio-replica-awareness.md).
 #
 # The controller manager watches the APIExportEndpointSlice in the PROVIDER
 # workspace, so the synced kubeconfig must be the workspace-scoped one init
@@ -1530,7 +1531,7 @@ provider_pod(
     'app-studio', 8085,
     container_port=8081,
     chart_extra=[
-        'replicaCount=%s' % replica_count,
+        'replicaCount=1',
         'store.databaseURL=%s' % providers_db_url('appstudio'),
         'hub.publicURL=%s' % hub_external_url,
         'hub.actionsExternalURL=https://faros-hub.%s.svc:9443' % hub_namespace,

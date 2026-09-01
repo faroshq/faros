@@ -582,7 +582,7 @@ func TestProjectAssistantBrowserDiscoveryDoesNotOpenOrCloseManagedSession(t *tes
 			switch envelope.Method {
 			case "initialize":
 				recorder.Header().Set("Mcp-Session-Id", "managed-session")
-				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
 			case "notifications/initialized":
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":
@@ -618,7 +618,7 @@ func TestProjectAssistantBrowserDiscoveryDoesNotOpenOrCloseManagedSession(t *tes
 	}
 
 	ref := dataPlaneRef{Resource: "instances", Name: "browser"}
-	server.browserSessions.setBrowserCatalog(ref, []projectMCPTool{
+	server.browserSessions.setBrowserCatalog(request.Identity, ref, []projectMCPTool{
 		{Name: "browser_navigate", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "browser_snapshot", InputSchema: json.RawMessage(`{"type":"object"}`)},
 		{Name: "browser_console_messages", InputSchema: json.RawMessage(`{"type":"object"}`)},
@@ -664,7 +664,7 @@ func TestProjectAssistantLegacyInspectionCannotCloseManagedSessionAtModelBoundar
 			case "initialize":
 				initializeCalls++
 				recorder.Header().Set("Mcp-Session-Id", fmt.Sprintf("model-boundary-session-%d", initializeCalls))
-				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
 			case "notifications/initialized":
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":
@@ -735,7 +735,7 @@ func TestProjectAssistantLegacyInspectionCannotCloseManagedSessionAtModelBoundar
 	}
 }
 
-func TestProjectAssistantNativeBrowserCallFailsClosedWhenSafetyObservationIsMissingOrEscaped(t *testing.T) {
+func TestProjectAssistantNativeBrowserMutationReportsUnknownAndFailsClosedWhenSafetyObservationFails(t *testing.T) {
 	cases := []struct {
 		name     string
 		snapshot string
@@ -784,7 +784,7 @@ func TestProjectAssistantNativeBrowserCallFailsClosedWhenSafetyObservationIsMiss
 					switch envelope.Method {
 					case "initialize":
 						recorder.Header().Set("Mcp-Session-Id", "safety-test-session")
-						_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+						_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
 					case "notifications/initialized":
 						recorder.WriteHeader(http.StatusAccepted)
 					case "tools/call":
@@ -810,8 +810,16 @@ func TestProjectAssistantNativeBrowserCallFailsClosedWhenSafetyObservationIsMiss
 				Project:        &aiv1alpha1.Project{ObjectMeta: metav1.ObjectMeta{Name: "demo", UID: types.UID("project-uid")}},
 				AssistantRunID: "run-safety",
 			}
-			if _, err := server.callProjectAssistantNativeBrowserTool(context.Background(), request, "browser_click", projectAssistantToolRiskRuntime); err == nil || !strings.Contains(err.Error(), "safety observation failed") {
-				t.Fatalf("safety failure = %v, want fail-closed safety error", err)
+			result, err := server.callProjectAssistantNativeBrowserTool(context.Background(), request, "browser_click", projectAssistantToolRiskRuntime)
+			if err != nil {
+				t.Fatalf("post-effect safety failure returned transport error: %v", err)
+			}
+			var outcome map[string]any
+			if decodeErr := json.Unmarshal([]byte(result), &outcome); decodeErr != nil {
+				t.Fatalf("outcome-unknown result = %q: %v", result, decodeErr)
+			}
+			if outcome["status"] != "outcome_unknown" || outcome["outcome"] != "unknown" || outcome["replayed"] != false {
+				t.Fatalf("post-effect safety outcome = %#v", outcome)
 			}
 			if got := len(server.browserSessions.sessions); got != 0 {
 				t.Fatalf("unsafe browser session count = %d, want discarded session", got)
@@ -863,6 +871,53 @@ func TestProjectAssistantBrowserSessionManagerReapsIdleEntries(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantBrowserSessionManagerScopesRefsAndCatalogsByWorkspace(t *testing.T) {
+	manager := newProjectAssistantBrowserSessionManager()
+	defer manager.closeAll()
+	ref := dataPlaneRef{Resource: "instances", Name: "browser"}
+	idA := identity{tenantPath: "root:faros:tenants:org-a:ws-a", clusterID: "cluster-a", orgUUID: "org-a", workspaceUUID: "ws-a", user: "alice"}
+	idB := identity{tenantPath: "root:faros:tenants:org-b:ws-b", clusterID: "cluster-b", orgUUID: "org-b", workspaceUUID: "ws-b", user: "bob"}
+	ownerA := browserSessionOwner{Identity: idA, AssistantRunID: "run-a"}
+	ownerB := browserSessionOwner{Identity: idB, AssistantRunID: "run-b"}
+
+	entryA := manager.entry(ownerA, ref)
+	entryB := manager.entry(ownerB, ref)
+	if entryA == nil || entryB == nil || entryA == entryB {
+		t.Fatalf("workspace entries = %p and %p, want distinct entries", entryA, entryB)
+	}
+	if got := len(manager.sessions); got != 2 {
+		t.Fatalf("managed sessions = %d, want two isolated workspace sessions", got)
+	}
+	if got := len(manager.activeByRef); got != 2 {
+		t.Fatalf("active browser scopes = %d, want two", got)
+	}
+	if !manager.hasActiveRef(idA, ref) || !manager.hasActiveRef(idB, ref) {
+		t.Fatal("workspace-scoped active browser was not retained")
+	}
+
+	catalog := []projectMCPTool{{Name: browserMCPToolSnapshot, InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	manager.setBrowserCatalog(idA, ref, catalog)
+	if _, ok := manager.browserCatalog(idA, ref); !ok {
+		t.Fatal("workspace A catalog was not retained")
+	}
+	if _, ok := manager.browserCatalog(idB, ref); ok {
+		t.Fatal("workspace A catalog leaked into workspace B")
+	}
+
+	idASecondCaller := idA
+	idASecondCaller.user = "carol"
+	entryASecondCaller := manager.entry(browserSessionOwner{Identity: idASecondCaller, AssistantRunID: "run-a-2"}, ref)
+	if entryASecondCaller == nil || entryASecondCaller == entryA {
+		t.Fatalf("same-endpoint handoff entry = %p, prior %p", entryASecondCaller, entryA)
+	}
+	if _, retained := manager.sessions[ownerA.key()]; retained {
+		t.Fatal("same-endpoint owner handoff retained the prior workspace A owner")
+	}
+	if _, retained := manager.sessions[ownerB.key()]; !retained {
+		t.Fatal("workspace A owner handoff evicted isolated workspace B")
+	}
+}
+
 func TestProjectAssistantNativeBrowserReadRetriesLostSessionOnce(t *testing.T) {
 	server := &Server{hubBase: "https://hub.example"}
 	server.browserSessions = newProjectAssistantBrowserSessionManager()
@@ -896,7 +951,7 @@ func TestProjectAssistantNativeBrowserReadRetriesLostSessionOnce(t *testing.T) {
 			case "initialize":
 				initializeCalls++
 				recorder.Header().Set("Mcp-Session-Id", string(rune('a'+initializeCalls)))
-				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": initializeCalls, "result": map[string]any{}})
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": initializeCalls, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
 			case "notifications/initialized":
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":
@@ -967,7 +1022,7 @@ func TestProjectAssistantNativeBrowserLostReadWithPendingInteractionIsUnverifiab
 			case "initialize":
 				initializeCalls++
 				recorder.Header().Set("Mcp-Session-Id", "pending-session")
-				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": initializeCalls, "result": map[string]any{}})
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": initializeCalls, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
 			case "notifications/initialized":
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":
@@ -1055,7 +1110,7 @@ func TestProjectAssistantNativeBrowserMutationDoesNotReplayLostSession(t *testin
 			switch envelope.Method {
 			case "initialize":
 				recorder.Header().Set("Mcp-Session-Id", "mutation-session")
-				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": browserMCPProtocolVersion}})
 			case "notifications/initialized":
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/call":

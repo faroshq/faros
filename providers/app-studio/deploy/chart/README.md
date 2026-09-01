@@ -24,6 +24,7 @@ kubectl --namespace faros-provider-app-studio create secret generic faros-provid
 helm upgrade --install app-studio oci://ghcr.io/faroshq/charts/faros-app-studio-provider \
   --namespace faros-provider-app-studio \
   --set hub.url=https://faros.example.com \
+  --set hub.publicURL=https://faros.example.com \
   --set providerKubeconfig.secretName=faros-provider-kubeconfig \
   --set catalogEntry.enabled=true
 ```
@@ -34,7 +35,7 @@ helm upgrade --install app-studio oci://ghcr.io/faroshq/charts/faros-app-studio-
 |---|---|---|
 | `nameOverride` | `""` |  |
 | `fullnameOverride` | `""` |  |
-| `replicaCount` | `1` | App Studio assistant project mutations use a single active writer. The chart rejects other values and uses a Recreate deployment strategy to prevent cross-pod overlap during upgrades. Safe to scale with the default emptyDir workspace: runs and external operations are guarded by durable claims, pr… |
+| `replicaCount` | `1` | Must remain `1`. Each workspace has one shared, single-session Playwright Browser, while browser session ownership is process-local. The chart rejects values greater than `1` and uses Recreate upgrades to prevent transient pod overlap. |
 | `internalPort` | `8091` | internalPort carries peer-forwarded project requests between replicas. Deliberately not part of the Service. |
 | `image` |  |  |
 | `image.repository` | `ghcr.io/faroshq/faros/app-studio-provider` |  |

@@ -170,7 +170,7 @@ func TestBrowserMCPSessionSendsProtocolVersionAfterInitialize(t *testing.T) {
 			case "initialize":
 				recorder.Header().Set("Mcp-Session-Id", "protocol-test-session")
 				_ = json.NewEncoder(recorder).Encode(map[string]any{
-					"jsonrpc": "2.0", "id": 1, "result": map[string]any{},
+					"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": "2025-06-18"},
 				})
 			case "notifications/initialized":
 				recorder.WriteHeader(http.StatusAccepted)
@@ -196,7 +196,7 @@ func TestBrowserMCPSessionSendsProtocolVersionAfterInitialize(t *testing.T) {
 		t.Fatalf("initialize protocol header = %q, want absent before session negotiation", got)
 	}
 	for _, method := range []string{"notifications/initialized", "tools/list", http.MethodGet, http.MethodDelete} {
-		if got, want := seen[method], browserMCPProtocolVersion; got != want {
+		if got, want := seen[method], "2025-06-18"; got != want {
 			t.Fatalf("%s protocol header = %q, want %q", method, got, want)
 		}
 	}
@@ -216,6 +216,38 @@ func TestBrowserMCPSessionSendsProtocolVersionAfterInitialize(t *testing.T) {
 	}
 	if !created || !listed || !closed {
 		t.Fatalf("browser trace missing create/list/close lifecycle: %#v", trace)
+	}
+}
+
+func TestBrowserMCPSessionRejectsInvalidNegotiatedProtocolVersion(t *testing.T) {
+	cases := []struct {
+		name   string
+		result map[string]any
+	}{
+		{name: "missing", result: map[string]any{}},
+		{name: "unsupported", result: map[string]any{"protocolVersion": "2099-01-01"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &Server{hubBase: "https://hub.example"}
+			server.sandboxDataPlaneClientFactory = func(time.Duration) *http.Client {
+				return &http.Client{Transport: sandboxRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+					recorder := httptest.NewRecorder()
+					if request.Method == http.MethodDelete {
+						recorder.WriteHeader(http.StatusNoContent)
+						return recorder.Result(), nil
+					}
+					recorder.Header().Set("Content-Type", "application/json")
+					recorder.Header().Set("Mcp-Session-Id", "invalid-protocol-session")
+					_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": tc.result})
+					return recorder.Result(), nil
+				})}
+			}
+			_, err := server.newBrowserMCPSession(context.Background(), identity{clusterID: "cluster-a"}, dataPlaneRef{Resource: "instances", Name: "browser"})
+			if err == nil || !strings.Contains(err.Error(), "protocolVersion") {
+				t.Fatalf("invalid negotiated protocol error = %v", err)
+			}
+		})
 	}
 }
 
@@ -246,6 +278,7 @@ func (body *testBrowserEventStreamBody) Close() error {
 }
 
 func TestBrowserMCPSessionKeepsEventStreamAliveAndClosesAfterDelete(t *testing.T) {
+	const negotiatedProtocol = "2025-06-18"
 	server := &Server{hubBase: "https://hub.example"}
 	streamBody := &testBrowserEventStreamBody{
 		payload: []byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"ping\",\"params\":{}}\n\n"),
@@ -270,7 +303,7 @@ func TestBrowserMCPSessionKeepsEventStreamAliveAndClosesAfterDelete(t *testing.T
 				if got := request.Header.Get("Mcp-Session-Id"); got != "stream-session" {
 					return nil, fmt.Errorf("GET session = %q", got)
 				}
-				if got := request.Header.Get("MCP-Protocol-Version"); got != browserMCPProtocolVersion {
+				if got := request.Header.Get("MCP-Protocol-Version"); got != negotiatedProtocol {
 					return nil, fmt.Errorf("GET protocol = %q", got)
 				}
 				return &http.Response{
@@ -279,6 +312,9 @@ func TestBrowserMCPSessionKeepsEventStreamAliveAndClosesAfterDelete(t *testing.T
 					Body:       streamBody,
 				}, nil
 			case http.MethodDelete:
+				if got := request.Header.Get("MCP-Protocol-Version"); got != negotiatedProtocol {
+					return nil, fmt.Errorf("DELETE protocol = %q", got)
+				}
 				select {
 				case <-streamBody.closed:
 					appendEvent("DELETE-after-stream-close")
@@ -302,12 +338,21 @@ func TestBrowserMCPSessionKeepsEventStreamAliveAndClosesAfterDelete(t *testing.T
 			switch envelope.Method {
 			case "initialize":
 				recorder.Header().Set("Mcp-Session-Id", "stream-session")
-				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{}})
+				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": negotiatedProtocol}})
 			case "notifications/initialized":
+				if got := request.Header.Get("MCP-Protocol-Version"); got != negotiatedProtocol {
+					return nil, fmt.Errorf("initialized protocol = %q", got)
+				}
 				recorder.WriteHeader(http.StatusAccepted)
 			case "tools/list":
+				if got := request.Header.Get("MCP-Protocol-Version"); got != negotiatedProtocol {
+					return nil, fmt.Errorf("tools/list protocol = %q", got)
+				}
 				_ = json.NewEncoder(recorder).Encode(map[string]any{"jsonrpc": "2.0", "id": 2, "result": map[string]any{"tools": []any{}}})
 			case "":
+				if got := request.Header.Get("MCP-Protocol-Version"); got != negotiatedProtocol {
+					return nil, fmt.Errorf("ping response protocol = %q", got)
+				}
 				if string(envelope.ID) != "99" {
 					return nil, fmt.Errorf("ping response id = %s", envelope.ID)
 				}
