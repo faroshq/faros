@@ -142,149 +142,184 @@ func TestProjectAssistantAttachmentMessagesKeepImagesMultimodalAndTextBounded(t 
 	}
 }
 
-func assistantAttachmentUserEventForTest(t *testing.T, threadID, turnID, itemID string, sequence int64, parts []projectAssistantContentPart) store.AssistantThreadEvent {
-	t.Helper()
-	item := assistantThreadItem{
-		ID: itemID, TurnID: turnID, Type: assistantThreadEventUserMessage, Status: "completed",
-		Data: projectAssistantThreadSelectionDataWithParts(nil, nil, parts),
+func TestProjectAssistantImageReceiptsRemainAttachedToTheirConversationMessage(t *testing.T) {
+	image := []byte("image")
+	receipt := attachmentReceiptForTest("image-history", "screen.png", "image/png", image)
+	conversation := []chatMessage{
+		{Role: "user", Content: "what is in this screenshot?", Attachments: []projectAssistantAttachmentReceipt{receipt}},
+		{Role: "assistant", Content: "I will inspect it."},
+		{Role: "user", Content: "what changed?"},
 	}
-	payload, err := json.Marshal(map[string]any{"item": item})
+	messages, err := projectChatMessagesToEino(conversation)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("project conversation to Eino: %v", err)
 	}
-	return store.AssistantThreadEvent{
-		ThreadID: threadID, TurnID: turnID, Sequence: sequence,
-		Type: assistantThreadEventItemCompleted, ItemID: itemID, Payload: payload,
+	if len(messages) != 4 || messages[0].Content != conversation[0].Content || !projectEinoAssistantHistoricalAttachmentMessage(messages[1]) {
+		t.Fatalf("conversation messages = %#v, want user, historical image placeholder, assistant, user", messages)
+	}
+	roundTrip := projectEinoMessagesToChat(messages)
+	if len(roundTrip) != len(conversation) || len(roundTrip[0].Attachments) != 1 || roundTrip[0].Attachments[0].ID != receipt.ID {
+		t.Fatalf("round-trip conversation = %#v, want receipt on original user message", roundTrip)
 	}
 }
 
-func assistantAttachmentUserEventWithRawDataForTest(t *testing.T, threadID, turnID, itemID string, sequence int64, rawData string) store.AssistantThreadEvent {
-	t.Helper()
-	item := assistantThreadItem{
-		ID: itemID, TurnID: turnID, Type: assistantThreadEventUserMessage, Status: "completed",
-		Data: json.RawMessage(rawData),
+func TestProjectEinoAssistantHistoricalImagesRemainAtOriginalPositionsAcrossLaterTurns(t *testing.T) {
+	image := []byte("historical image bytes")
+	receipt := attachmentReceiptForTest("image-original-position", "screen.png", "image/png", image)
+	conversation := []chatMessage{
+		{Role: "user", Content: "inspect this screenshot", Attachments: []projectAssistantAttachmentReceipt{receipt}},
+		{Role: "assistant", Content: "I inspected the screenshot."},
+		{Role: "user", Content: "now update the page"},
+		{Role: "assistant", Content: "The page is updated."},
+		{Role: "user", Content: "what else should we improve?"},
 	}
-	payload, err := json.Marshal(map[string]any{"item": item})
+	messages, err := projectChatMessagesToEino(conversation)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("project conversation to Eino: %v", err)
 	}
-	return store.AssistantThreadEvent{
-		ThreadID: threadID, TurnID: turnID, Sequence: sequence,
-		Type: assistantThreadEventItemCompleted, ItemID: itemID, Payload: payload,
+	state := &adk.ChatModelAgentState{Messages: messages}
+	runState := newProjectEinoAssistantRunState()
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{receipt.ID: image}},
+	}, runState).(*projectEinoAssistantLifecycle)
+	for boundary := 0; boundary < 2; boundary++ {
+		if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err != nil {
+			t.Fatalf("model boundary %d: %v", boundary, err)
+		}
+		if len(state.Messages) != len(messages) || state.Messages[0].Content != conversation[0].Content {
+			t.Fatalf("boundary %d moved the original user message: %#v", boundary, state.Messages)
+		}
+		if len(state.Messages[1].UserInputMultiContent) != 2 || state.Messages[1].UserInputMultiContent[1].Image == nil {
+			t.Fatalf("boundary %d historical image input = %#v", boundary, state.Messages[1])
+		}
+		if got := state.Messages[1].UserInputMultiContent[1].Image.Base64Data; got == nil || *got != base64.StdEncoding.EncodeToString(image) {
+			t.Fatalf("boundary %d historical image bytes = %#v", boundary, got)
+		}
+		if events := projectAssistantModelInputEvents(state.Messages, boundary+1); len(events) != 0 {
+			t.Fatalf("boundary %d emitted progress for historical image: %#v", boundary, events)
+		}
+		if _, _, err := lifecycle.AfterModelRewriteState(context.Background(), state, nil); err != nil {
+			t.Fatalf("strip boundary %d historical image: %v", boundary, err)
+		}
+		projected := projectEinoMessagesToChat(state.Messages)
+		if len(projected) != len(conversation) || len(projected[0].Attachments) != 1 || projected[0].Attachments[0].ID != receipt.ID {
+			t.Fatalf("boundary %d durable projection = %#v", boundary, projected)
+		}
+		encoded, err := json.Marshal(projected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), string(image)) || strings.Contains(string(encoded), base64.StdEncoding.EncodeToString(image)) {
+			t.Fatalf("boundary %d durable projection leaked image bytes: %s", boundary, encoded)
+		}
 	}
 }
 
-func TestProjectAssistantImageContentPartsStopsAtLatestPriorTextTurn(t *testing.T) {
-	older := attachmentReceiptForTest("image-older", "older.png", "image/png", []byte("older"))
-	text := func(turnID string, sequence int64, content string) store.AssistantThreadEvent {
-		return assistantAttachmentUserEventForTest(t, "thread-1", turnID, "user-"+turnID, sequence, []projectAssistantContentPart{
-			projectAssistantContentPartText(content),
-		})
+func TestProjectEinoAssistantHistoricalImagesDoNotUseCurrentTurnBound(t *testing.T) {
+	image := []byte("historical image bytes")
+	conversation := make([]chatMessage, 0, (projectAssistantCurrentImageMaxCount+1)*2)
+	contents := make(map[string][]byte, projectAssistantCurrentImageMaxCount+1)
+	for index := 0; index <= projectAssistantCurrentImageMaxCount; index++ {
+		receipt := attachmentReceiptForTest(fmt.Sprintf("image-history-%d", index), "screen.png", "image/png", image)
+		conversation = append(conversation,
+			chatMessage{Role: "user", Content: fmt.Sprintf("inspect screenshot %d", index), Attachments: []projectAssistantAttachmentReceipt{receipt}},
+			chatMessage{Role: "assistant", Content: "I inspected it."},
+		)
+		contents[receipt.ID] = image
 	}
-
-	// An image followed by a text turn must not keep replaying the image for
-	// every later text-only follow-up.
-	events := []store.AssistantThreadEvent{
-		assistantAttachmentUserEventForTest(t, "thread-1", "turn-image", "user-image", 1, []projectAssistantContentPart{
-			projectAssistantContentPartAttachment(older),
-		}),
-		text("turn-text", 2, "what changed?"),
-	}
-	parts, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
+	messages, err := projectChatMessagesToEino(conversation)
 	if err != nil {
-		t.Fatalf("inspect latest prior text turn: %v", err)
+		t.Fatalf("project historical image conversation to Eino: %v", err)
 	}
-	if len(parts) != 0 {
-		t.Fatalf("retained image after text turn = %#v, want none", parts)
+	runState := newProjectEinoAssistantRunState()
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: contents},
+	}, runState).(*projectEinoAssistantLifecycle)
+	state := &adk.ChatModelAgentState{Messages: messages}
+	if err := lifecycle.rehydrateAttachmentMessages(context.Background(), state); err != nil {
+		t.Fatalf("rehydrate %d historical images: %v", projectAssistantCurrentImageMaxCount+1, err)
 	}
-
-	// The current turn is skipped by its durable ID; the immediately preceding
-	// non-legacy text turn still stops the search before the older image.
-	events = append(events, text("turn-current", 3, "another follow-up"))
-	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
-	if err != nil || len(parts) != 0 {
-		t.Fatalf("current turn skip after text turn = %#v, err=%v; want none", parts, err)
+	var rehydrated int
+	for _, message := range state.Messages {
+		if !projectEinoAssistantHistoricalAttachmentMessage(message) {
+			continue
+		}
+		if len(message.UserInputMultiContent) != 2 || message.UserInputMultiContent[1].Image == nil {
+			t.Fatalf("historical image placeholder was not rehydrated: %#v", message)
+		}
+		rehydrated++
 	}
-
-	// A legacy item without contentParts is the one compatibility case that may
-	// be skipped while looking for the latest non-legacy item.
-	events = []store.AssistantThreadEvent{
-		assistantAttachmentUserEventForTest(t, "thread-1", "turn-image", "user-image", 1, []projectAssistantContentPart{
-			projectAssistantContentPartAttachment(older),
-		}),
-		assistantAttachmentUserEventWithRawDataForTest(t, "thread-1", "turn-legacy", "user-legacy", 2, `{"legacy":"item"}`),
-		text("turn-text", 3, "still text-only"),
-	}
-	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
-	if err != nil || len(parts) != 0 {
-		t.Fatalf("legacy skip before text turn = %#v, err=%v; want none", parts, err)
-	}
-
-	// Skipping the current image turn leaves an immediately preceding image
-	// available, and duplicate receipts remain deduplicated.
-	latest := attachmentReceiptForTest("image-latest", "latest.png", "image/png", []byte("latest"))
-	events = []store.AssistantThreadEvent{
-		assistantAttachmentUserEventForTest(t, "thread-1", "turn-image", "user-image", 1, []projectAssistantContentPart{
-			projectAssistantContentPartAttachment(older),
-		}),
-		assistantAttachmentUserEventForTest(t, "thread-1", "turn-latest", "user-latest", 2, []projectAssistantContentPart{
-			projectAssistantContentPartAttachment(latest),
-			projectAssistantContentPartAttachment(latest),
-		}),
-	}
-	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
-	if err != nil || len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != latest.ID {
-		t.Fatalf("latest prior image parts = %#v, err=%v", parts, err)
-	}
-	parts, err = projectAssistantImageContentPartsFromThreadEvents(events, "turn-latest")
-	if err != nil || len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != older.ID {
-		t.Fatalf("prior image after skipping current turn = %#v, err=%v", parts, err)
+	if rehydrated != projectAssistantCurrentImageMaxCount+1 {
+		t.Fatalf("rehydrated historical images = %d, want %d", rehydrated, projectAssistantCurrentImageMaxCount+1)
 	}
 }
 
-func TestProjectAssistantImageContentPartsFailsClosedOnLatestMalformedAttachmentCandidate(t *testing.T) {
-	older := attachmentReceiptForTest("image-older-malformed", "older.png", "image/png", []byte("older"))
-	latest := attachmentReceiptForTest("image-latest-malformed", "latest.png", "image/png", []byte("latest"))
-	receiptJSON, err := json.Marshal(latest)
+func TestProjectEinoAssistantHistoricalAttachmentMetadataFailsClosed(t *testing.T) {
+	receipt := attachmentReceiptForTest("image-malformed-history", "screen.png", "image/png", []byte("image"))
+	message := projectAssistantAttachmentPlaceholderMessage(receipt)
+	message.Extra[projectAssistantAttachmentMessageReceiptsKey] = []map[string]any{{"id": receipt.ID}}
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{}, newProjectEinoAssistantRunState()).(*projectEinoAssistantLifecycle)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("inspect this"), message}}
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err == nil || !strings.Contains(err.Error(), "historical attachment receipt") {
+		t.Fatalf("malformed historical receipt error = %v, want fail-closed validation", err)
+	}
+}
+
+func TestProjectEinoAssistantCurrentImageStillReportsModelInputProgress(t *testing.T) {
+	image := []byte("current image bytes")
+	receipt := attachmentReceiptForTest("image-current-turn", "current.png", "image/png", image)
+	conversation, err := projectChatMessagesToEino([]chatMessage{{
+		Role: "user", Content: "inspect this new image", Attachments: []projectAssistantAttachmentReceipt{receipt},
+	}})
+	if err != nil {
+		t.Fatalf("project current conversation to Eino: %v", err)
+	}
+	runState := newProjectEinoAssistantRunState()
+	runState.SetContentParts([]projectAssistantContentPart{projectAssistantContentPartAttachment(receipt)})
+	var events []projectAssistantModelInputEvent
+	lifecycle := projectEinoAssistantLifecycleMiddleware(projectAssistantRunRequest{
+		AttachmentReader: projectAssistantAttachmentReaderTestDouble{contents: map[string][]byte{receipt.ID: image}},
+		StreamCallbacks: projectAssistantStreamCallbacks{OnModelInput: func(event projectAssistantModelInputEvent) {
+			events = append(events, event)
+		}},
+	}, runState).(*projectEinoAssistantLifecycle)
+	state := &adk.ChatModelAgentState{Messages: conversation}
+	if _, _, err := lifecycle.BeforeModelRewriteState(context.Background(), state, nil); err != nil {
+		t.Fatalf("current image model boundary: %v", err)
+	}
+	runState.NextModelCallOrdinal()
+	handler := newProjectEinoAssistantModelCallbackHandler(projectAssistantStreamCallbacks{
+		OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+	}, runState, nil)
+	ctx := handler.OnStart(context.Background(), nil, &einomodel.CallbackInput{Messages: state.Messages})
+	handler.OnEnd(ctx, nil, &einomodel.CallbackOutput{Message: schema.AssistantMessage("I can see it.", nil)})
+	if len(events) != 2 || events[0].Status != "started" || events[1].Status != "completed" || events[0].ID != "image-input-"+receipt.ID {
+		t.Fatalf("current image lifecycle events = %#v", events)
+	}
+}
+
+func TestProjectEinoAssistantCompactionKeepsReceiptOnlyWithRetainedUserMessage(t *testing.T) {
+	image := []byte("compaction image bytes")
+	receipt := attachmentReceiptForTest("image-compaction", "compaction.png", "image/png", image)
+	original, err := projectChatMessagesToEino([]chatMessage{
+		{Role: "user", Content: "keep this screenshot context", Attachments: []projectAssistantAttachmentReceipt{receipt}},
+		{Role: "assistant", Content: "not retained by user-only compaction"},
+		{Role: "user", Content: "latest request"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt := string(receiptJSON)
-	for _, test := range []struct {
-		name string
-		data string
-	}{
-		{name: "malformed content parts JSON", data: `{"contentParts":"not-an-array"}`},
-		{name: "attachment without type", data: `{"contentParts":[{"attachment":` + receipt + `}]}`},
-		{name: "attachment without receipt", data: `{"contentParts":[{"type":"attachment"}]}`},
-		{name: "attachment on text part", data: `{"contentParts":[{"type":"text","text":"follow up","attachment":` + receipt + `}]}`},
-		{name: "null content parts", data: `{"contentParts":null}`},
-		{name: "malformed item data without content parts marker", data: `[]`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			events := []store.AssistantThreadEvent{
-				assistantAttachmentUserEventForTest(t, "thread-malformed", "turn-older", "user-older", 1, []projectAssistantContentPart{
-					projectAssistantContentPartAttachment(older),
-				}),
-				assistantAttachmentUserEventWithRawDataForTest(t, "thread-malformed", "turn-latest", "user-latest", 2, test.data),
-			}
-			if _, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-current"); err == nil {
-				t.Fatal("malformed latest attachment candidate was accepted and older image was used")
-			}
-		})
+	retained := projectEinoAssistantRecentUserMessages(original, projectEinoAssistantHistoricalImageTokenEstimate+100)
+	projected := projectEinoMessagesToChat(retained)
+	if len(projected) != 2 || len(projected[0].Attachments) != 1 || projected[0].Attachments[0].ID != receipt.ID {
+		t.Fatalf("retained compaction history = %#v, want receipt with original user message", projected)
 	}
-
-	// A legacy user item without contentParts carries no attachment claim and
-	// remains skippable, so a still-valid older image can be retained.
-	events := []store.AssistantThreadEvent{
-		assistantAttachmentUserEventForTest(t, "thread-legacy", "turn-older", "user-older", 1, []projectAssistantContentPart{
-			projectAssistantContentPartAttachment(older),
-		}),
-		assistantAttachmentUserEventWithRawDataForTest(t, "thread-legacy", "turn-legacy", "user-legacy", 2, `{"legacy":"item"}`),
-	}
-	parts, err := projectAssistantImageContentPartsFromThreadEvents(events, "turn-current")
-	if err != nil || len(parts) != 1 || parts[0].Attachment == nil || parts[0].Attachment.ID != older.ID {
-		t.Fatalf("legacy no-contentParts candidate = %#v, err=%v; want older image", parts, err)
+	retained = projectEinoAssistantRecentUserMessages(original, 1)
+	projected = projectEinoMessagesToChat(retained)
+	for _, message := range projected {
+		if len(message.Attachments) != 0 {
+			t.Fatalf("dropped user message retained attachment receipt: %#v", projected)
+		}
 	}
 }
 
@@ -298,19 +333,19 @@ func TestProjectAssistantModelImageBoundsDeduplicateAndFailClosed(t *testing.T) 
 	if err != nil || len(parts) != 1 || parts[0].ID != duplicate.ID {
 		t.Fatalf("deduplicated image receipts = %#v, err=%v", parts, err)
 	}
-	overCount := make([]projectAssistantContentPart, 0, projectAssistantRetainedImageMaxCount+1)
-	for index := 0; index <= projectAssistantRetainedImageMaxCount; index++ {
+	overCount := make([]projectAssistantContentPart, 0, projectAssistantCurrentImageMaxCount+1)
+	for index := 0; index <= projectAssistantCurrentImageMaxCount; index++ {
 		receipt := attachmentReceiptForTest(fmt.Sprintf("image-%d", index), "screen.png", "image/png", image)
 		overCount = append(overCount, projectAssistantContentPartAttachment(receipt))
 	}
-	if _, err := projectAssistantAttachmentReceiptsForModel(overCount); err == nil || !strings.Contains(err.Error(), "more than 4 images") {
+	if _, err := projectAssistantAttachmentReceiptsForModel(overCount); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("more than %d images", projectAssistantCurrentImageMaxCount)) {
 		t.Fatalf("image count bounds error = %v", err)
 	}
 	overBytes := []projectAssistantContentPart{
 		projectAssistantContentPartAttachment(attachmentReceiptForTest("image-big-1", "screen.png", "image/png", image)),
 		projectAssistantContentPartAttachment(attachmentReceiptForTest("image-big-2", "screen.png", "image/png", image)),
 	}
-	overBytes[0].Attachment.SizeBytes = projectAssistantRetainedImageMaxBytes
+	overBytes[0].Attachment.SizeBytes = projectAssistantCurrentImageMaxBytes
 	overBytes[1].Attachment.SizeBytes = 1
 	if _, err := projectAssistantAttachmentReceiptsForModel(overBytes); err == nil || !strings.Contains(err.Error(), "exceed") {
 		t.Fatalf("image aggregate bounds error = %v", err)

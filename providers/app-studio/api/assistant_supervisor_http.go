@@ -245,7 +245,7 @@ func (s *Server) startProjectAssistantRunDurablyWithModeAndSkills(ctx context.Co
 		}
 		return projectAssistantDurableStartResult{Run: created}, nil
 	}
-	if err := appendProjectAssistantConversationMessage(ctx, s.store, scope, created.ID, "message-"+user.ID, projectAssistantConversationUser, chatMessage{Role: "user", Content: user.Content}); err != nil {
+	if err := appendProjectAssistantConversationMessage(ctx, s.store, scope, created.ID, "message-"+user.ID, projectAssistantConversationUser, chatMessage{Role: "user", Content: user.Content, Attachments: projectAssistantImageAttachmentReceipts(parts)}); err != nil {
 		persistErr := fmt.Errorf("persist assistant conversation user item: %w", err)
 		failedRun := created
 		failedMessage := assistant

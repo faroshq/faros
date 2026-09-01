@@ -109,12 +109,19 @@ func (r *projectEinoAssistantModelCallbackRecorder) recordModelInput(ctx context
 	attachments := projectAssistantModelInputEvents(modelInput.Messages, ordinal)
 	if len(attachments) > 0 {
 		r.mu.Lock()
+		fresh := make([]projectAssistantModelInputEvent, 0, len(attachments))
+		for _, attachment := range attachments {
+			if r.runState.ModelInputCompleted(attachment.ID) {
+				continue
+			}
+			fresh = append(fresh, attachment)
+		}
 		if r.modelInputs == nil {
 			r.modelInputs = map[int][]projectAssistantModelInputEvent{}
 		}
-		r.modelInputs[ordinal] = append([]projectAssistantModelInputEvent(nil), attachments...)
+		r.modelInputs[ordinal] = append([]projectAssistantModelInputEvent(nil), fresh...)
 		r.mu.Unlock()
-		for _, attachment := range attachments {
+		for _, attachment := range fresh {
 			r.emitModelInput(attachment)
 		}
 	}
@@ -173,6 +180,11 @@ func (r *projectEinoAssistantModelCallbackRecorder) finishModelInputs(status, er
 	r.mu.Lock()
 	attachments := append([]projectAssistantModelInputEvent(nil), r.modelInputs[ordinal]...)
 	delete(r.modelInputs, ordinal)
+	if status == "completed" && len(attachments) > 0 {
+		for _, attachment := range attachments {
+			r.runState.RecordCompletedModelInput(attachment.ID)
+		}
+	}
 	r.mu.Unlock()
 	for _, attachment := range attachments {
 		attachment.Status = status

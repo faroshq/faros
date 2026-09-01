@@ -78,6 +78,7 @@ type projectAssistantCheckpointState struct {
 	RepeatedActionCount              int                                                 `json:"repeatedActionCount,omitempty"`
 	RuntimeWarmupAttempts            int                                                 `json:"runtimeWarmupAttempts,omitempty"`
 	ModelCallOrdinal                 int                                                 `json:"modelCallOrdinal,omitempty"`
+	CompletedModelInputIDs           []string                                            `json:"completedModelInputIDs,omitempty"`
 	AcceptedProgressCount            int                                                 `json:"acceptedProgressCount,omitempty"`
 	LastAcceptedProgressModelCall    int                                                 `json:"lastAcceptedProgressModelCall,omitempty"`
 	ProgressReminderKind             string                                              `json:"progressReminderKind,omitempty"`
@@ -1646,6 +1647,7 @@ func cloneChatMessages(src []chatMessage) []chatMessage {
 	for i, msg := range src {
 		dst[i] = msg
 		dst[i].ToolCalls = cloneProjectAssistantToolCalls(msg.ToolCalls)
+		dst[i].Attachments = cloneProjectAssistantAttachmentReceipts(msg.Attachments)
 		dst[i].Extra = projectAssistantDurableMessageExtra(msg.Extra)
 	}
 	return dst

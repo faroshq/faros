@@ -198,7 +198,11 @@ type chatMessage struct {
 	Name       string         `json:"name,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
-	Extra      map[string]any `json:"extra,omitempty"`
+	// Attachments contains normalized, metadata-only receipts belonging to
+	// this user message. The bytes remain in AttachmentStore and are read only
+	// at the model boundary.
+	Attachments []projectAssistantAttachmentReceipt `json:"attachments,omitempty"`
+	Extra       map[string]any                      `json:"extra,omitempty"`
 }
 
 // projectAssistantDurableMessageExtra keeps only server-owned provenance that
@@ -468,10 +472,11 @@ func (s *Server) generateProjectAssistantResultWithStart(
 	turnPolicy := projectAssistantTurnPolicyForProfile(profile)
 	var modelContentParts []projectAssistantContentPart
 	if start != nil {
-		modelContentParts, err = s.projectAssistantModelContentPartsForStart(ctx, messageScope, start.ThreadID, durable.ID, start.ContentParts)
-		if err != nil {
-			return projectAssistantRunResult{}, err
-		}
+		// Attachments are persisted on their originating conversation message
+		// and rehydrated from that history at every model boundary. Keep only
+		// this run's selected parts here so read_attachment and attachment
+		// progress remain scoped to the current user turn.
+		modelContentParts = cloneProjectAssistantContentParts(start.ContentParts)
 	}
 	req := projectAssistantRunRequest{
 		Identity:                 id,

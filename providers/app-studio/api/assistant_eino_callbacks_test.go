@@ -97,6 +97,60 @@ func TestProjectEinoAssistantModelCallbackEmitsHonestImageLifecycle(t *testing.T
 	}
 }
 
+func TestProjectEinoAssistantModelCallbackDoesNotRepeatCompletedImageLifecycle(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	var events []projectAssistantModelInputEvent
+	handler := newProjectEinoAssistantModelCallbackHandler(projectAssistantStreamCallbacks{
+		OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+	}, runState, nil)
+	for call := 0; call < 2; call++ {
+		runState.NextModelCallOrdinal()
+		ctx := handler.OnStart(context.Background(), nil, &einomodel.CallbackInput{
+			Messages: []*schema.Message{assistantModelInputMessageForTest()},
+		})
+		handler.OnEnd(ctx, nil, &einomodel.CallbackOutput{Message: schema.AssistantMessage("ok", nil)})
+	}
+	if len(events) != 2 || events[0].Status != "started" || events[1].Status != "completed" {
+		t.Fatalf("repeated model calls emitted image lifecycle events = %#v, want one started/completed pair", events)
+	}
+}
+
+func TestProjectEinoAssistantModelCallbackDoesNotRepeatImageLifecycleAfterCheckpointRestore(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	runState.RecordCompletedModelInput("image-input-image-1")
+	restored := newProjectEinoAssistantRunState()
+	restored.RestoreCheckpointState(runState.CheckpointState())
+	restored.NextModelCallOrdinal()
+	var events []projectAssistantModelInputEvent
+	handler := newProjectEinoAssistantModelCallbackHandler(projectAssistantStreamCallbacks{
+		OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+	}, restored, nil)
+	ctx := handler.OnStart(context.Background(), nil, &einomodel.CallbackInput{
+		Messages: []*schema.Message{assistantModelInputMessageForTest()},
+	})
+	handler.OnEnd(ctx, nil, &einomodel.CallbackOutput{Message: schema.AssistantMessage("ok", nil)})
+	if len(events) != 0 {
+		t.Fatalf("restored completed image emitted lifecycle events = %#v", events)
+	}
+}
+
+func TestProjectEinoAssistantModelCallbackRetriesFailedImageLifecycle(t *testing.T) {
+	runState := newProjectEinoAssistantRunState()
+	var events []projectAssistantModelInputEvent
+	handler := newProjectEinoAssistantModelCallbackHandler(projectAssistantStreamCallbacks{
+		OnModelInput: func(event projectAssistantModelInputEvent) { events = append(events, event) },
+	}, runState, nil)
+	runState.NextModelCallOrdinal()
+	ctx := handler.OnStart(context.Background(), nil, &einomodel.CallbackInput{Messages: []*schema.Message{assistantModelInputMessageForTest()}})
+	handler.OnError(ctx, nil, errors.New("temporary provider failure"))
+	runState.NextModelCallOrdinal()
+	ctx = handler.OnStart(context.Background(), nil, &einomodel.CallbackInput{Messages: []*schema.Message{assistantModelInputMessageForTest()}})
+	handler.OnEnd(ctx, nil, &einomodel.CallbackOutput{Message: schema.AssistantMessage("ok", nil)})
+	if len(events) != 4 || events[1].Status != "failed" || events[2].Status != "started" || events[3].Status != "completed" {
+		t.Fatalf("failed image retry lifecycle events = %#v", events)
+	}
+}
+
 func TestProjectEinoSortedToolCallsHandlesSparseIndexes(t *testing.T) {
 	got := projectEinoSortedToolCalls(map[int]chatToolCall{
 		2: {ID: "call-2"},
