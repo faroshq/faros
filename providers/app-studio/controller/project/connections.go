@@ -80,7 +80,7 @@ func projectOwnedDevelopmentServices(ctx context.Context, c client.Client, p *ai
 	for i := range list.Items {
 		item := list.Items[i].DeepCopy()
 		labels := item.GetLabels()
-		if labels[projectConnectionProjectLabel] != p.Name || labels[projectConnectionProjectUIDLabel] != string(p.UID) {
+		if labels[projectConnectionProjectLabel] != p.Name || labels[projectConnectionProjectUIDLabel] != string(p.UID) || !projectDevelopmentServiceOwnerMatches(item, p) {
 			continue
 		}
 		logicalName := strings.TrimSpace(labels[projectDevelopmentServiceLogicalNameLabel])
@@ -90,6 +90,18 @@ func projectOwnedDevelopmentServices(ctx context.Context, c client.Client, p *ai
 		out[logicalName] = item
 	}
 	return out, nil
+}
+
+func projectDevelopmentServiceOwnerMatches(service *unstructured.Unstructured, project *aiv1alpha1.Project) bool {
+	if service == nil || project == nil || project.UID == "" {
+		return false
+	}
+	for _, owner := range service.GetOwnerReferences() {
+		if owner.APIVersion == aiv1alpha1.SchemeGroupVersion.String() && owner.Kind == "Project" && owner.Name == project.Name && owner.UID == project.UID && owner.Controller != nil && *owner.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 func reconcileProjectConnections(ctx context.Context, c client.Client, p *aiv1alpha1.Project, instances map[string]map[string]*unstructured.Unstructured) (map[string][]aiv1alpha1.ProjectEnvironmentConnectionStatus, bool, error) {

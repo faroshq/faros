@@ -512,6 +512,9 @@ func (c *Controller) resolveSandboxControl(ctx context.Context, tenantClient cli
 	if string(sandbox.GetUID()) != spec.SandboxUID {
 		return nil, sandboxControlRef{}, fmt.Errorf("sandbox Instance %q UID does not match spec.sandboxRef.uid", spec.SandboxName)
 	}
+	if !sandboxOwnedByProject(sandbox, spec) {
+		return nil, sandboxControlRef{}, fmt.Errorf("sandbox Instance %q is not owned by Project %q with UID %q", spec.SandboxName, spec.ProjectName, spec.ProjectUID)
+	}
 	templateName, _, _ := unstructured.NestedString(sandbox.Object, "spec", "template")
 	if templateName != infrav1alpha1.UniversalCodingSandboxTemplateName {
 		return nil, sandboxControlRef{}, fmt.Errorf("sandbox Instance %q must use template %q", spec.SandboxName, infrav1alpha1.UniversalCodingSandboxTemplateName)
@@ -546,6 +549,25 @@ func (c *Controller) resolveSandboxControl(ctx context.Context, tenantClient cli
 		return sandbox, ref, nil
 	}
 	return sandbox, ref, nil
+}
+
+func sandboxOwnedByProject(sandbox *unstructured.Unstructured, spec normalizedDevelopmentService) bool {
+	if sandbox == nil || strings.TrimSpace(spec.ProjectName) == "" || strings.TrimSpace(spec.ProjectUID) == "" {
+		return false
+	}
+	for _, owner := range sandbox.GetOwnerReferences() {
+		groupVersion, err := schema.ParseGroupVersion(owner.APIVersion)
+		if err != nil || groupVersion.Group != "ai.faros.sh" || owner.Kind != "Project" {
+			continue
+		}
+		if owner.Controller == nil || !*owner.Controller {
+			continue
+		}
+		if owner.Name == spec.ProjectName && string(owner.UID) == spec.ProjectUID {
+			return true
+		}
+	}
+	return false
 }
 
 func sandboxReady(status map[string]any) bool {
@@ -624,8 +646,8 @@ func (c *Controller) ensureDevelopmentServiceResources(ctx context.Context, tena
 							map[string]any{"name": "FAROS_ACCESS_PROXY_ROUTES", "value": "/=" + routeTarget},
 							map[string]any{"name": "FAROS_ACCESS_PROXY_INSTANCE_CLUSTER", "value": tenant},
 							map[string]any{"name": "FAROS_ACCESS_PROXY_INSTANCE_GROUP", "value": infrav1alpha1.GroupName},
-							map[string]any{"name": "FAROS_ACCESS_PROXY_INSTANCE_RESOURCE", "value": infrav1alpha1.InstancesResource},
-							map[string]any{"name": "FAROS_ACCESS_PROXY_INSTANCE_NAME", "value": spec.SandboxName},
+							map[string]any{"name": "FAROS_ACCESS_PROXY_INSTANCE_RESOURCE", "value": developmentServiceGVR.Resource},
+							map[string]any{"name": "FAROS_ACCESS_PROXY_INSTANCE_NAME", "value": service.Name},
 							map[string]any{"name": "FAROS_HUB_URL", "value": hubURL},
 							map[string]any{"name": "FAROS_HUB_PUBLIC_URL", "value": hubPublicURL},
 							map[string]any{"name": "FAROS_HUB_INSECURE_SKIP_TLS_VERIFY", "value": strconv.FormatBool(insecure)},

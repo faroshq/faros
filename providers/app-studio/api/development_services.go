@@ -175,6 +175,9 @@ func projectDevelopmentServiceBelongsToProject(obj *unstructured.Unstructured, p
 	labels := obj.GetLabels()
 	projectName := strings.TrimSpace(project.Name)
 	projectUID := strings.TrimSpace(string(project.UID))
+	if projectUID == "" || !projectControllerOwnerMatches(obj.GetOwnerReferences(), projectName, projectUID) {
+		return false
+	}
 	labelName := strings.TrimSpace(labels["faros.sh/project"])
 	if labelName == "" {
 		labelName, _, _ = unstructured.NestedString(obj.Object, "spec", "projectRef", "name")
@@ -182,14 +185,23 @@ func projectDevelopmentServiceBelongsToProject(obj *unstructured.Unstructured, p
 	if labelName != projectName {
 		return false
 	}
-	if projectUID == "" {
-		return false
-	}
 	labelUID := strings.TrimSpace(labels["faros.sh/project-uid"])
 	if labelUID == "" {
 		labelUID, _, _ = unstructured.NestedString(obj.Object, "spec", "projectRef", "uid")
 	}
 	return labelUID == projectUID
+}
+
+func projectControllerOwnerMatches(owners []metav1.OwnerReference, projectName, projectUID string) bool {
+	for _, owner := range owners {
+		if owner.APIVersion != aiv1alpha1.SchemeGroupVersion.String() || owner.Kind != "Project" || owner.Name != projectName || string(owner.UID) != projectUID {
+			continue
+		}
+		if owner.Controller != nil && *owner.Controller {
+			return true
+		}
+	}
+	return false
 }
 
 func projectDevelopmentServiceLogicalName(obj *unstructured.Unstructured) string {

@@ -209,6 +209,9 @@ func TestEnsureDevelopmentServiceResourcesUsesVisibilityAndRouteContract(t *test
 			if env["FAROS_HUB_URL"] != test.hubURL {
 				t.Fatalf("access proxy hub URL = %q, want %q", env["FAROS_HUB_URL"], test.hubURL)
 			}
+			if env["FAROS_ACCESS_PROXY_INSTANCE_GROUP"] != infrav1alpha1.GroupName || env["FAROS_ACCESS_PROXY_INSTANCE_RESOURCE"] != developmentServiceGVR.Resource || env["FAROS_ACCESS_PROXY_INSTANCE_NAME"] != service.Name {
+				t.Fatalf("access proxy authorization target = %s/%s %s, want DevelopmentService %s", env["FAROS_ACCESS_PROXY_INSTANCE_GROUP"], env["FAROS_ACCESS_PROXY_INSTANCE_RESOURCE"], env["FAROS_ACCESS_PROXY_INSTANCE_NAME"], service.Name)
+			}
 
 			route, err := runtimeClient.Resource(httpRouteGVR).Namespace("runtime").Get(context.Background(), names.route, metav1.GetOptions{})
 			if err != nil {
@@ -362,7 +365,7 @@ func TestResolveSandboxControlChecksUIDAndTemplate(t *testing.T) {
 	valid := runtimeSandboxObject("sandbox", "uid-1", infrav1alpha1.UniversalCodingSandboxTemplateName, infrav1alpha1.FarosModeDevelopment)
 	client := clientfake.NewClientBuilder().WithObjects(valid).Build()
 	controller := &Controller{}
-	base := normalizedDevelopmentService{SandboxName: "sandbox", SandboxUID: "uid-1"}
+	base := normalizedDevelopmentService{SandboxName: "sandbox", SandboxUID: "uid-1", ProjectName: "project", ProjectUID: "project-uid"}
 
 	_, ref, err := controller.resolveSandboxControl(context.Background(), client, "tenant", base)
 	if err != nil {
@@ -392,6 +395,14 @@ func TestResolveSandboxControlChecksUIDAndTemplate(t *testing.T) {
 				t.Fatalf("resolve error = %v, want message containing %q", err, test.want)
 			}
 		})
+	}
+
+	notOwned := runtimeSandboxObject("sandbox", "uid-1", infrav1alpha1.UniversalCodingSandboxTemplateName, infrav1alpha1.FarosModeDevelopment)
+	controllerRef := true
+	notOwned.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "ai.faros.sh/v1alpha1", Kind: "Project", Name: "other", UID: types.UID("other-uid"), Controller: &controllerRef}})
+	notOwnedClient := clientfake.NewClientBuilder().WithObjects(notOwned).Build()
+	if _, _, err := controller.resolveSandboxControl(context.Background(), notOwnedClient, "tenant", base); err == nil || !strings.Contains(err.Error(), "not owned by Project") {
+		t.Fatalf("resolve mismatched Project owner error = %v, want fail-closed ownership error", err)
 	}
 }
 
@@ -507,6 +518,10 @@ func runtimeSandboxObject(name, uid, templateName, mode string) *unstructured.Un
 	// client rather than metadata.namespace.
 	object := runtimeTestObject(instanceGVK.GroupVersion().String(), instanceGVK.Kind, name, "")
 	object.SetUID(types.UID(uid))
+	controller := true
+	object.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "ai.faros.sh/v1alpha1", Kind: "Project", Name: "project", UID: types.UID("project-uid"), Controller: &controller,
+	}})
 	object.Object["spec"] = map[string]any{
 		"template": templateName,
 		"values": map[string]any{

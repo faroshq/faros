@@ -181,6 +181,20 @@ func TestDevelopmentServiceOwnershipRequiresProjectNameAndUID(t *testing.T) {
 	}{
 		{name: "matching name and uid", want: true},
 		{
+			name: "missing controller owner",
+			mutate: func(obj *unstructured.Unstructured, _ *aiv1alpha1.Project) {
+				obj.SetOwnerReferences(nil)
+			},
+		},
+		{
+			name: "wrong controller owner uid",
+			mutate: func(obj *unstructured.Unstructured, _ *aiv1alpha1.Project) {
+				owners := obj.GetOwnerReferences()
+				owners[0].UID = types.UID("other-uid")
+				obj.SetOwnerReferences(owners)
+			},
+		},
+		{
 			name: "wrong project uid",
 			mutate: func(obj *unstructured.Unstructured, _ *aiv1alpha1.Project) {
 				labels := obj.GetLabels()

@@ -57,7 +57,22 @@ func projectConnectionTestFixture(t *testing.T) (*aiv1alpha1.Project, *unstructu
 		}},
 		"spec": map[string]any{},
 	}}
+	controller := true
+	service.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project", Name: p.Name, UID: p.UID, Controller: &controller}})
 	return p, source, service
+}
+
+func TestProjectOwnedDevelopmentServicesRejectsForgedLabelsWithoutProjectOwner(t *testing.T) {
+	p, _, service := projectConnectionTestFixture(t)
+	service.SetOwnerReferences(nil)
+	c := fake.NewClientBuilder().WithScheme(projectConnectionTestScheme(t)).WithObjects(service).Build()
+	services, err := projectOwnedDevelopmentServices(context.Background(), c, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(services) != 0 {
+		t.Fatalf("forged label-only DevelopmentService was accepted: %#v", services)
+	}
 }
 
 func TestReconcileProjectConnectionsPinsExactUIDsAndDerivesServiceRefs(t *testing.T) {
