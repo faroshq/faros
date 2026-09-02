@@ -574,6 +574,7 @@ docker exec {kro_node} ctr -n k8s.io images tag --force \
                    ),
         deps=[
             'providers/infrastructure/dev-agent/Dockerfile.universal',
+            'providers/infrastructure/dev-agent/universal',
             'Makefile',
         ],
         resource_deps=['kro-mgmt-up'],

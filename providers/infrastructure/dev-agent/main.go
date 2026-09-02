@@ -427,8 +427,9 @@ func runCoordinator(ctx context.Context, cfg *agentConfig) error {
 	mutationMu := &sync.Mutex{}
 	runtime := &httpRuntimeClient{baseURL: cfg.RuntimeURL, client: &http.Client{Timeout: runtimeOperationTimeout}}
 	control := newCoordinatorServer(cfg, runtime, mutationMu)
-	execCoordinator, err := newExecCoordinator(cfg.WorkDir, cfg.StateDir, cfg.ControlToken,
-		&httpExecDispatcher{url: strings.TrimRight(cfg.ExecutorURL, "/") + "/internal/exec", client: &http.Client{}}, mutationMu)
+	dispatcher := &httpExecDispatcher{url: strings.TrimRight(cfg.ExecutorURL, "/") + "/internal/exec", client: &http.Client{}}
+	control.dependencyExecutor = dispatcher
+	execCoordinator, err := newExecCoordinator(cfg.WorkDir, cfg.StateDir, cfg.ControlToken, dispatcher, mutationMu)
 	if err != nil {
 		return err
 	}
@@ -791,14 +792,15 @@ type syncRequest struct {
 }
 
 type syncResponse struct {
-	Phase          string   `json:"phase"`
-	Changed        []string `json:"changed"`
-	Deleted        []string `json:"deleted,omitempty"`
-	ReloadRuns     []string `json:"reloadRuns,omitempty"`
-	Restarted      bool     `json:"restarted"`
-	ReloadError    string   `json:"reloadError,omitempty"`
-	SourceRevision uint64   `json:"sourceRevision,omitempty"`
-	SourceDigest   string   `json:"sourceDigest,omitempty"`
+	Phase                  string   `json:"phase"`
+	Changed                []string `json:"changed"`
+	Deleted                []string `json:"deleted,omitempty"`
+	ReloadRuns             []string `json:"reloadRuns,omitempty"`
+	Restarted              bool     `json:"restarted"`
+	NamedServicesRestarted int      `json:"namedServicesRestarted,omitempty"`
+	ReloadError            string   `json:"reloadError,omitempty"`
+	SourceRevision         uint64   `json:"sourceRevision,omitempty"`
+	SourceDigest           string   `json:"sourceDigest,omitempty"`
 }
 
 // workspaceManifest is synchronization metadata, not a security boundary.
@@ -825,19 +827,21 @@ type envResponse struct {
 }
 
 type agentServer struct {
-	mux          *http.ServeMux
-	config       *agentConfig
-	actionsState *actionsTokenState
-	supervisor   *supervisor
-	logs         *ringLog
-	runtime      runtimeOperations
-	mutationMu   *sync.Mutex
-	checkpoints  map[string]workspaceCheckpoint
+	mux                 *http.ServeMux
+	config              *agentConfig
+	actionsState        *actionsTokenState
+	supervisor          *supervisor
+	logs                *ringLog
+	runtime             runtimeOperations
+	mutationMu          *sync.Mutex
+	checkpoints         map[string]workspaceCheckpoint
+	resolveDependencies dependencyResolverFunc
+	dependencyExecutor  execDispatcher
 }
 
 func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 	logs := newRingLog(500)
-	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), logs: logs, mutationMu: &sync.Mutex{}, checkpoints: map[string]workspaceCheckpoint{}}
+	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), logs: logs, mutationMu: &sync.Mutex{}, checkpoints: map[string]workspaceCheckpoint{}, dependencyExecutor: directExecDispatcher{workspace: cfg.WorkDir}}
 	s.supervisor = newSupervisor(ctx, cfg, logs)
 	s.runtime = &localRuntime{supervisor: s.supervisor, logs: logs, services: newServiceManager(ctx, cfg.WorkDir)}
 	s.initMux()
@@ -845,7 +849,7 @@ func newAgentServer(ctx context.Context, cfg *agentConfig) *agentServer {
 }
 
 func newCoordinatorServer(cfg *agentConfig, runtime runtimeOperations, mutationMu *sync.Mutex) *agentServer {
-	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), runtime: runtime, mutationMu: mutationMu, checkpoints: map[string]workspaceCheckpoint{}}
+	s := &agentServer{config: cfg, actionsState: ensureActionsTokenState(cfg), runtime: runtime, mutationMu: mutationMu, checkpoints: map[string]workspaceCheckpoint{}, dependencyExecutor: directExecDispatcher{workspace: cfg.WorkDir}}
 	s.initMux()
 	return s
 }
@@ -972,7 +976,12 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "workspace sync revision was already applied with a different digest", http.StatusConflict)
 				return
 			case req.SourceRevision == previous.SourceRevision && len(previous.PendingReloadCommands) == 0 && verifyWorkspaceManifest(root, previous) == nil:
-				writeJSON(w, http.StatusOK, syncResponse{Phase: "Synced", SourceRevision: previous.SourceRevision, SourceDigest: previous.SourceDigest})
+				restarted, err := s.applyNamedServiceWorkspaceRevision(r.Context(), previous.SourceRevision, previous.SourceDigest)
+				if err != nil {
+					http.Error(w, "restart named services: "+err.Error(), http.StatusBadGateway)
+					return
+				}
+				writeJSON(w, http.StatusOK, syncResponse{Phase: "Synced", NamedServicesRestarted: restarted, SourceRevision: previous.SourceRevision, SourceDigest: previous.SourceDigest})
 				return
 			}
 		}
@@ -1115,6 +1124,14 @@ func (s *agentServer) handleSync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp.Restarted = true
+	}
+	if authoritative {
+		restarted, err := s.applyNamedServiceWorkspaceRevision(r.Context(), appliedManifest.SourceRevision, appliedManifest.SourceDigest)
+		if err != nil {
+			http.Error(w, "restart named services: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		resp.NamedServicesRestarted = restarted
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

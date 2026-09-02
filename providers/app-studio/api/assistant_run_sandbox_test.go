@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1945,3 +1946,46 @@ func TestProjectAssistantDataPlaneSandboxCheckpointWithNoChangesUsesDiffFence(t 
 type sandboxRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f sandboxRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestProjectAssistantDataPlaneSandboxResolvesDependenciesWithSourceFence(t *testing.T) {
+	var payload map[string]any
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/workspace/resolve-dependencies") {
+			t.Fatalf("unexpected workspace path %s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "succeeded", "ecosystem": "go", "changed": true,
+			"paths": []string{"api/go.mod", "api/go.sum"}, "exitCode": 0,
+			"sourceRevision": 12, "sourceDigest": "resolved", "namedServicesRestarted": 1,
+		})
+	})
+	client := projectAssistantDataPlaneSandboxClient{server: &Server{
+		hubBase: "http://sandbox.test", mcpInsecureSkipTLSVerify: true,
+		sandboxDataPlaneClientFactory: func(time.Duration) *http.Client {
+			return &http.Client{Transport: sandboxRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				recorder := httptest.NewRecorder()
+				handler.ServeHTTP(recorder, r)
+				return recorder.Result(), nil
+			})}
+		},
+	}}
+	response, err := client.Workspace(context.Background(), identity{clusterID: "cluster", token: "token"}, dataPlaneRef{Resource: "instances", Name: "sandbox", Component: "workspace"}, projectAssistantSandboxWorkspaceRequest{
+		Action: "resolve_dependencies", Ecosystem: "go", WorkDir: "api", SourceRevision: 11, SourceDigest: "before",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["ecosystem"] != "go" || payload["workDir"] != "api" || int(payload["expectedRevision"].(float64)) != 11 || payload["expectedDigest"] != "before" {
+		t.Fatalf("resolver payload=%#v", payload)
+	}
+	if response.Status != "succeeded" || !response.Mutation.Changed || response.Mutation.Operation != projectToolResolveProjectDependencies || !slices.Equal(response.Mutation.Paths, []string{"api/go.mod", "api/go.sum"}) {
+		t.Fatalf("resolver response=%#v", response)
+	}
+	if response.SourceRevision != 12 || response.SourceDigest != "sha256:resolved" || response.NamedServicesRestarted != 1 {
+		t.Fatalf("resolver evidence=%#v", response)
+	}
+}

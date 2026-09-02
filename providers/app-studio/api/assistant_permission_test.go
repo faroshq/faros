@@ -115,6 +115,7 @@ func TestProjectAssistantWorkspaceGrantAuthorizesAllOrdinaryMutations(t *testing
 		{name: "edit", tool: projectToolEditFile, args: projectAssistantTestEditArgs("src/App.tsx"), want: true},
 		{name: "delete", tool: projectToolDeleteFile, args: map[string]any{"path": "package.json", "expectedVersion": "sha256:test"}, want: true},
 		{name: "move source and destination", tool: projectToolMoveFile, args: map[string]any{"sourcePath": "src/App.tsx", "destinationPath": "src/Main.tsx", "expectedVersion": "sha256:test"}, want: true},
+		{name: "resolve go dependencies", tool: projectToolResolveProjectDependencies, args: map[string]any{"ecosystem": "go"}, want: false},
 		{name: "outside", tool: projectToolEditFile, args: projectAssistantTestEditArgs("README.md"), want: false},
 		{name: "lookalike", tool: "provider__write_file", args: map[string]any{"path": "src/App.tsx"}, want: false},
 	}
@@ -139,6 +140,9 @@ func TestProjectAssistantWriteTargetPathsAreServerNormalized(t *testing.T) {
 		{name: "edit", tool: projectToolEditFile, args: projectAssistantTestEditArgs("src/App.tsx"), want: []string{"src/App.tsx"}},
 		{name: "delete", tool: projectToolDeleteFile, args: map[string]any{"path": "src/old.ts", "expectedVersion": "sha256:test"}, want: []string{"src/old.ts"}},
 		{name: "move", tool: projectToolMoveFile, args: map[string]any{"sourcePath": "src/old.ts", "destinationPath": "src/new.ts", "expectedVersion": "sha256:test"}, want: []string{"src/old.ts", "src/new.ts"}},
+		{name: "resolve root go dependencies", tool: projectToolResolveProjectDependencies, args: map[string]any{"ecosystem": "go"}, want: []string{"go.mod", "go.sum"}},
+		{name: "resolve nested go dependencies", tool: projectToolResolveProjectDependencies, args: map[string]any{"ecosystem": "go", "workdir": "api"}, want: []string{"api/go.mod", "api/go.sum"}},
+		{name: "unsupported resolver", tool: projectToolResolveProjectDependencies, args: map[string]any{"ecosystem": "npm"}, fail: true},
 		{name: "unsafe", tool: projectToolEditFile, args: projectAssistantTestEditArgs("../secret"), fail: true},
 		{name: "same move", tool: projectToolMoveFile, args: map[string]any{"sourcePath": "src/a", "destinationPath": "src/a", "expectedVersion": "sha256:test"}, fail: true},
 	}

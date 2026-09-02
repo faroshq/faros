@@ -7,6 +7,7 @@ package instance
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -115,6 +116,95 @@ func TestAggregateDevelopmentServicesUseIsolatedFileKeys(t *testing.T) {
 	}
 	if len(aggregate.Data) != 2 || aggregate.Data[connectionDataKey("c1", "DATABASE_URL")] != "one" || aggregate.Data[connectionDataKey("c2", "DATABASE_URL")] != "two" {
 		t.Fatalf("aggregate data = %#v", aggregate.Data)
+	}
+}
+
+func TestConnectionNetworkPolicyAllowsOnlyConnectedSourcePort(t *testing.T) {
+	ctx := context.Background()
+	runtimeClient := fake.NewSimpleDynamicClient(runtime.NewScheme())
+	aggregate := &aggregateConnectionSecret{
+		Name:            aggregateConnectionSecretName("sandbox/target"),
+		Namespace:       "runtime",
+		RuntimeIdentity: "sandbox/target",
+		TargetSelector:  map[string]string{"app": "sandbox"},
+		NetworkRules: []connectionNetworkRule{{
+			SourceSelector: map[string]string{"kro.run/instance-name": "database"},
+			Port:           5432,
+		}},
+	}
+	if err := applyAggregateConnectionNetworkPolicy(ctx, runtimeClient, aggregate); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := runtimeClient.Resource(connectionNetworkPolicyGVR).Namespace("runtime").Get(ctx, aggregateConnectionNetworkPolicyName(aggregate.Name), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _, _ := unstructured.NestedStringMap(policy.Object, "spec", "podSelector", "matchLabels")
+	if target["app"] != "sandbox" || len(target) != 1 {
+		t.Fatalf("target selector = %#v", target)
+	}
+	source, _, _ := unstructured.NestedStringMap(policy.Object, "spec", "egress", "0", "to", "0", "podSelector", "matchLabels")
+	if source["kro.run/instance-name"] != "database" || len(source) != 1 {
+		// NestedStringMap cannot traverse array indexes; inspect the concrete
+		// policy shape below while retaining this assertion's useful output.
+		egress, _, _ := unstructured.NestedSlice(policy.Object, "spec", "egress")
+		to := egress[0].(map[string]any)["to"].([]any)
+		source, _, _ = unstructured.NestedStringMap(to[0].(map[string]any), "podSelector", "matchLabels")
+	}
+	if source["kro.run/instance-name"] != "database" || len(source) != 1 {
+		t.Fatalf("source selector = %#v", source)
+	}
+	egress, _, _ := unstructured.NestedSlice(policy.Object, "spec", "egress")
+	ports := egress[0].(map[string]any)["ports"].([]any)
+	port, _, _ := unstructured.NestedInt64(ports[0].(map[string]any), "port")
+	protocol, _, _ := unstructured.NestedString(ports[0].(map[string]any), "protocol")
+	if port != 5432 || protocol != "TCP" {
+		t.Fatalf("network ports = %#v", ports)
+	}
+}
+
+func TestConnectionSourcePortRequiresValidSandboxEndpoint(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("5432"))
+	if got, err := connectionSourcePort(map[string]string{"port": encoded}, true); err != nil || got != 5432 {
+		t.Fatalf("connectionSourcePort() = %d, %v", got, err)
+	}
+	for _, data := range []map[string]string{{}, {"port": "not-base64"}, {"port": base64.StdEncoding.EncodeToString([]byte("70000"))}} {
+		if _, err := connectionSourcePort(data, true); err == nil {
+			t.Fatalf("connectionSourcePort(%#v) succeeded", data)
+		}
+	}
+}
+
+func TestResolveConnectionSourceEndpointUsesOwnedServiceSelector(t *testing.T) {
+	service := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata": map[string]any{
+			"name":      "database",
+			"namespace": "runtime",
+			"labels":    map[string]any{"kro.run/instance-name": "source"},
+		},
+		"spec": map[string]any{
+			"selector": map[string]any{"app": "database-pod"},
+			"ports":    []any{map[string]any{"port": int64(5432)}},
+		},
+	}}
+	runtimeClient := fake.NewSimpleDynamicClient(runtime.NewScheme(), service)
+	data := map[string]string{
+		"host": base64.StdEncoding.EncodeToString([]byte("database")),
+		"port": base64.StdEncoding.EncodeToString([]byte("5432")),
+	}
+	selector, port, err := resolveConnectionSourceEndpoint(context.Background(), runtimeClient, "runtime", "source", data, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selector["app"] != "database-pod" || len(selector) != 1 || port != 5432 {
+		t.Fatalf("endpoint selector=%#v port=%d", selector, port)
+	}
+	service.SetLabels(map[string]string{"kro.run/instance-name": "other"})
+	runtimeClient = fake.NewSimpleDynamicClient(runtime.NewScheme(), service)
+	if _, _, err := resolveConnectionSourceEndpoint(context.Background(), runtimeClient, "runtime", "source", data, true); err == nil || !strings.Contains(err.Error(), "not owned") {
+		t.Fatalf("ownership error = %v", err)
 	}
 }
 

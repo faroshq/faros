@@ -144,6 +144,7 @@ const (
 	projectToolEditFile                       = "edit_file"
 	projectToolDeleteFile                     = "delete_file"
 	projectToolMoveFile                       = "move_file"
+	projectToolResolveProjectDependencies     = "resolve_project_dependencies"
 	projectToolSelectTemplate                 = "select_project_template"
 	projectActionWorkspaceSync                = "workspace_sync"
 	projectActionRestoreWorkspace             = "restore_workspace"
@@ -1029,6 +1030,8 @@ func summarizeProjectToolArgumentsMap(name string, args map[string]any) string {
 			parts = append(parts, "timeout "+timeout+"s")
 		}
 		return truncateProjectToolInfo(strings.Join(parts, "; "))
+	case projectToolResolveProjectDependencies:
+		return summarizeProjectCanonicalToolKeyValues(args, []string{"ecosystem", "workdir"})
 	case projectToolAskFollowUp:
 		if questions, err := projectAssistantFollowUpQuestionsFromArguments(args["questions"]); err == nil {
 			labels := make([]string, 0, len(questions))
@@ -1113,6 +1116,10 @@ func summarizeProjectToolResult(name, result string) string {
 			}
 			if status := projectToolString(decoded["status"]); status != "" {
 				return "command " + status
+			}
+		case projectToolResolveProjectDependencies:
+			if summary := projectToolString(decoded["summary"]); summary != "" {
+				return truncateProjectToolInfo(summary)
 			}
 		case projectToolInspectDevelopmentPreview:
 			if summary := projectToolString(decoded["summary"]); summary != "" {
@@ -2281,7 +2288,7 @@ func projectSystemPromptForMode(p *aiv1alpha1.Project, repository *ProjectReposi
 	b.WriteString("For App Studio product capability questions, answer only from explicit evidence in tool results, project metadata, project memory, or this system prompt; if evidence is missing, say \"I don't see that capability available in this workspace\" and explain what you can verify. ")
 	b.WriteString("App Studio is an easy button for business users, including non-technical users who should not need to understand databases, networking, infrastructure templates, or deployment architecture to build useful apps. ")
 	b.WriteString("Translate technical choices into business outcomes and safe next steps. ")
-	b.WriteString("Treat the active coding environment, the project development preview/runtime, and the source repository as independent boundaries. The authoritative turn snapshot's codingEnvironment field, when present, controls source authoring and command execution in the private per-run workspace. Its sourcePersistence=project-workspace means successful terminal checkpointing persists changes to App Studio even when Git is unavailable; publicPreview=false means it is never evidence of a hosted browser preview. The developmentComponents field describes only the separately hosted project preview/runtime. Repository readiness governs Git commit and CI handoff only; it never blocks authorized project-workspace mutations or coding-environment execution. In the coding environment, exec_command is verification-only with respect to source: never let a compiler, formatter, shell, or script modify project source files. Make source changes through the App Studio file tools, then use non-writing check modes such as gofmt -d rather than gofmt -w; direct command writes invalidate the synchronized source evidence needed by subsequent commands and terminal checkpointing. ")
+	b.WriteString("Treat the active coding environment, the project development preview/runtime, and the source repository as independent boundaries. The authoritative turn snapshot's codingEnvironment field, when present, controls source authoring and command execution in the private per-run workspace. Its sourcePersistence=project-workspace means successful terminal checkpointing persists changes to App Studio even when Git is unavailable; publicPreview=false means it is never evidence of a hosted browser preview. The developmentComponents field describes only the separately hosted project preview/runtime. Repository readiness governs Git commit and CI handoff only; it never blocks authorized project-workspace mutations or coding-environment execution. In the coding environment, exec_command is verification-only with respect to source: never let a compiler, formatter, shell, or script modify project source files. Make ordinary source changes through the App Studio file tools. After adding or changing Go imports or requirements, call resolve_project_dependencies with ecosystem=go; it runs go mod tidy in isolation and persists go.mod/go.sum only on success. Then use non-writing exec_command checks such as gofmt -d rather than gofmt -w, and go test. Other direct command writes invalidate the synchronized source evidence needed by subsequent commands and terminal checkpointing. ")
 	b.WriteString("Do not ask the user to choose databases, networking, infrastructure templates, or deployment architecture when App Studio can infer a safe next step from their business intent and available evidence. ")
 	b.WriteString("In Default mode, strongly prefer making reasonable assumptions and continuing instead of stopping for clarification. Use ask_follow_up only when the answer cannot be discovered and a reasonable assumption would materially change the result or make proceeding risky. Never write multiple-choice clarification questions only in assistant prose.\n\n")
 	b.WriteString("Collaboration mode: " + string(collaborationMode) + "\n")

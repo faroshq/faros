@@ -52,6 +52,9 @@ type resolvedConnection struct {
 	runtimeNamespace string
 	runtimeIdentity  string
 	aggregateName    string
+	targetSelector   map[string]string
+	sourceSelector   map[string]string
+	sourcePort       int32
 	targetKind       string
 	targetName       string
 	targetUID        string
@@ -65,6 +68,8 @@ type aggregateConnectionSecret struct {
 	Name                string
 	Namespace           string
 	RuntimeIdentity     string
+	TargetSelector      map[string]string
+	NetworkRules        []connectionNetworkRule
 	Data                map[string]string
 	Inventory           map[string][]string
 	Revision            string
@@ -124,7 +129,10 @@ func (r *connectionReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 	if err := applyAggregateConnectionSecret(ctx, r.c.cfg.Runtime, aggregate); err != nil {
 		return ctrl.Result{RequeueAfter: connectionRequeue}, r.c.persistConnectionStatus(ctx, tenantClient, connection, nil, "SecretSyncFailed", err.Error())
 	}
-	return ctrl.Result{RequeueAfter: connectionRequeue}, r.c.persistConnectionStatus(ctx, tenantClient, connection, aggregate, "Ready", "connection credentials are synchronized")
+	if err := applyAggregateConnectionNetworkPolicy(ctx, r.c.cfg.Runtime, aggregate); err != nil {
+		return ctrl.Result{RequeueAfter: connectionRequeue}, r.c.persistConnectionStatus(ctx, tenantClient, connection, nil, "NetworkPolicySyncFailed", err.Error())
+	}
+	return ctrl.Result{RequeueAfter: connectionRequeue}, r.c.persistConnectionStatus(ctx, tenantClient, connection, aggregate, "Ready", "connection credentials and network access are synchronized")
 }
 
 func (r *connectionReconciler) finalize(ctx context.Context, tenantClient client.Client, cluster string, connection *infrav1alpha1.Connection) (ctrl.Result, error) {
@@ -147,6 +155,9 @@ func (r *connectionReconciler) finalize(ctx context.Context, tenantClient client
 		}
 		if aggregate != nil {
 			if err := applyAggregateConnectionSecret(ctx, r.c.cfg.Runtime, aggregate); err != nil {
+				return ctrl.Result{RequeueAfter: connectionRequeue}, err
+			}
+			if err := applyAggregateConnectionNetworkPolicy(ctx, r.c.cfg.Runtime, aggregate); err != nil {
 				return ctrl.Result{RequeueAfter: connectionRequeue}, err
 			}
 		}
@@ -196,7 +207,7 @@ func (c *Controller) resolveConnection(ctx context.Context, tenantClient client.
 		return nil, fmt.Errorf("source Template %q does not provide interface %q", sourceTemplateName, connection.Spec.Source.Interface)
 	}
 
-	targetTemplate, runtimeNamespace, runtimeIdentity, targetUID, err := c.resolveConnectionTarget(ctx, tenantClient, tenant, connection)
+	targetTemplate, runtimeNamespace, runtimeIdentity, targetUID, targetSelector, err := c.resolveConnectionTarget(ctx, tenantClient, tenant, connection)
 	if err != nil {
 		return nil, err
 	}
@@ -239,62 +250,74 @@ func (c *Controller) resolveConnection(ctx context.Context, tenantClient client.
 			return nil, fmt.Errorf("source Secret %s/%s does not contain allowlisted key %q", secretNamespace, secretName, mapping.SourceKey)
 		}
 	}
+	if targetSelector != nil && !connectionNetworkEndpointAllowlisted(provided.Keys) {
+		return nil, fmt.Errorf("source interface %q must allowlist host and port for a sandbox target", connection.Spec.Source.Interface)
+	}
+	sourceSelector, sourcePort, err := resolveConnectionSourceEndpoint(ctx, c.cfg.Runtime, runtimeNamespace, source.GetName(), data, targetSelector != nil)
+	if err != nil {
+		return nil, fmt.Errorf("source interface %q network endpoint: %w", connection.Spec.Source.Interface, err)
+	}
 	return &resolvedConnection{
 		connection: connection, runtimeNamespace: runtimeNamespace, runtimeIdentity: runtimeIdentity,
 		aggregateName: aggregateConnectionSecretName(runtimeIdentity), targetKind: connection.Spec.Target.Kind,
+		targetSelector: targetSelector, sourceSelector: sourceSelector, sourcePort: sourcePort,
 		targetName: connection.Spec.Target.Name, targetUID: targetUID, sourceSecretUID: string(secret.GetUID()),
 		sourceVersion: secret.GetResourceVersion(), sourceData: data, mappings: mappings,
 	}, nil
 }
 
-func (c *Controller) resolveConnectionTarget(ctx context.Context, tenantClient client.Client, tenant string, connection *infrav1alpha1.Connection) (*infrav1alpha1.Template, string, string, string, error) {
+func (c *Controller) resolveConnectionTarget(ctx context.Context, tenantClient client.Client, tenant string, connection *infrav1alpha1.Connection) (*infrav1alpha1.Template, string, string, string, map[string]string, error) {
 	switch connection.Spec.Target.Kind {
 	case infrav1alpha1.ConnectionTargetInstance:
 		target := &unstructured.Unstructured{}
 		target.SetGroupVersionKind(instanceGVK)
 		if err := tenantClient.Get(ctx, client.ObjectKey{Name: connection.Spec.Target.Name}, target); err != nil {
-			return nil, "", "", "", fmt.Errorf("target Instance %q: %w", connection.Spec.Target.Name, err)
+			return nil, "", "", "", nil, fmt.Errorf("target Instance %q: %w", connection.Spec.Target.Name, err)
 		}
 		if strings.TrimSpace(string(target.GetUID())) == "" || string(target.GetUID()) != connection.Spec.Target.UID {
-			return nil, "", "", "", fmt.Errorf("target Instance %q UID mismatch", target.GetName())
+			return nil, "", "", "", nil, fmt.Errorf("target Instance %q UID mismatch", target.GetName())
 		}
 		templateName, _, _ := unstructured.NestedString(target.Object, "spec", "template")
 		tmpl, _, err := c.resolveTemplate(ctx, templateName)
 		if err != nil {
-			return nil, "", "", "", fmt.Errorf("target Template %q: %w", templateName, err)
+			return nil, "", "", "", nil, fmt.Errorf("target Template %q: %w", templateName, err)
 		}
 		ns := instanceRuntimeNamespace(tenant, target)
 		identity := "instance/" + string(target.GetUID())
-		return tmpl, ns, identity, string(target.GetUID()), nil
+		var selector map[string]string
+		if templateName == infrav1alpha1.UniversalCodingSandboxTemplateName {
+			selector = map[string]string{"app": target.GetName()}
+		}
+		return tmpl, ns, identity, string(target.GetUID()), selector, nil
 	case infrav1alpha1.ConnectionTargetService:
 		service := &infrav1alpha1.DevelopmentService{}
 		if err := tenantClient.Get(ctx, client.ObjectKey{Name: connection.Spec.Target.Name}, service); err != nil {
-			return nil, "", "", "", fmt.Errorf("target DevelopmentService %q: %w", connection.Spec.Target.Name, err)
+			return nil, "", "", "", nil, fmt.Errorf("target DevelopmentService %q: %w", connection.Spec.Target.Name, err)
 		}
 		if err := validateDevelopmentServiceReferences(service.Spec); err != nil {
-			return nil, "", "", "", fmt.Errorf("target DevelopmentService %q: %w", service.Name, err)
+			return nil, "", "", "", nil, fmt.Errorf("target DevelopmentService %q: %w", service.Name, err)
 		}
 		if strings.TrimSpace(string(service.UID)) == "" || string(service.UID) != connection.Spec.Target.UID {
-			return nil, "", "", "", fmt.Errorf("target DevelopmentService %q UID mismatch", service.Name)
+			return nil, "", "", "", nil, fmt.Errorf("target DevelopmentService %q UID mismatch", service.Name)
 		}
 		sandbox := &unstructured.Unstructured{}
 		sandbox.SetGroupVersionKind(instanceGVK)
 		if err := tenantClient.Get(ctx, client.ObjectKey{Name: service.Spec.SandboxRef.Name}, sandbox); err != nil {
-			return nil, "", "", "", fmt.Errorf("target sandbox Instance %q: %w", service.Spec.SandboxRef.Name, err)
+			return nil, "", "", "", nil, fmt.Errorf("target sandbox Instance %q: %w", service.Spec.SandboxRef.Name, err)
 		}
 		if strings.TrimSpace(string(sandbox.GetUID())) == "" || string(sandbox.GetUID()) != service.Spec.SandboxRef.UID {
-			return nil, "", "", "", fmt.Errorf("target sandbox Instance %q UID mismatch", sandbox.GetName())
+			return nil, "", "", "", nil, fmt.Errorf("target sandbox Instance %q UID mismatch", sandbox.GetName())
 		}
 		templateName, _, _ := unstructured.NestedString(sandbox.Object, "spec", "template")
 		tmpl, _, err := c.resolveTemplate(ctx, templateName)
 		if err != nil {
-			return nil, "", "", "", fmt.Errorf("target sandbox Template %q: %w", templateName, err)
+			return nil, "", "", "", nil, fmt.Errorf("target sandbox Template %q: %w", templateName, err)
 		}
 		ns := instanceRuntimeNamespace(tenant, sandbox)
 		identity := "sandbox/" + string(sandbox.GetUID())
-		return tmpl, ns, identity, string(service.UID), nil
+		return tmpl, ns, identity, string(service.UID), map[string]string{"app": sandbox.GetName()}, nil
 	default:
-		return nil, "", "", "", fmt.Errorf("target kind must be Instance or DevelopmentService")
+		return nil, "", "", "", nil, fmt.Errorf("target kind must be Instance or DevelopmentService")
 	}
 }
 
@@ -309,7 +332,7 @@ func (c *Controller) buildAggregateConnectionSecret(ctx context.Context, tenantC
 		if !item.DeletionTimestamp.IsZero() || string(item.UID) == excludeUID {
 			continue
 		}
-		_, _, candidateIdentity, _, targetErr := c.resolveConnectionTarget(ctx, tenantClient, tenant, item)
+		_, _, candidateIdentity, _, _, targetErr := c.resolveConnectionTarget(ctx, tenantClient, tenant, item)
 		entry, err := c.resolveConnection(ctx, tenantClient, tenant, item)
 		if err != nil {
 			// A broken binding to this exact runtime must not cause a partial
@@ -338,6 +361,17 @@ func aggregateResolvedConnections(runtimeIdentity string, resolved []*resolvedCo
 			return nil, fmt.Errorf("runtime namespace confusion for aggregate %q", aggregate.Name)
 		}
 		uid := string(item.connection.UID)
+		if item.targetSelector != nil {
+			if aggregate.TargetSelector == nil {
+				aggregate.TargetSelector = item.targetSelector
+			} else if !reflect.DeepEqual(aggregate.TargetSelector, item.targetSelector) {
+				return nil, fmt.Errorf("runtime target selector confusion for aggregate %q", aggregate.Name)
+			}
+			aggregate.NetworkRules = append(aggregate.NetworkRules, connectionNetworkRule{
+				SourceSelector: item.sourceSelector,
+				Port:           item.sourcePort,
+			})
+		}
 		var keys []string
 		for _, mapping := range item.mappings {
 			key := mapping.TargetKey
@@ -483,7 +517,13 @@ func (c *Controller) withdrawConnectionFromAggregate(ctx context.Context, connec
 		return nil
 	}
 	ref := connection.Status.ManagedSecretRef
-	return removeConnectionFromAggregate(ctx, c.cfg.Runtime, ref.Namespace, ref.Name, ref.TargetRuntimeIdentity, string(connection.UID))
+	if err := removeConnectionFromAggregate(ctx, c.cfg.Runtime, ref.Namespace, ref.Name, ref.TargetRuntimeIdentity, string(connection.UID)); err != nil {
+		return err
+	}
+	// If the binding is no longer valid, remove the aggregate policy rather
+	// than leaving stale network authority behind. Other valid bindings for the
+	// same runtime recreate the complete policy on their next reconciliation.
+	return deleteAggregateConnectionNetworkPolicy(ctx, c.cfg.Runtime, ref.Namespace, ref.Name, ref.TargetRuntimeIdentity)
 }
 
 func aggregateReferenceFromConnectionStatus(connection *infrav1alpha1.Connection) *aggregateConnectionSecret {

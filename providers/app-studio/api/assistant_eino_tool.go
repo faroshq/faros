@@ -1244,7 +1244,7 @@ func projectEinoAssistantPersistentToolResult(name, result string) string {
 
 func projectAssistantMutationFromResult(name, result string) *projectAssistantMutation {
 	switch projectToolBaseName(name) {
-	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile:
+	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile, projectToolResolveProjectDependencies:
 	default:
 		return nil
 	}
@@ -1941,7 +1941,7 @@ func projectAssistantValidateGrantBearingToolArguments(spec projectAssistantTool
 		// run-local initial-build authority. Argument shape is validated here.
 		_, err := projectAssistantInitialExecutionPlanFromArguments(activeGoal, args)
 		return err
-	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile:
+	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile, projectToolResolveProjectDependencies:
 		return projectAssistantValidateWorkspaceMutationArguments(spec.Name, args)
 	default:
 		return nil

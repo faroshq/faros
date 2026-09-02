@@ -62,6 +62,8 @@ type projectAssistantSandboxWorkspaceRequest struct {
 	BaselineFiles    []projectAssistantSandboxBaselineFile    `json:"baselineFiles,omitempty"`
 	CheckpointID     string                                   `json:"checkpointID,omitempty"`
 	CheckpointAction string                                   `json:"checkpointAction,omitempty"`
+	Ecosystem        string                                   `json:"ecosystem,omitempty"`
+	WorkDir          string                                   `json:"workDir,omitempty"`
 }
 
 type projectAssistantSandboxBaselineFile struct {
@@ -70,17 +72,21 @@ type projectAssistantSandboxBaselineFile struct {
 }
 
 type projectAssistantSandboxWorkspaceResponse struct {
-	Status         string                                   `json:"status,omitempty"`
-	File           workspace.FileContent                    `json:"file,omitempty"`
-	Files          workspace.FileList                       `json:"files,omitempty"`
-	Matches        []projectAssistantSandboxGrepMatch       `json:"matches,omitempty"`
-	Mutation       workspace.MutationResult                 `json:"mutation,omitempty"`
-	Changes        []projectAssistantSandboxWorkspaceChange `json:"changes,omitempty"`
-	SourceRevision uint64                                   `json:"sourceRevision,omitempty"`
-	SourceDigest   string                                   `json:"sourceDigest,omitempty"`
-	Conflict       string                                   `json:"conflict,omitempty"`
-	Entries        []projectAssistantSandboxListEntry       `json:"entries,omitempty"`
-	CheckpointID   string                                   `json:"checkpointID,omitempty"`
+	Status                 string                                   `json:"status,omitempty"`
+	File                   workspace.FileContent                    `json:"file,omitempty"`
+	Files                  workspace.FileList                       `json:"files,omitempty"`
+	Matches                []projectAssistantSandboxGrepMatch       `json:"matches,omitempty"`
+	Mutation               workspace.MutationResult                 `json:"mutation,omitempty"`
+	Changes                []projectAssistantSandboxWorkspaceChange `json:"changes,omitempty"`
+	SourceRevision         uint64                                   `json:"sourceRevision,omitempty"`
+	SourceDigest           string                                   `json:"sourceDigest,omitempty"`
+	Conflict               string                                   `json:"conflict,omitempty"`
+	Entries                []projectAssistantSandboxListEntry       `json:"entries,omitempty"`
+	CheckpointID           string                                   `json:"checkpointID,omitempty"`
+	ExitCode               int                                      `json:"exitCode,omitempty"`
+	Stdout                 string                                   `json:"stdout,omitempty"`
+	Stderr                 string                                   `json:"stderr,omitempty"`
+	NamedServicesRestarted int                                      `json:"namedServicesRestarted,omitempty"`
 }
 
 type projectAssistantSandboxListEntry struct {
@@ -165,6 +171,26 @@ type projectAssistantSandboxMutateWireResponse struct {
 	SourceDigest   string   `json:"sourceDigest"`
 }
 
+type projectAssistantSandboxResolveDependenciesWireRequest struct {
+	Ecosystem        string `json:"ecosystem"`
+	WorkDir          string `json:"workDir,omitempty"`
+	ExpectedRevision uint64 `json:"expectedRevision"`
+	ExpectedDigest   string `json:"expectedDigest"`
+}
+
+type projectAssistantSandboxResolveDependenciesWireResponse struct {
+	Status                 string   `json:"status"`
+	Ecosystem              string   `json:"ecosystem"`
+	Changed                bool     `json:"changed"`
+	Paths                  []string `json:"paths,omitempty"`
+	ExitCode               int      `json:"exitCode"`
+	Stdout                 string   `json:"stdout,omitempty"`
+	Stderr                 string   `json:"stderr,omitempty"`
+	SourceRevision         uint64   `json:"sourceRevision"`
+	SourceDigest           string   `json:"sourceDigest"`
+	NamedServicesRestarted int      `json:"namedServicesRestarted,omitempty"`
+}
+
 type projectAssistantSandboxDiffWireRequest struct {
 	CheckpointID     string `json:"checkpointID,omitempty"`
 	ExpectedRevision uint64 `json:"expectedRevision,omitempty"`
@@ -238,6 +264,8 @@ func (c projectAssistantDataPlaneSandboxClient) Workspace(ctx context.Context, i
 		return c.workspaceGrep(ctx, id, ref, request)
 	case "create", "replace", "edit", "delete", "move":
 		return c.workspaceMutate(ctx, id, ref, request)
+	case "resolve_dependencies":
+		return c.workspaceResolveDependencies(ctx, id, ref, request)
 	case "checkpoint":
 		if strings.EqualFold(strings.TrimSpace(request.CheckpointAction), "create") {
 			return c.workspaceCheckpointCreate(ctx, id, ref, request)
@@ -246,6 +274,44 @@ func (c projectAssistantDataPlaneSandboxClient) Workspace(ctx context.Context, i
 	default:
 		return projectAssistantSandboxWorkspaceResponse{}, fmt.Errorf("%w: unsupported workspace action %q", errProjectAssistantRunSandboxConflict, request.Action)
 	}
+}
+
+func (c projectAssistantDataPlaneSandboxClient) workspaceResolveDependencies(ctx context.Context, id identity, ref dataPlaneRef, request projectAssistantSandboxWorkspaceRequest) (projectAssistantSandboxWorkspaceResponse, error) {
+	if request.SourceRevision == 0 || strings.TrimSpace(request.SourceDigest) == "" {
+		return projectAssistantSandboxWorkspaceResponse{}, fmt.Errorf("%w: remote source revision and digest are required", errProjectAssistantRunSandboxConflict)
+	}
+	payload := projectAssistantSandboxResolveDependenciesWireRequest{
+		Ecosystem:        strings.ToLower(strings.TrimSpace(request.Ecosystem)),
+		WorkDir:          strings.TrimSpace(request.WorkDir),
+		ExpectedRevision: request.SourceRevision,
+		ExpectedDigest:   request.SourceDigest,
+	}
+	body, status, err := c.workspaceCall(ctx, id, ref, "resolve-dependencies", payload, 1<<20)
+	if err != nil {
+		return projectAssistantSandboxWorkspaceResponse{}, err
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return projectAssistantSandboxWorkspaceResponse{}, sandboxWorkspaceHTTPError("resolve-dependencies", status, body)
+	}
+	var wire projectAssistantSandboxResolveDependenciesWireResponse
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return projectAssistantSandboxWorkspaceResponse{}, fmt.Errorf("decode sandbox dependency resolution response: %w", err)
+	}
+	mutation := workspace.MutationResult{
+		Operation: projectToolResolveProjectDependencies,
+		Changed:   wire.Changed,
+		Paths:     append([]string(nil), wire.Paths...),
+	}
+	return projectAssistantSandboxWorkspaceResponse{
+		Status:                 strings.ToLower(strings.TrimSpace(wire.Status)),
+		Mutation:               mutation,
+		SourceRevision:         wire.SourceRevision,
+		SourceDigest:           sandboxSourceDigest(wire.SourceDigest),
+		ExitCode:               wire.ExitCode,
+		Stdout:                 wire.Stdout,
+		Stderr:                 wire.Stderr,
+		NamedServicesRestarted: wire.NamedServicesRestarted,
+	}, nil
 }
 
 func (c projectAssistantDataPlaneSandboxClient) workspaceSeed(ctx context.Context, id identity, ref dataPlaneRef, request projectAssistantSandboxWorkspaceRequest) (projectAssistantSandboxWorkspaceResponse, error) {

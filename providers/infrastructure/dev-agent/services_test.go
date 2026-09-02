@@ -9,14 +9,117 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestWorkspaceRevisionRestartsNamedServiceAfterSyncAndMutation(t *testing.T) {
+	workspace := t.TempDir()
+	config := &agentConfig{WorkDir: workspace, ControlToken: "test-token"}
+	logs := newRingLog(500)
+	manager := newServiceManager(t.Context(), workspace)
+	runtimeServer := httptest.NewServer(newRuntimeSupervisorServer(newSupervisor(t.Context(), config, logs), logs, nil, manager))
+	t.Cleanup(runtimeServer.Close)
+	t.Cleanup(manager.StopAll)
+	runtimeClient := &httpRuntimeClient{baseURL: runtimeServer.URL, client: runtimeServer.Client()}
+	server := newCoordinatorServer(config, runtimeClient, &sync.Mutex{})
+	firstFiles := []syncFile{{Path: "version.txt", Content: "one"}}
+	firstDigest, err := digestSyncFiles(firstFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder, first := doSync(t, server, syncRequest{Files: firstFiles, SourceRevision: 1, SourceDigest: firstDigest})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("initial sync status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if first.NamedServicesRestarted != 0 {
+		t.Fatalf("initial sync restarted services = %d, want 0", first.NamedServicesRestarted)
+	}
+
+	observed := filepath.Join(workspace, "observed")
+	runtime := serviceRuntimeOperations(runtimeClient)
+	status, err := runtime.ConfigureService(t.Context(), serviceSpec{
+		Name: "web", Argv: []string{"/bin/sh", "-c", "cat version.txt > observed; sleep 30"},
+		Port: 18093, Enabled: true, RestartPolicy: "Never",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.RemoveService(context.Background(), "web") })
+	if !status.Running || status.RestartCount != 0 {
+		t.Fatalf("initial service status = %+v", status)
+	}
+	waitForFileValue(t, observed, "one")
+
+	secondFiles := []syncFile{{Path: "version.txt", Content: "two"}}
+	secondDigest, err := digestSyncFiles(secondFiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder, second := doSync(t, server, syncRequest{Files: secondFiles, SourceRevision: 2, SourceDigest: secondDigest})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("second sync status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if second.NamedServicesRestarted != 1 {
+		t.Fatalf("second sync restarted services = %d, want 1", second.NamedServicesRestarted)
+	}
+	waitForFileValue(t, observed, "two")
+	status, err = runtime.ServiceStatus(t.Context(), "web")
+	if err != nil || status.RestartCount != 1 {
+		t.Fatalf("status after second sync = %+v err=%v, want one restart", status, err)
+	}
+
+	recorder, replay := doSync(t, server, syncRequest{Files: secondFiles, SourceRevision: 2, SourceDigest: secondDigest})
+	if recorder.Code != http.StatusOK || replay.NamedServicesRestarted != 0 {
+		t.Fatalf("replayed sync status = %d response=%+v", recorder.Code, replay)
+	}
+	status, err = runtime.ServiceStatus(t.Context(), "web")
+	if err != nil || status.RestartCount != 1 {
+		t.Fatalf("status after replay = %+v err=%v, want unchanged restart count", status, err)
+	}
+
+	recorder, raw := workspaceRequest(t, server, http.MethodPost, "/workspace/mutate", workspaceMutateRequest{
+		ExpectedRevision: 2,
+		ExpectedDigest:   secondDigest,
+		Operations:       []workspaceMutation{{Operation: "write", Path: "version.txt", Content: "three"}},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("workspace mutation status = %d body=%s", recorder.Code, raw)
+	}
+	var mutated workspaceMutateResponse
+	if err := json.Unmarshal(raw, &mutated); err != nil {
+		t.Fatal(err)
+	}
+	if mutated.SourceRevision != 3 || mutated.NamedServicesRestarted != 1 {
+		t.Fatalf("workspace mutation response = %+v, want revision 3 and one restart", mutated)
+	}
+	waitForFileValue(t, observed, "three")
+	status, err = runtime.ServiceStatus(t.Context(), "web")
+	if err != nil || status.RestartCount != 2 {
+		t.Fatalf("status after workspace mutation = %+v err=%v, want two restarts", status, err)
+	}
+}
+
+func TestServiceManagerWorkspaceRevisionRejectsStaleOrConflictingEvidence(t *testing.T) {
+	manager := newServiceManager(t.Context(), t.TempDir())
+	if restarted, err := manager.ApplyWorkspaceRevision(t.Context(), 4, "sha256:first"); err != nil || restarted != 0 {
+		t.Fatalf("initial workspace revision = restarted %d err=%v", restarted, err)
+	}
+	if _, err := manager.ApplyWorkspaceRevision(t.Context(), 3, "sha256:older"); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("stale workspace revision error = %v", err)
+	}
+	if _, err := manager.ApplyWorkspaceRevision(t.Context(), 4, "sha256:conflict"); err == nil || !strings.Contains(err.Error(), "different digest") {
+		t.Fatalf("conflicting workspace revision error = %v", err)
+	}
+}
 
 func TestServiceConnectionFilesInjectAndRevisionRestartsNeverPolicy(t *testing.T) {
 	originalRoot := connectionFilesRoot
@@ -46,6 +149,36 @@ func TestServiceConnectionFilesInjectAndRevisionRestartsNeverPolicy(t *testing.T
 		t.Fatal(err)
 	}
 	waitForFileValue(t, output, "postgres://second")
+}
+
+func TestServiceRestartTokenForcesRestartWithNeverPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	manager := newServiceManager(t.Context(), workspace)
+	t.Cleanup(manager.StopAll)
+	spec := serviceSpec{
+		Name: "api", Argv: []string{"/bin/sh", "-c", "sleep 30"},
+		Port: 18094, Enabled: true, RestartPolicy: "Never", RestartToken: "request-1",
+	}
+	status, err := manager.Configure(t.Context(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Running {
+		t.Fatalf("initial status=%+v, want running service", status)
+	}
+
+	status, err = manager.Configure(t.Context(), spec)
+	if err != nil || status.RestartCount != 0 {
+		t.Fatalf("unchanged restart token status=%+v err=%v, want no restart", status, err)
+	}
+	spec.RestartToken = "request-2"
+	status, err = manager.Configure(t.Context(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.RestartCount != 1 {
+		t.Fatalf("changed restart token status=%+v, want one restart", status)
+	}
 }
 
 func TestServiceManagerRetriesFailedStartWhenConnectionFileAppears(t *testing.T) {

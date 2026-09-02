@@ -1835,7 +1835,9 @@ DEV_AGENT_DIR ?= providers/infrastructure/dev-agent
 DEV_AGENT_IMAGE ?= ghcr.io/faroshq/faros-dev-agent:latest
 DEV_AGENT_PLATFORM ?= linux/$(ARCH)
 UNIVERSAL_DEV_IMAGE ?= ghcr.io/faroshq/faros-universal-dev:latest
-UNIVERSAL_DEV_BASE_IMAGE ?= docker.io/library/node:22-bookworm
+UNIVERSAL_DEV_BASE_IMAGE ?= docker.io/library/python:3.12-bookworm
+UNIVERSAL_DEV_NODE_IMAGE ?= docker.io/library/node:22-bookworm
+UNIVERSAL_DEV_GO_IMAGE ?= docker.io/library/golang:1.26.3-bookworm
 
 docker-build-dev-agent: ## Build the faros-dev-agent injector image used by dev-mode components
 	docker build -f $(DEV_AGENT_DIR)/Dockerfile \
@@ -1847,11 +1849,13 @@ load-dev-agent-image: docker-build-dev-agent ## Load the dev agent image into th
 	@echo ">>> loading $(DEV_AGENT_IMAGE) into kind cluster $(KRO_KIND_NAME)"
 	kind load docker-image $(DEV_AGENT_IMAGE) --name $(KRO_KIND_NAME)
 
-docker-build-universal-dev-image: ## Build the universal coding image; pin UNIVERSAL_DEV_BASE_IMAGE to a digest in production
+docker-build-universal-dev-image: ## Build the universal coding image; pin all three upstream runtime images by digest in production
 	docker build -f $(DEV_AGENT_DIR)/Dockerfile.universal \
 		--platform $(DEV_AGENT_PLATFORM) \
 		--provenance=false \
 		--build-arg BASE_IMAGE=$(UNIVERSAL_DEV_BASE_IMAGE) \
+		--build-arg NODE_IMAGE=$(UNIVERSAL_DEV_NODE_IMAGE) \
+		--build-arg GO_IMAGE=$(UNIVERSAL_DEV_GO_IMAGE) \
 		-t $(UNIVERSAL_DEV_IMAGE) $(DEV_AGENT_DIR)
 
 load-universal-dev-image: docker-build-universal-dev-image ## Load the universal coding image into the local kind runtime cluster

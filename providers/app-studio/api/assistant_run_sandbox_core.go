@@ -138,6 +138,10 @@ func (b *projectAssistantRunSandbox) mutate(ctx context.Context, request project
 	return response.Mutation, err
 }
 
+func (b *projectAssistantRunSandbox) resolveDependencies(ctx context.Context, ecosystem, workDir string) (projectAssistantSandboxWorkspaceResponse, error) {
+	return b.request(ctx, projectAssistantSandboxWorkspaceRequest{Action: "resolve_dependencies", Ecosystem: ecosystem, WorkDir: workDir})
+}
+
 func (b *projectAssistantRunSandbox) exec(ctx context.Context, ref dataPlaneRef, request projectSandboxExecRequest) (projectSandboxExecResponse, error) {
 	if b == nil || b.client == nil {
 		return projectSandboxExecResponse{}, errors.New("assistant sandbox client is not configured")

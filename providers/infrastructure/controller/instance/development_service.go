@@ -71,6 +71,7 @@ const (
 	developmentServiceNameLabel    = "faros.sh/development-service"
 	developmentSandboxNameLabel    = "faros.sh/sandbox"
 	developmentServiceManagedValue = "infrastructure-development-service"
+	developmentServiceRestartAt    = "faros.sh/development-service-restart-at"
 
 	processPhaseRunning = "Running"
 	processPhaseStopped = "Stopped"
@@ -90,6 +91,7 @@ type normalizedDevelopmentService struct {
 	HealthPath    string
 	Visibility    infrav1alpha1.DevelopmentServiceVisibility
 	RestartPolicy infrav1alpha1.DevelopmentServiceRestartPolicy
+	RestartToken  string
 	SandboxName   string
 	SandboxUID    string
 	ProjectName   string
@@ -115,6 +117,7 @@ type devAgentServiceRequest struct {
 	HealthPath         string            `json:"healthPath,omitempty"`
 	EnvFiles           map[string]string `json:"envFiles,omitempty"`
 	ConnectionRevision string            `json:"connectionRevision,omitempty"`
+	RestartToken       string            `json:"restartToken,omitempty"`
 	Enabled            bool              `json:"enabled"`
 	RestartPolicy      string            `json:"restartPolicy,omitempty"`
 }
@@ -429,7 +432,8 @@ func normalizeDevelopmentService(service *infrav1alpha1.DevelopmentService) (nor
 		ComponentRef: spec.ComponentRef, Argv: append([]string(nil), spec.Command.Argv...),
 		WorkingDir: workingDir, Protocol: protocol, Port: spec.Endpoint.Port,
 		HealthPath: spec.Endpoint.HealthPath, Visibility: visibility, RestartPolicy: restartPolicy,
-		SandboxName: spec.SandboxRef.Name, SandboxUID: spec.SandboxRef.UID,
+		RestartToken: strings.TrimSpace(service.GetAnnotations()[developmentServiceRestartAt]),
+		SandboxName:  spec.SandboxRef.Name, SandboxUID: spec.SandboxRef.UID,
 		ProjectName: spec.ProjectRef.Name, ProjectUID: spec.ProjectRef.UID,
 	}, nil
 }
@@ -695,7 +699,7 @@ func (c *Controller) configureSandboxService(ctx context.Context, sandbox sandbo
 	if err != nil {
 		return devAgentServiceStatus{}, err
 	}
-	request := devAgentServiceRequest{Name: name, Argv: spec.Argv, WorkDir: spec.WorkingDir, Port: spec.Port, HealthPath: spec.HealthPath, EnvFiles: envFiles, ConnectionRevision: connectionRevision, Enabled: true, RestartPolicy: string(spec.RestartPolicy)}
+	request := devAgentServiceRequest{Name: name, Argv: spec.Argv, WorkDir: spec.WorkingDir, Port: spec.Port, HealthPath: spec.HealthPath, EnvFiles: envFiles, ConnectionRevision: connectionRevision, RestartToken: spec.RestartToken, Enabled: true, RestartPolicy: string(spec.RestartPolicy)}
 	var status devAgentServiceStatus
 	if err := c.proxyControl(ctx, sandbox, token, http.MethodPost, "/service", request, &status); err != nil {
 		return devAgentServiceStatus{}, err

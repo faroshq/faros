@@ -461,7 +461,7 @@ func TestInitialCreationPromptUsesOrdinaryMutationAndVerificationContract(t *tes
 	prompt := projectSystemPromptForMode(project, &ProjectRepositoryView{Ref: "demo-repo", Status: projectRepositoryStatusReady, Ready: true}, projectAssistantCollaborationModeDefault, true)
 	for _, want := range []string{
 		"Collaboration mode: default",
-		"source-mutation tools are create_file, replace_file, edit_file, delete_file, and move_file",
+		"source-mutation tools are create_file, replace_file, edit_file, delete_file, move_file, and resolve_project_dependencies",
 		"complete bounded read",
 		"stale or ambiguous text fails",
 		"The project-creation request is the one-time authorization for this initial source build",

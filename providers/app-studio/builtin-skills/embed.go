@@ -22,5 +22,5 @@ import "embed"
 
 // FS contains bundled skill directories relative to this package.
 //
-//go:embed project-summary universal-web-preview
+//go:embed durable-dependency project-summary universal-web-preview
 var FS embed.FS

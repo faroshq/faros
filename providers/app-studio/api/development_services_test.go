@@ -36,6 +36,7 @@ import (
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
+	"github.com/faroshq/provider-app-studio/tenant"
 )
 
 func developmentServicesTestClient(objects ...runtime.Object) *asclient.Client {
@@ -376,6 +377,80 @@ func TestDevelopmentServiceLogsResolveLogicalNameToPhysicalDataPlanePath(t *test
 	}
 	if observed.Header.Get("Authorization") != "Bearer test-token" || observed.Header.Get("X-Sandbox-Control-Token") != "" {
 		t.Fatalf("logs request headers expose unexpected credentials: %v", observed.Header)
+	}
+}
+
+func TestRestartDevelopmentServiceUsesSupportedUpdateAndPreservesAnnotations(t *testing.T) {
+	project := developmentServicesTestProject("shop", "project-uid")
+	service := newDevelopmentServicesTestObject(t, project, "web", true, "https://web.preview.test")
+	service.SetAnnotations(map[string]string{"example.test/retained": "yes"})
+	client := developmentServicesTestClient(project, service)
+	server := &Server{projectClientFor: func(identity) (*asclient.Client, error) { return client, nil }}
+	request := httptest.NewRequest(http.MethodPost, "/api/projects/shop/development-services/web/restart", nil)
+	request = mux.SetURLVars(request, map[string]string{"project": "shop", "service": "web"})
+	setDevelopmentServicesTestIdentity(request)
+	response := httptest.NewRecorder()
+
+	server.restartProjectDevelopmentService(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("restart response status=%d body=%q", response.Code, response.Body.String())
+	}
+	stored, err := client.Resource(developmentServicesResource, "").Get(context.Background(), service.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations := stored.GetAnnotations()
+	if annotations["example.test/retained"] != "yes" {
+		t.Fatalf("restart annotations = %#v, retained annotation was lost", annotations)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, annotations[projectDevelopmentServiceRestartAt]); err != nil {
+		t.Fatalf("restart annotation = %q, want RFC3339 timestamp: %v", annotations[projectDevelopmentServiceRestartAt], err)
+	}
+}
+
+func TestDevelopmentServiceRestartUsesGraphQLApplyContract(t *testing.T) {
+	requestedAt := time.Date(2026, time.September, 1, 12, 34, 56, 789, time.UTC)
+	service := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "DevelopmentService",
+		"metadata": map[string]any{
+			"name":        "devsvc-web",
+			"annotations": map[string]any{"example.test/retained": "yes"},
+		},
+		"spec": map[string]any{"environment": "development"},
+	}}
+	graphQLServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode GraphQL request: %v", err)
+		}
+		if !strings.Contains(payload.Query, "applyYaml") || strings.Contains(payload.Query, "applyStatusYaml") {
+			t.Fatalf("restart GraphQL mutation = %q, want applyYaml", payload.Query)
+		}
+		yamlBody, _ := payload.Variables["yaml"].(string)
+		if !strings.Contains(yamlBody, "faros.sh/development-service-restart-at: \"2026-09-01T12:34:56.000000789Z\"") || !strings.Contains(yamlBody, "example.test/retained: \"yes\"") {
+			t.Fatalf("restart apply YAML = %q, want restart and retained annotations", yamlBody)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"applyYaml": yamlBody}})
+	}))
+	t.Cleanup(graphQLServer.Close)
+
+	graphQL := tenant.NewGraphQLClient(graphQLServer.URL, false)
+	scope, err := graphQL.For("cluster-id", "caller-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := requestProjectDevelopmentServiceRestart(t.Context(), asclient.NewFromGraphQL(scope), service, requestedAt)
+	if err != nil {
+		t.Fatalf("request restart through GraphQL client: %v", err)
+	}
+	if got := updated.GetAnnotations()[projectDevelopmentServiceRestartAt]; got != requestedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("updated restart annotation = %q", got)
 	}
 }
 

@@ -1,0 +1,338 @@
+#!/usr/bin/env python3
+# Copyright 2026 The Faros Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+"""Resolve and verify the platform-owned universal development environment."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_MANIFEST = Path("/opt/faros/image-manifest.json")
+REQUIRED_COMMANDS = ("bash", "curl", "git", "go", "jq", "make", "node", "npm", "python3", "rg")
+
+
+class EnvironmentError(RuntimeError):
+    pass
+
+
+def version_tuple(raw: str) -> tuple[int, ...]:
+    value = raw.strip().lower()
+    value = re.sub(r"^(?:go|python|node|v)", "", value)
+    match = re.match(r"^(\d+(?:\.\d+){0,3})", value)
+    if not match:
+        raise EnvironmentError(f"unsupported version {raw!r}")
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def padded(version: tuple[int, ...], size: int = 4) -> tuple[int, ...]:
+    return version + (0,) * (size - len(version))
+
+
+def version_text(version: tuple[int, ...]) -> str:
+    return ".".join(str(part) for part in version)
+
+
+def command_output(*argv: str) -> str:
+    try:
+        return subprocess.check_output(argv, text=True, stderr=subprocess.STDOUT).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise EnvironmentError(f"cannot run {' '.join(argv)}: {exc}") from exc
+
+
+def actual_runtimes() -> dict[str, dict[str, str]]:
+    return {
+        "go": {
+            "version": re.sub(r"^go", "", command_output("go", "env", "GOVERSION")),
+            "executable": shutil.which("go") or "",
+        },
+        "node": {
+            "version": re.sub(r"^v", "", command_output("node", "--version")),
+            "executable": shutil.which("node") or "",
+        },
+        "python": {
+            "version": command_output("python3", "-c", "import platform; print(platform.python_version())"),
+            "executable": shutil.which("python3") or "",
+        },
+    }
+
+
+def manifest_path() -> Path:
+    return Path(os.environ.get("FAROS_ENV_MANIFEST", str(DEFAULT_MANIFEST)))
+
+
+def load_manifest() -> dict[str, Any]:
+    path = manifest_path()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise EnvironmentError(f"cannot read universal image manifest {path}: {exc}") from exc
+    if value.get("schemaVersion") != 1 or not isinstance(value.get("runtimes"), dict):
+        raise EnvironmentError(f"universal image manifest {path} has an unsupported schema")
+    return value
+
+
+def write_manifest(destination: Path) -> None:
+    value = {
+        "schemaVersion": 1,
+        "image": "faros-universal-dev",
+        "runtimes": actual_runtimes(),
+        "commands": list(REQUIRED_COMMANDS),
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def verify_image() -> None:
+    manifest = load_manifest()
+    actual = actual_runtimes()
+    for command in manifest.get("commands", []):
+        if not shutil.which(command):
+            raise EnvironmentError(f"required universal image command {command!r} is missing")
+    for runtime, observed in actual.items():
+        expected = manifest["runtimes"].get(runtime, {})
+        if observed["version"] != expected.get("version"):
+            raise EnvironmentError(
+                f"{runtime} version is {observed['version']}, manifest declares {expected.get('version', 'nothing')}"
+            )
+    if os.environ.get("GOTOOLCHAIN") != "local":
+        raise EnvironmentError("GOTOOLCHAIN must be local so runtime execution cannot download an undeclared Go toolchain")
+    for directory in (Path("/workspace"), Path("/tmp/faros-home"), Path("/tmp/faros-cache")):
+        stat = directory.stat()
+        if stat.st_uid != 1000 or stat.st_gid != 1000:
+            raise EnvironmentError(f"{directory} must be owned by uid/gid 1000")
+
+
+def compare(installed: tuple[int, ...], operator: str, required: tuple[int, ...]) -> bool:
+    left, right = padded(installed), padded(required)
+    return {
+        ">=": left >= right,
+        ">": left > right,
+        "<=": left <= right,
+        "<": left < right,
+        "==": left == right,
+        "=": left == right,
+    }[operator]
+
+
+def satisfies_node(expression: str, installed: tuple[int, ...]) -> bool:
+    for alternative in expression.split("||"):
+        tokens = [token for token in re.split(r"[ ,]+", alternative.strip()) if token]
+        if tokens and all(satisfies_node_token(token, installed) for token in tokens):
+            return True
+    return False
+
+
+def satisfies_node_token(token: str, installed: tuple[int, ...]) -> bool:
+    token = token.strip()
+    if token in ("*", "x", "X"):
+        return True
+    match = re.fullmatch(r"(>=|<=|>|<|=)?v?(\d+(?:\.\d+){0,2})", token)
+    if match:
+        operator, raw = match.groups()
+        required = version_tuple(raw)
+        if operator:
+            return compare(installed, operator, required)
+        # A bare major or major.minor denotes that runtime family.
+        return installed[: len(required)] == required
+    match = re.fullmatch(r"v?(\d+)(?:\.(\d+|x|X|\*))?(?:\.(\d+|x|X|\*))?", token)
+    if match:
+        concrete = tuple(int(part) for part in match.groups() if part and part not in ("x", "X", "*"))
+        return installed[: len(concrete)] == concrete
+    match = re.fullmatch(r"([~^])v?(\d+(?:\.\d+){0,2})", token)
+    if match:
+        operator, raw = match.groups()
+        required = version_tuple(raw)
+        if padded(installed) < padded(required):
+            return False
+        if operator == "^":
+            return installed[0] == required[0]
+        boundary = required[:2] if len(required) > 1 else required[:1]
+        return installed[: len(boundary)] == boundary
+    raise EnvironmentError(f"unsupported Node version constraint {token!r}")
+
+
+def satisfies_python(expression: str, installed: tuple[int, ...]) -> bool:
+    for raw_token in expression.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        match = re.fullmatch(r"(>=|<=|>|<|==|~=)?\s*(\d+(?:\.\d+){0,2})(?:\.\*)?", token)
+        if not match:
+            raise EnvironmentError(f"unsupported Python version constraint {token!r}")
+        operator, raw = match.groups()
+        required = version_tuple(raw)
+        if operator == "~=":
+            if padded(installed) < padded(required):
+                return False
+            family = required[:2] if len(required) > 1 else required[:1]
+            if installed[: len(family)] != family:
+                return False
+        elif operator:
+            if not compare(installed, operator, required):
+                return False
+        elif installed[: len(required)] != required:
+            return False
+    return True
+
+
+def require_go(installed: tuple[int, ...], requested: str, source: str) -> None:
+    required = version_tuple(requested)
+    if padded(installed) < padded(required):
+        raise EnvironmentError(
+            f"{source} requires Go {version_text(required)}; universal image provides Go {version_text(installed)}"
+        )
+
+
+def require_node(installed: tuple[int, ...], requested: str, source: str) -> None:
+    if not satisfies_node(requested, installed):
+        raise EnvironmentError(
+            f"{source} requires Node {requested}; universal image provides Node {version_text(installed)}"
+        )
+
+
+def require_python(installed: tuple[int, ...], requested: str, source: str) -> None:
+    if not satisfies_python(requested, installed):
+        raise EnvironmentError(
+            f"{source} requires Python {requested}; universal image provides Python {version_text(installed)}"
+        )
+
+
+def project_requirements(project: Path, installed: dict[str, tuple[int, ...]]) -> list[dict[str, str]]:
+    requirements: list[dict[str, str]] = []
+
+    explicit = {
+        "go": os.environ.get("FAROS_ENV_GO_VERSION"),
+        "node": os.environ.get("FAROS_ENV_NODE_VERSION"),
+        "python": os.environ.get("FAROS_ENV_PYTHON_VERSION"),
+    }
+    for runtime, requested in explicit.items():
+        if requested:
+            {"go": require_go, "node": require_node, "python": require_python}[runtime](
+                installed[runtime], requested, f"FAROS_ENV_{runtime.upper()}_VERSION"
+            )
+            requirements.append({"runtime": runtime, "source": "environment", "requirement": requested})
+
+    go_mod = project / "go.mod"
+    if go_mod.is_file():
+        contents = go_mod.read_text(encoding="utf-8")
+        for label, pattern in (
+            ("go.mod go directive", r"(?m)^\s*go\s+([0-9]+(?:\.[0-9]+){1,2})\s*$"),
+            ("go.mod toolchain directive", r"(?m)^\s*toolchain\s+go([0-9]+(?:\.[0-9]+){1,2})\s*$"),
+        ):
+            match = re.search(pattern, contents)
+            if match:
+                require_go(installed["go"], match.group(1), label)
+                requirements.append({"runtime": "go", "source": label, "requirement": match.group(1)})
+
+    node_requirement: tuple[str, str] | None = None
+    for filename in (".node-version", ".nvmrc"):
+        path = project / filename
+        if path.is_file():
+            node_requirement = (filename, path.read_text(encoding="utf-8").strip())
+            break
+    package_json = project / "package.json"
+    if node_requirement is None and package_json.is_file():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+            requested = package.get("engines", {}).get("node")
+            if requested:
+                node_requirement = ("package.json engines.node", str(requested))
+        except json.JSONDecodeError as exc:
+            raise EnvironmentError(f"cannot parse {package_json}: {exc}") from exc
+    if node_requirement:
+        source, requested = node_requirement
+        require_node(installed["node"], requested, source)
+        requirements.append({"runtime": "node", "source": source, "requirement": requested})
+
+    python_requirement: tuple[str, str] | None = None
+    python_version = project / ".python-version"
+    if python_version.is_file():
+        python_requirement = (".python-version", python_version.read_text(encoding="utf-8").strip())
+    pyproject = project / "pyproject.toml"
+    if python_requirement is None and pyproject.is_file():
+        try:
+            import tomllib
+
+            project_config = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
+            requested = project_config.get("requires-python")
+            if requested:
+                python_requirement = ("pyproject.toml project.requires-python", str(requested))
+        except (OSError, ValueError) as exc:
+            raise EnvironmentError(f"cannot parse {pyproject}: {exc}") from exc
+    if python_requirement:
+        source, requested = python_requirement
+        require_python(installed["python"], requested, source)
+        requirements.append({"runtime": "python", "source": source, "requirement": requested})
+
+    return requirements
+
+
+def check_project(project: Path, quiet: bool = False) -> None:
+    manifest = load_manifest()
+    runtimes = manifest["runtimes"]
+    try:
+        installed = {name: version_tuple(str(runtimes[name]["version"])) for name in ("go", "node", "python")}
+    except (KeyError, TypeError) as exc:
+        raise EnvironmentError("universal image manifest does not declare Go, Node, and Python") from exc
+    requirements = project_requirements(project.resolve(), installed)
+    if not quiet:
+        print(json.dumps({
+            "status": "ready",
+            "project": str(project.resolve()),
+            "runtimes": {name: runtimes[name]["version"] for name in ("go", "node", "python")},
+            "requirements": requirements,
+        }, sort_keys=True))
+
+
+def usage() -> None:
+    print("usage: faros-env manifest | check [directory] | exec [--] command [args...]", file=sys.stderr)
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        usage()
+        return 2
+    command, *args = argv
+    if command == "manifest" and not args:
+        print(json.dumps(load_manifest(), indent=2, sort_keys=True))
+        return 0
+    if command == "check" and len(args) <= 1:
+        check_project(Path(args[0]) if args else Path.cwd())
+        return 0
+    if command == "exec":
+        if args and args[0] == "--":
+            args = args[1:]
+        if not args:
+            raise EnvironmentError("faros-env exec requires a command")
+        check_project(Path.cwd(), quiet=True)
+        os.execvp(args[0], args)
+    if command == "write-manifest" and len(args) == 1:
+        write_manifest(Path(args[0]))
+        return 0
+    if command == "verify-image" and not args:
+        verify_image()
+        return 0
+    usage()
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except EnvironmentError as exc:
+        print(f"faros-env: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc

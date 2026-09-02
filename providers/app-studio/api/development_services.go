@@ -34,7 +34,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
@@ -1040,13 +1039,31 @@ func (s *Server) restartProjectDevelopmentService(w http.ResponseWriter, r *http
 		}
 		return
 	}
-	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{projectDevelopmentServiceRestartAt: time.Now().UTC().Format(time.RFC3339Nano)}}})
-	updated, err := c.Resource(developmentServicesResource, "").Patch(r.Context(), obj.GetName(), types.MergePatchType, patch, metav1.PatchOptions{})
+	updated, err := requestProjectDevelopmentServiceRestart(r.Context(), c, obj, time.Now())
 	if err != nil {
 		writeProjectError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, projectDevelopmentServiceMutationResponse{Service: projectDevelopmentServiceViewFromUnstructured(updated)})
+}
+
+// requestProjectDevelopmentServiceRestart persists an opaque restart token on
+// the durable intent resource. The GraphQL-backed client supports full-object
+// apply for metadata mutations; Patch is reserved for the status subresource.
+// Infrastructure forwards this token to the sandbox process manager, where a
+// change forces a restart independently of the crash restart policy.
+func requestProjectDevelopmentServiceRestart(ctx context.Context, c *asclient.Client, obj *unstructured.Unstructured, requestedAt time.Time) (*unstructured.Unstructured, error) {
+	if c == nil || obj == nil {
+		return nil, errors.New("development service restart target is required")
+	}
+	next := obj.DeepCopy()
+	annotations := make(map[string]string, len(next.GetAnnotations())+1)
+	for key, value := range next.GetAnnotations() {
+		annotations[key] = value
+	}
+	annotations[projectDevelopmentServiceRestartAt] = requestedAt.UTC().Format(time.RFC3339Nano)
+	next.SetAnnotations(annotations)
+	return c.Resource(developmentServicesResource, "").Update(ctx, next, metav1.UpdateOptions{})
 }
 
 // logsProjectDevelopmentService is the App Studio-side capability boundary
@@ -1289,11 +1306,7 @@ func (s *Server) assistantRestartProjectDevelopmentService(ctx context.Context, 
 	if err != nil {
 		return "", err
 	}
-	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{projectDevelopmentServiceRestartAt: time.Now().UTC().Format(time.RFC3339Nano)}}})
-	if err != nil {
-		return "", err
-	}
-	updated, err := c.Resource(developmentServicesResource, "").Patch(ctx, obj.GetName(), types.MergePatchType, patch, metav1.PatchOptions{})
+	updated, err := requestProjectDevelopmentServiceRestart(ctx, c, obj, time.Now())
 	if err != nil {
 		return "", err
 	}

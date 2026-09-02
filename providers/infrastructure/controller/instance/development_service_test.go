@@ -19,6 +19,7 @@ package instance
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net"
 	"net/http"
 	"reflect"
@@ -57,12 +58,16 @@ func testDevelopmentService(name string) *infrav1alpha1.DevelopmentService {
 
 func TestNormalizeDevelopmentServiceDefaultsAndValidation(t *testing.T) {
 	service := testDevelopmentService("web")
+	service.SetAnnotations(map[string]string{developmentServiceRestartAt: "2026-09-01T12:00:00Z"})
 	got, err := normalizeDevelopmentService(service)
 	if err != nil {
 		t.Fatalf("normalizeDevelopmentService() error = %v", err)
 	}
 	if !got.Enabled || got.Visibility != infrav1alpha1.DevelopmentServiceVisibilityPrivate || got.RestartPolicy != infrav1alpha1.DevelopmentServiceRestartAlways || got.WorkingDir != "." || got.Protocol != "HTTP" {
 		t.Fatalf("normalized defaults = %+v", got)
+	}
+	if got.RestartToken != "2026-09-01T12:00:00Z" {
+		t.Fatalf("normalized restart token = %q", got.RestartToken)
 	}
 
 	tests := []struct {
@@ -358,6 +363,59 @@ func TestFailClosedDevelopmentServiceRemovesExposureWhenProcessStopFails(t *test
 	}
 	if stopRequests != 2 {
 		t.Fatalf("stop requests after retry = %d, want 2", stopRequests)
+	}
+}
+
+func TestConfigureSandboxServiceForwardsRestartToken(t *testing.T) {
+	ctx := context.Background()
+	var received devAgentServiceRequest
+	controlHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/namespaces/runtime/services/sandbox-control:7070/proxy/service" {
+			http.Error(w, "unexpected control request", http.StatusBadRequest)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"web","phase":"Running","running":true}`))
+	})
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for control server: %v", err)
+	}
+	controlServer := &http.Server{Handler: controlHandler}
+	go func() { _ = controlServer.Serve(listener) }()
+	t.Cleanup(func() { _ = controlServer.Shutdown(ctx) })
+
+	runtimeClient := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(),
+		secretObject("runtime", "sandbox-control-token", map[string]string{
+			"token": base64.StdEncoding.EncodeToString([]byte("control-token")),
+		}, nil, nil),
+	)
+	controller := &Controller{cfg: Config{
+		Runtime:       runtimeClient,
+		RuntimeConfig: &rest.Config{Host: "http://" + listener.Addr().String()},
+	}}
+	sandbox := sandboxControlRef{
+		RuntimeNamespace: "runtime",
+		ServiceName:      "sandbox-control",
+		ServiceNamespace: "runtime",
+		SecretName:       "sandbox-control-token",
+		SecretNamespace:  "runtime",
+	}
+	spec := normalizedDevelopmentService{
+		Argv: []string{"go", "run", "main.go"}, WorkingDir: ".", Port: 8080,
+		HealthPath: "/healthz", RestartPolicy: infrav1alpha1.DevelopmentServiceRestartNever,
+		RestartToken: "2026-09-01T12:34:56Z",
+	}
+	status, err := controller.configureSandboxService(ctx, sandbox, "web", spec, nil, "connections-1")
+	if err != nil {
+		t.Fatalf("configure sandbox service: %v", err)
+	}
+	if !status.Running || received.RestartToken != spec.RestartToken || received.ConnectionRevision != "connections-1" {
+		t.Fatalf("configured status=%+v request=%+v", status, received)
 	}
 }
 

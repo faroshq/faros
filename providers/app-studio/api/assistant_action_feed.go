@@ -96,6 +96,18 @@ type projectAssistantBrowserActionFeedPresentation struct {
 	failed    string
 }
 
+// projectAssistantManagedActionFeedPresentation is the bounded public copy for
+// resource-oriented App Studio and aggregate-provider operations. Keeping this
+// catalog server-owned makes successful lifecycle calls visible without ever
+// exposing provider-controlled tool names, arguments, or receipts.
+type projectAssistantManagedActionFeedPresentation struct {
+	kind           string
+	active         string
+	succeeded      string
+	failed         string
+	targetArgument string
+}
+
 // Keep the copy keyed to the approved browser catalog rather than accepting
 // arbitrary browser_* names. The fallback below makes an explicitly approved
 // catalog addition visible without allowing an upstream, unknown tool to
@@ -354,6 +366,7 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 	kind := projectAssistantActionFeedItemKind(name)
 	status := projectAssistantActionFeedItemStatus(rawStatus)
 	browserPresentation, isApprovedBrowserTool := projectAssistantBrowserActionFeedPresentationForTool(name)
+	managedPresentation, isManagedTool := projectAssistantManagedActionFeedPresentationForTool(name)
 	item := projectAssistantActionFeedItem{
 		ID:       projectAssistantActionPublicID(id),
 		Kind:     kind,
@@ -363,6 +376,9 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 	}
 	if isApprovedBrowserTool {
 		item.Title = projectAssistantBrowserActionLifecycleTitle(status, browserPresentation)
+	}
+	if isManagedTool {
+		item.Title = projectAssistantActionLifecycleTitle(status, managedPresentation.active, managedPresentation.succeeded, managedPresentation.failed)
 	}
 	if status == projectAssistantActionFeedStatusFailed || status == projectAssistantActionFeedStatusRejected {
 		item.Diagnostic = projectAssistantActionFeedDiagnostic(id, errText)
@@ -382,6 +398,9 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 	}
 
 	args := projectAssistantActionArguments(arguments)
+	if isManagedTool && managedPresentation.targetArgument != "" {
+		item.Target = projectAssistantActionSafeTarget(projectToolString(args[managedPresentation.targetArgument]))
+	}
 	base := projectToolBaseName(name)
 	switch base {
 	case projectToolReadFile:
@@ -401,6 +420,16 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 	case projectToolReadSkillResource:
 		item.Target = projectAssistantSkillActionTarget(args, arguments)
 		item.Title = projectAssistantActionLifecycleTitle(status, "Reading skill resource", "Read skill resource", "Skill resource read failed")
+	case projectToolListDependencyTemplates:
+		item.Title = projectAssistantActionLifecycleTitle(status, "Checking dependency options", "Checked dependency options", "Dependency options check failed")
+	case projectToolListProjectDependencies:
+		item.Title = projectAssistantActionLifecycleTitle(status, "Checking project dependencies", "Checked project dependencies", "Dependency check failed")
+	case projectToolUpsertProjectDependency:
+		item.Target = projectAssistantActionSafeTarget(projectToolString(args["dependency"]))
+		item.Title = projectAssistantActionLifecycleTitle(status, "Configuring dependency", "Configured dependency", "Dependency configuration failed")
+	case projectToolDeleteProjectDependency:
+		item.Target = projectAssistantActionSafeTarget(projectToolString(args["dependency"]))
+		item.Title = projectAssistantActionLifecycleTitle(status, "Removing dependency", "Removed dependency", "Dependency removal failed")
 	case projectToolLS, projectToolGlob:
 		item.Title = projectAssistantActionLifecycleTitle(status, "Reading project files", "Read project files", "Project inspection failed")
 		if count, ok := projectAssistantSummaryCount(summary, "path(s)"); ok {
@@ -418,6 +447,12 @@ func presentProjectAssistantAction(id, name, rawStatus, arguments, summary, errT
 		item.Title = projectAssistantActionLifecycleTitle(status, "Updating files", "Updated files", "File update failed")
 		if status == projectAssistantActionFeedStatusSucceeded {
 			item.Outcome = projectAssistantMutationOutcome(summary)
+		}
+	case projectToolResolveProjectDependencies:
+		item.Target = projectAssistantActionSafeTarget(projectAssistantActionArgumentField(args, arguments, "workdir", "workdir"))
+		item.Title = projectAssistantActionLifecycleTitle(status, "Resolving dependencies", "Resolved dependencies", "Dependency resolution failed")
+		if status == projectAssistantActionFeedStatusSucceeded {
+			item.Outcome = summary
 		}
 	case projectToolVerifyDevelopmentRuntime:
 		item.Title = projectAssistantActionLifecycleTitle(status, "Checking development preview", "Checked development preview", "Preview check failed")
@@ -771,9 +806,80 @@ func projectAssistantBrowserActionLifecycleTitle(status string, presentation pro
 	}
 }
 
+var projectAssistantManagedActionFeedPresentations = map[string]projectAssistantManagedActionFeedPresentation{
+	projectToolInspectDevelopmentTemplates: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking development templates", succeeded: "Checked development templates", failed: "Development template check failed",
+	},
+	projectToolListDevelopmentServices: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking development services", succeeded: "Checked development services", failed: "Development service check failed",
+	},
+	projectToolUpsertDevelopmentService: {
+		kind: projectAssistantActionFeedItemEdit, active: "Configuring development service", succeeded: "Configured development service", failed: "Development service configuration failed", targetArgument: "service",
+	},
+	projectToolDeleteDevelopmentService: {
+		kind: projectAssistantActionFeedItemEdit, active: "Removing development service", succeeded: "Removed development service", failed: "Development service removal failed", targetArgument: "service",
+	},
+	projectToolRestartDevelopmentService: {
+		kind: projectAssistantActionFeedItemRun, active: "Restarting development service", succeeded: "Restarted development service", failed: "Development service restart failed", targetArgument: "service",
+	},
+	projectToolSetPrimaryPreviewService: {
+		kind: projectAssistantActionFeedItemEdit, active: "Selecting primary preview", succeeded: "Selected primary preview", failed: "Primary preview selection failed", targetArgument: "service",
+	},
+	projectToolListDetectedListeners: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking detected listeners", succeeded: "Checked detected listeners", failed: "Listener check failed",
+	},
+	projectToolUpsertProjectComponent: {
+		kind: projectAssistantActionFeedItemEdit, active: "Configuring project component", succeeded: "Configured project component", failed: "Project component configuration failed", targetArgument: "component",
+	},
+	projectToolDeleteProjectComponent: {
+		kind: projectAssistantActionFeedItemEdit, active: "Removing project component", succeeded: "Removed project component", failed: "Project component removal failed", targetArgument: "component",
+	},
+	projectToolInfrastructureListTemplates: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking infrastructure templates", succeeded: "Checked infrastructure templates", failed: "Infrastructure template check failed",
+	},
+	projectToolInfrastructureDescribeTemplate: {
+		kind: projectAssistantActionFeedItemInspect, active: "Reviewing infrastructure template", succeeded: "Reviewed infrastructure template", failed: "Infrastructure template review failed", targetArgument: "name",
+	},
+	projectToolInfrastructureListInstances: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking infrastructure resources", succeeded: "Checked infrastructure resources", failed: "Infrastructure resource check failed",
+	},
+	projectToolInfrastructureGetInstance: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking infrastructure resource", succeeded: "Checked infrastructure resource", failed: "Infrastructure resource check failed", targetArgument: "name",
+	},
+	projectToolInfrastructureProvision: {
+		kind: projectAssistantActionFeedItemEdit, active: "Provisioning infrastructure resource", succeeded: "Provisioned infrastructure resource", failed: "Infrastructure provisioning failed", targetArgument: "name",
+	},
+	projectToolDatabricksListTables: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking Databricks tables", succeeded: "Checked Databricks tables", failed: "Databricks table check failed",
+	},
+	projectToolDatabricksDescribeTable: {
+		kind: projectAssistantActionFeedItemInspect, active: "Reviewing Databricks table", succeeded: "Reviewed Databricks table", failed: "Databricks table review failed",
+	},
+	projectToolAgentsListAgents: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking agents", succeeded: "Checked agents", failed: "Agent check failed",
+	},
+	projectToolAgentsListRuns: {
+		kind: projectAssistantActionFeedItemInspect, active: "Checking agent runs", succeeded: "Checked agent runs", failed: "Agent run check failed",
+	},
+	projectToolAgentsGetRun: {
+		kind: projectAssistantActionFeedItemInspect, active: "Reviewing agent run", succeeded: "Reviewed agent run", failed: "Agent run review failed",
+	},
+	projectToolAgentsRunAgent: {
+		kind: projectAssistantActionFeedItemRun, active: "Starting agent run", succeeded: "Started agent run", failed: "Agent run failed",
+	},
+}
+
+func projectAssistantManagedActionFeedPresentationForTool(name string) (projectAssistantManagedActionFeedPresentation, bool) {
+	presentation, ok := projectAssistantManagedActionFeedPresentations[strings.TrimSpace(name)]
+	return presentation, ok
+}
+
 func projectAssistantActionFeedItemKind(name string) string {
 	if browserPresentation, ok := projectAssistantBrowserActionFeedPresentationForTool(name); ok {
 		return browserPresentation.kind
+	}
+	if managedPresentation, ok := projectAssistantManagedActionFeedPresentationForTool(name); ok {
+		return managedPresentation.kind
 	}
 	switch base := projectToolBaseName(name); {
 	case base == projectToolAskFollowUp:
@@ -787,10 +893,13 @@ func projectAssistantActionFeedItemKind(name string) string {
 		return projectAssistantActionFeedItemRun
 	case base == projectToolCommitProjectFiles || base == projectToolCommitFiles:
 		return projectAssistantActionFeedItemCommit
-	case base == projectToolCreateFile || base == projectToolReplaceFile || base == projectToolEditFile || base == projectToolDeleteFile || base == projectToolMoveFile:
+	case base == projectToolCreateFile || base == projectToolReplaceFile || base == projectToolEditFile || base == projectToolDeleteFile || base == projectToolMoveFile || base == projectToolResolveProjectDependencies:
+		return projectAssistantActionFeedItemEdit
+	case base == projectToolUpsertProjectDependency || base == projectToolDeleteProjectDependency:
 		return projectAssistantActionFeedItemEdit
 	case base == projectToolLS || base == projectToolReadFile || base == projectToolGlob || base == projectToolGrep ||
-		base == projectToolLoadSkill || base == projectToolReadSkillResource:
+		base == projectToolLoadSkill || base == projectToolReadSkillResource ||
+		base == projectToolListDependencyTemplates || base == projectToolListProjectDependencies:
 		return projectAssistantActionFeedItemInspect
 	default:
 		return projectAssistantActionFeedItemOther
@@ -884,7 +993,7 @@ func projectAssistantActionFeedGrouping(item *projectAssistantActionFeedItem, ba
 	case projectToolGrep:
 		item.GroupKey = "inspect:search"
 		item.GroupTitle = "Searched project"
-	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile:
+	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile, projectToolResolveProjectDependencies:
 		item.GroupKey = "edit:files"
 		item.GroupTitle = "Updated files"
 	case projectToolCheckProjectReadiness, projectToolPrepareProjectDeployment,

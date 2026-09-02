@@ -71,6 +71,14 @@ type execDispatcher interface {
 	Execute(context.Context, persistentExecRequest) (execResponse, error)
 }
 
+type directExecDispatcher struct {
+	workspace string
+}
+
+func (d directExecDispatcher) Execute(ctx context.Context, req persistentExecRequest) (execResponse, error) {
+	return runPersistentExec(ctx, d.workspace, req)
+}
+
 type httpExecDispatcher struct {
 	url    string
 	client *http.Client

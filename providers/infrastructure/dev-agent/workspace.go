@@ -111,12 +111,13 @@ type workspaceMutateRequest struct {
 }
 
 type workspaceMutateResponse struct {
-	Phase          string   `json:"phase"`
-	Changed        []string `json:"changed,omitempty"`
-	Deleted        []string `json:"deleted,omitempty"`
-	Restarted      bool     `json:"restarted,omitempty"`
-	SourceRevision uint64   `json:"sourceRevision"`
-	SourceDigest   string   `json:"sourceDigest"`
+	Phase                  string   `json:"phase"`
+	Changed                []string `json:"changed,omitempty"`
+	Deleted                []string `json:"deleted,omitempty"`
+	Restarted              bool     `json:"restarted,omitempty"`
+	NamedServicesRestarted int      `json:"namedServicesRestarted,omitempty"`
+	SourceRevision         uint64   `json:"sourceRevision"`
+	SourceDigest           string   `json:"sourceDigest"`
 }
 
 type workspaceChange struct {
@@ -171,13 +172,14 @@ type workspaceCheckpointSummary struct {
 }
 
 type workspaceCheckpointResponse struct {
-	Action         string                       `json:"action"`
-	Checkpoint     *workspaceCheckpointSummary  `json:"checkpoint,omitempty"`
-	Checkpoints    []workspaceCheckpointSummary `json:"checkpoints,omitempty"`
-	SourceRevision uint64                       `json:"sourceRevision,omitempty"`
-	SourceDigest   string                       `json:"sourceDigest,omitempty"`
-	Changed        []string                     `json:"changed,omitempty"`
-	Deleted        []string                     `json:"deleted,omitempty"`
+	Action                 string                       `json:"action"`
+	Checkpoint             *workspaceCheckpointSummary  `json:"checkpoint,omitempty"`
+	Checkpoints            []workspaceCheckpointSummary `json:"checkpoints,omitempty"`
+	SourceRevision         uint64                       `json:"sourceRevision,omitempty"`
+	SourceDigest           string                       `json:"sourceDigest,omitempty"`
+	Changed                []string                     `json:"changed,omitempty"`
+	Deleted                []string                     `json:"deleted,omitempty"`
+	NamedServicesRestarted int                          `json:"namedServicesRestarted,omitempty"`
 }
 
 // handleWorkspace dispatches a bounded, token-authenticated workspace
@@ -210,6 +212,8 @@ func (s *agentServer) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		s.handleWorkspaceRead(w, r)
 	case "mutate":
 		s.handleWorkspaceMutate(w, r)
+	case "resolve-dependencies":
+		s.handleWorkspaceResolveDependencies(w, r)
 	case "diff":
 		s.handleWorkspaceDiff(w, r)
 	case "checkpoint":
@@ -528,6 +532,12 @@ func (s *agentServer) handleWorkspaceMutate(w http.ResponseWriter, r *http.Reque
 		}
 		response.Restarted = true
 	}
+	restarted, err := s.applyNamedServiceWorkspaceRevision(r.Context(), manifest.SourceRevision, manifest.SourceDigest)
+	if err != nil {
+		http.Error(w, "restart named services: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	response.NamedServicesRestarted = restarted
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -741,7 +751,12 @@ func (s *agentServer) restoreWorkspaceCheckpoint(w http.ResponseWriter, r *http.
 		http.Error(w, "write workspace manifest: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, workspaceCheckpointResponse{Action: "restore", Checkpoint: func() *workspaceCheckpointSummary { summary := checkpointSummary(checkpoint); return &summary }(), SourceRevision: manifest.SourceRevision, SourceDigest: manifest.SourceDigest, Changed: changed, Deleted: deleted})
+	restarted, err := s.applyNamedServiceWorkspaceRevision(r.Context(), manifest.SourceRevision, manifest.SourceDigest)
+	if err != nil {
+		http.Error(w, "restart named services: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, workspaceCheckpointResponse{Action: "restore", Checkpoint: func() *workspaceCheckpointSummary { summary := checkpointSummary(checkpoint); return &summary }(), SourceRevision: manifest.SourceRevision, SourceDigest: manifest.SourceDigest, Changed: changed, Deleted: deleted, NamedServicesRestarted: restarted})
 }
 
 func boundedWorkspaceListEntries(value int) (int, error) {

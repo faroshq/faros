@@ -406,6 +406,51 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		},
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
+				Name:        projectToolResolveProjectDependencies,
+				Description: "Resolve source dependency metadata in the synchronized coding sandbox and persist only ecosystem-owned files as one guarded source mutation. For ecosystem=go this runs go mod tidy in an isolated copy and, only when it succeeds, imports go.mod and go.sum into the project workspace. Use it after adding or changing Go imports or requirements and before build/test verification. A failed resolution leaves project source unchanged.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"ecosystem":{"type":"string","enum":["go"]},"workdir":{"type":"string","description":"Project-relative directory containing go.mod; defaults to the project root."}},"required":["ecosystem"],"additionalProperties":false}`),
+				Risk:        projectAssistantToolRiskWrite,
+			},
+			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {
+				ecosystem := strings.ToLower(strings.TrimSpace(projectToolString(req.Arguments["ecosystem"])))
+				workDir := strings.TrimSpace(projectToolString(req.Arguments["workdir"]))
+				if _, err := projectAssistantWriteTargetPaths(projectToolResolveProjectDependencies, req.Arguments); err != nil {
+					return "", err
+				}
+				sandbox, err := ensureProjectAssistantRunSandboxForRequest(ctx, req)
+				if err != nil {
+					return "", err
+				}
+				if sandbox == nil {
+					return "", errors.New("dependency resolution requires the active synchronized coding sandbox")
+				}
+				response, err := sandbox.resolveDependencies(ctx, ecosystem, workDir)
+				if err != nil {
+					return "", err
+				}
+				summary := "dependency metadata is already resolved"
+				switch {
+				case strings.EqualFold(response.Status, "failed"):
+					summary = "dependency resolution failed; project source was left unchanged"
+				case response.Mutation.Changed:
+					summary = fmt.Sprintf("resolved %s dependency metadata in %d source file(s)", ecosystem, len(response.Mutation.Paths))
+				}
+				return projectAssistantToolJSONResult(map[string]any{
+					"operation":              projectToolResolveProjectDependencies,
+					"status":                 response.Status,
+					"ecosystem":              ecosystem,
+					"changed":                response.Mutation.Changed,
+					"paths":                  response.Mutation.Paths,
+					"exitCode":               response.ExitCode,
+					"stdout":                 response.Stdout,
+					"stderr":                 response.Stderr,
+					"namedServicesRestarted": response.NamedServicesRestarted,
+					"summary":                summary,
+				}, nil)
+			},
+		},
+		projectAssistantToolFunc{
+			spec: projectAssistantToolSpec{
 				Name:        projectToolSelectTemplate,
 				Description: "Bind the project's hosted development/preview environment to an infrastructure template (or switch it). An active per-run coding sandbox can author and test source without this binding; call this only when a hosted preview or template-backed runtime is required. Interview the user about their requirements first (backend? persistent data? background jobs?), inspect candidates with infrastructure__list_templates / infrastructure__describe_template, and confirm the choice with the user before calling this — switching tears the current hosted development environment down and re-provisions it (workspace files and git history are preserved and re-synced).",
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"template":{"type":"string","description":"Catalog name of the infrastructure template to back the development environment (e.g. application). The template must declare development components."}},"required":["template"]}`),
@@ -780,8 +825,8 @@ func projectAssistantLocalToolRegistry(server *Server) projectAssistantToolRegis
 		projectAssistantToolFunc{
 			spec: projectAssistantToolSpec{
 				Name:        projectToolUpsertProjectDependency,
-				Description: "Provision or update one durable Infrastructure dependency and connect its typed interface to a Project target. The source Instance is explicitly Retain, while the derived credential delivery Connection is always removed with the intent. This runtime mutation requires user confirmation and never accepts credential values.",
-				Parameters:  json.RawMessage(`{"type":"object","properties":{"dependency":{"type":"string","minLength":1,"maxLength":63},"environment":{"type":"string","minLength":1,"maxLength":63,"default":"development"},"template":{"type":"string","minLength":1,"maxLength":253},"values":{"type":"object","description":"Public provider schema values only. Never pass passwords, tokens, or Secret data."},"sourceInterface":{"type":"string","minLength":1},"targetRef":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["developmentService","binding"]},"name":{"type":"string","minLength":1,"maxLength":63}},"required":["kind","name"]},"targetInterface":{"type":"string","minLength":1},"mappings":{"type":"array","maxItems":32,"items":{"type":"object","additionalProperties":false,"properties":{"sourceKey":{"type":"string","minLength":1},"targetKey":{"type":"string","minLength":1}},"required":["sourceKey","targetKey"]}}},"required":["dependency","template","values","sourceInterface","targetRef","targetInterface"],"additionalProperties":false}`),
+				Description: "Atomically provision or update one durable Infrastructure dependency, connect it to a Project target, and return successfully only after the connection is Ready. This is the complete project-dependency flow: do not call infrastructure__provision or infrastructure__update_instance before or after it. Copy template exactly from list_dependency_templates.templates[].name; do not substitute the dependency name or interface type (for the PostgreSQL catalog entry use template=database, not postgres or postgresql). Omit values.name unless the user explicitly chose an infrastructure name; App Studio otherwise supplies a project-scoped name that avoids retained-resource collisions. The environment field selects the Project environment; never copy it to values.farosMode. Omit sourceInterface, targetInterface, and mappings when the catalog has one compatible typed connection; App Studio infers them. Specify those fields only to resolve an explicit ambiguity. The source Instance is Retain, while the derived credential delivery Connection is removed with the intent. This runtime mutation requires user confirmation and never accepts credential values.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"dependency":{"type":"string","minLength":1,"maxLength":63},"environment":{"type":"string","minLength":1,"maxLength":63,"default":"development"},"template":{"type":"string","minLength":1,"maxLength":253},"values":{"type":"object","description":"Optional public provider schema values only. Never pass passwords, tokens, or Secret data."},"sourceInterface":{"type":"string","minLength":1,"description":"Optional. Omit when exactly one compatible typed connection exists."},"targetRef":{"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["developmentService","binding"]},"name":{"type":"string","minLength":1,"maxLength":63}},"required":["kind","name"]},"targetInterface":{"type":"string","minLength":1,"description":"Optional. Omit when exactly one compatible typed connection exists."},"mappings":{"type":"array","maxItems":32,"description":"Optional. Omit to use the target interface's declared mappings.","items":{"type":"object","additionalProperties":false,"properties":{"sourceKey":{"type":"string","minLength":1},"targetKey":{"type":"string","minLength":1}},"required":["sourceKey","targetKey"]}}},"required":["dependency","template","targetRef"],"additionalProperties":false}`),
 				Risk:        projectAssistantToolRiskRuntime,
 			},
 			call: func(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {

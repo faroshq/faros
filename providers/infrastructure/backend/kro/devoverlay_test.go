@@ -324,6 +324,18 @@ func assertDevExecProbeCommand(t *testing.T, containerName, probeName string, pr
 	}
 }
 
+func TestDevExecutorResourcesSupportDependencyCompilation(t *testing.T) {
+	resources := devExecutorResources()
+	requests := resources["requests"].(map[string]any)
+	limits := resources["limits"].(map[string]any)
+	if requests["cpu"] != "100m" || requests["memory"] != "256Mi" {
+		t.Fatalf("executor requests=%v", requests)
+	}
+	if limits["cpu"] != "1" || limits["memory"] != "1Gi" {
+		t.Fatalf("executor limits=%v", limits)
+	}
+}
+
 func TestDevOverlayGatesProdWorkloadsAndAddsDevVariants(t *testing.T) {
 	rgd, err := buildRGD(devTestTemplate(t), devTestTokens())
 	if err != nil {

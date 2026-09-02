@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 # Copyright 2026 The Faros Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -7,37 +7,84 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-# The base is an explicit build input so operators can pin it by digest. The
-# resulting image is also selected at runtime by FAROS_DEV_IMAGE_UNIVERSAL;
-# both controls are intentional because this image executes tenant source.
-ARG BASE_IMAGE=docker.io/library/node:22-bookworm
+# Each runtime is an explicit build input. Production builders should pin all
+# three inputs by digest; the resulting runtime image is selected independently
+# through FAROS_DEV_IMAGE_UNIVERSAL and is also required to be digest-pinned.
+ARG NODE_IMAGE=docker.io/library/node:22-bookworm
+ARG GO_IMAGE=docker.io/library/golang:1.26.3-bookworm
+ARG BASE_IMAGE=docker.io/library/python:3.12-bookworm
+
+FROM ${NODE_IMAGE} AS node-toolchain
+FROM ${GO_IMAGE} AS go-toolchain
 FROM ${BASE_IMAGE}
 
 USER root
 
-RUN apt-get update \
+# Distribution packages provide operating-system utilities and native build
+# libraries only. Language runtimes come from their official upstream images,
+# so a Debian package transition can never silently downgrade Go, Node, or
+# Python again.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
     && apt-get install --no-install-recommends -y \
         bash \
+        build-essential \
         ca-certificates \
         curl \
         git \
-        golang-go \
         jq \
         make \
-        python3 \
-        python3-venv \
+        openssh-client \
+        pkg-config \
         ripgrep \
-    && rm -rf /var/lib/apt/lists/* \
-    && install -d -o 1000 -g 1000 /workspace /tmp/faros-home /tmp/faros-cache
+        unzip \
+        zip \
+    && rm -rf /var/lib/apt/lists/*
 
-# The node Debian base already supplies uid/gid 1000. Keep the image usable
-# with the overlay's pod-level runAsNonRoot boundary without relying on that
-# image's named user surviving a downstream rebuild.
-USER 1000:1000
-WORKDIR /workspace
-ENV HOME=/tmp/faros-home \
+COPY --from=node-toolchain /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-toolchain /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=node-toolchain /usr/local/bin/npx /usr/local/bin/npx
+COPY --from=node-toolchain /usr/local/bin/corepack /usr/local/bin/corepack
+COPY --from=node-toolchain /usr/local/lib/node_modules /usr/local/lib/node_modules
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+COPY --chmod=0755 universal/faros-env /usr/local/bin/faros-env
+
+ENV PATH=/usr/local/go/bin:/tmp/faros-cache/go/bin:$PATH \
+    GOTOOLCHAIN=local \
+    HOME=/tmp/faros-home \
     TMPDIR=/tmp \
     XDG_CACHE_HOME=/tmp/faros-cache \
-    NPM_CONFIG_CACHE=/tmp/faros-cache/npm
+    GOCACHE=/tmp/faros-cache/go/build \
+    GOMODCACHE=/tmp/faros-cache/go/pkg/mod \
+    GOPATH=/tmp/faros-cache/go \
+    NPM_CONFIG_CACHE=/tmp/faros-cache/npm \
+    PIP_CACHE_DIR=/tmp/faros-cache/pip
+
+# The manifest is generated from the binaries actually copied into the image,
+# then verified before the image can be published. Runtime consumers use the
+# same faros-env command to reject incompatible project requirements before an
+# application process starts.
+RUN install -d -o 1000 -g 1000 \
+        /workspace \
+        /tmp/faros-home \
+        /tmp/faros-cache \
+        /tmp/faros-cache/go/bin \
+        /tmp/faros-cache/go/build \
+        /tmp/faros-cache/go/pkg/mod \
+        /tmp/faros-cache/npm \
+        /tmp/faros-cache/pip \
+    && install -d /opt/faros \
+    && faros-env write-manifest /opt/faros/image-manifest.json \
+    && faros-env verify-image
+
+LABEL org.opencontainers.image.title="Faros universal development environment" \
+      org.opencontainers.image.description="Platform-owned Node, Go, and Python sandbox toolchain"
+
+# Keep the image compatible with the sandbox pod-level runAsNonRoot boundary.
+# Numeric identity intentionally avoids relying on a named user from any one
+# upstream language image.
+USER 1000:1000
+WORKDIR /workspace
 
 CMD ["sleep", "infinity"]

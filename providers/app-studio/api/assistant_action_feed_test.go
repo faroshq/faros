@@ -151,6 +151,123 @@ func TestProjectAssistantActionFeedSkillsExposeOnlyQualifiedID(t *testing.T) {
 	}
 }
 
+func TestProjectAssistantActionFeedDependenciesAreVisibleAndCredentialSafe(t *testing.T) {
+	tests := []struct {
+		name   string
+		tool   string
+		kind   string
+		title  string
+		target string
+	}{
+		{name: "list options", tool: projectToolListDependencyTemplates, kind: projectAssistantActionFeedItemInspect, title: "Checked dependency options"},
+		{name: "list configured", tool: projectToolListProjectDependencies, kind: projectAssistantActionFeedItemInspect, title: "Checked project dependencies"},
+		{name: "configure", tool: projectToolUpsertProjectDependency, kind: projectAssistantActionFeedItemEdit, title: "Configured dependency", target: "postcards-db"},
+		{name: "remove", tool: projectToolDeleteProjectDependency, kind: projectAssistantActionFeedItemEdit, title: "Removed dependency", target: "postcards-db"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := projectToolCallStreamEvent{
+				ID:     "dependency-" + tt.name,
+				Name:   tt.tool,
+				Status: "succeeded",
+				Arguments: `{"dependency":"postcards-db","template":"database","values":{"password":"secret-password"},` +
+					`"mappings":[{"sourceKey":"uri","targetKey":"DATABASE_URL"}]}`,
+				Summary:  "secret provider result",
+				Sequence: 1,
+			}
+			item := projectAssistantActionFeedItemFromToolCall(event)
+			if item.Kind != tt.kind || item.Status != projectAssistantActionFeedStatusSucceeded || item.Title != tt.title || item.Target != tt.target {
+				t.Fatalf("item = %#v, want %s/%s target %q", item, tt.kind, tt.title, tt.target)
+			}
+			if item.GroupKey != "" || item.GroupTitle != "" {
+				t.Fatalf("item = %#v, dependency actions must remain individually visible", item)
+			}
+			feed := projectAssistantActionFeedFromToolCalls([]projectToolCallStreamEvent{event})
+			if len(feed) != 1 || feed[0].ID != item.ID {
+				t.Fatalf("feed = %#v, want visible dependency action", feed)
+			}
+			data, err := json.Marshal(feed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{
+				tt.tool, "database", "password", "secret-password", "sourceKey", "uri", "targetKey", "DATABASE_URL", "secret provider result",
+			} {
+				if strings.Contains(string(data), forbidden) {
+					t.Fatalf("feed JSON = %s, must not contain %q", data, forbidden)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectAssistantActionFeedResourceLifecycleToolsAreVisibleAndBounded(t *testing.T) {
+	tests := []struct {
+		name   string
+		tool   string
+		args   string
+		kind   string
+		title  string
+		target string
+	}{
+		{name: "inspect templates", tool: projectToolInspectDevelopmentTemplates, kind: projectAssistantActionFeedItemInspect, title: "Checked development templates"},
+		{name: "list services", tool: projectToolListDevelopmentServices, kind: projectAssistantActionFeedItemInspect, title: "Checked development services"},
+		{name: "configure service", tool: projectToolUpsertDevelopmentService, args: `{"service":"api","command":{"argv":["go","run","."]}}`, kind: projectAssistantActionFeedItemEdit, title: "Configured development service", target: "api"},
+		{name: "restart service", tool: projectToolRestartDevelopmentService, args: `{"service":"api"}`, kind: projectAssistantActionFeedItemRun, title: "Restarted development service", target: "api"},
+		{name: "select preview", tool: projectToolSetPrimaryPreviewService, args: `{"service":"web"}`, kind: projectAssistantActionFeedItemEdit, title: "Selected primary preview", target: "web"},
+		{name: "configure component", tool: projectToolUpsertProjectComponent, args: `{"component":"api","sourcePath":"api"}`, kind: projectAssistantActionFeedItemEdit, title: "Configured project component", target: "api"},
+		{name: "list infrastructure", tool: projectToolInfrastructureListInstances, kind: projectAssistantActionFeedItemInspect, title: "Checked infrastructure resources"},
+		{name: "provision infrastructure", tool: projectToolInfrastructureProvision, args: `{"name":"step-tracker-db","values":{"password":"must-not-leak"}}`, kind: projectAssistantActionFeedItemEdit, title: "Provisioned infrastructure resource", target: "step-tracker-db"},
+		{name: "review databricks", tool: projectToolDatabricksDescribeTable, args: `{"tableRef":"private-table"}`, kind: projectAssistantActionFeedItemInspect, title: "Reviewed Databricks table"},
+		{name: "start agent", tool: projectToolAgentsRunAgent, args: `{"agent":"private-agent"}`, kind: projectAssistantActionFeedItemRun, title: "Started agent run"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := projectToolCallStreamEvent{ID: "resource-" + tt.name, Name: tt.tool, Status: "succeeded", Arguments: tt.args, Summary: "private provider receipt", Sequence: 1}
+			feed := projectAssistantActionFeedFromToolCalls([]projectToolCallStreamEvent{event})
+			if len(feed) != 1 || feed[0].Kind != tt.kind || feed[0].Title != tt.title || feed[0].Target != tt.target {
+				t.Fatalf("feed = %#v, want one visible %s action %q targeting %q", feed, tt.kind, tt.title, tt.target)
+			}
+			data, err := json.Marshal(feed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{tt.tool, "must-not-leak", "private provider receipt", "private-table", "private-agent", "command", "argv"} {
+				if strings.Contains(string(data), forbidden) {
+					t.Fatalf("feed JSON = %s, must not contain %q", data, forbidden)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectAssistantActionFeedDependencyLifecycleRemainsVisible(t *testing.T) {
+	statuses := []struct {
+		rawStatus string
+		status    string
+		title     string
+	}{
+		{rawStatus: "running", status: projectAssistantActionFeedStatusRunning, title: "Configuring dependency"},
+		{rawStatus: "permission_required", status: projectAssistantActionFeedStatusWaiting, title: "Configuring dependency"},
+		{rawStatus: "failed", status: projectAssistantActionFeedStatusFailed, title: "Dependency configuration failed"},
+		{rawStatus: "rejected", status: projectAssistantActionFeedStatusRejected, title: "Dependency configuration failed"},
+	}
+	for _, tt := range statuses {
+		t.Run(tt.rawStatus, func(t *testing.T) {
+			feed := projectAssistantActionFeedFromToolCalls([]projectToolCallStreamEvent{{
+				ID:        "dependency-" + tt.rawStatus,
+				Name:      projectToolUpsertProjectDependency,
+				Status:    tt.rawStatus,
+				Arguments: `{"dependency":"postcards-db"}`,
+				Sequence:  1,
+			}})
+			if len(feed) != 1 || feed[0].Kind != projectAssistantActionFeedItemEdit || feed[0].Status != tt.status || feed[0].Title != tt.title {
+				t.Fatalf("feed = %#v, want visible %s/%s", feed, tt.status, tt.title)
+			}
+		})
+	}
+}
+
 func TestProjectAssistantActionFeedSkillMinimalDisclosureHidesTarget(t *testing.T) {
 	previous := projectAssistantToolDisclosureMinimal
 	projectAssistantToolDisclosureMinimal = true

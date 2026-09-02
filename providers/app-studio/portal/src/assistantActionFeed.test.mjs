@@ -104,6 +104,34 @@ test('keeps skill lifecycle titles and qualified targets while rejecting private
   assert.deepEqual(feed.parseAssistantActionFeed([loadedSkill, readSkillResource, privateSkillPayload, privateResourcePayload]), [loadedSkill, readSkillResource])
 })
 
+test('keeps dependency inspections and mutations visible', () => {
+  const dependencyOptions = action({
+    id: 'dependency-options-1',
+    kind: 'inspect',
+    title: 'Checked dependency options',
+  })
+  delete dependencyOptions.target
+  const configuredDependency = action({
+    id: 'dependency-configured-1',
+    kind: 'edit',
+    title: 'Configured dependency',
+    target: 'postcards-db',
+  })
+  const removedDependency = action({
+    id: 'dependency-removed-1',
+    kind: 'edit',
+    title: 'Removed dependency',
+    target: 'postcards-db',
+  })
+
+  assert.deepEqual(
+    feed.parseAssistantActionFeed([dependencyOptions, configuredDependency, removedDependency]),
+    [dependencyOptions, configuredDependency, removedDependency],
+  )
+  assert.equal(feed.groupAssistantActions([dependencyOptions, configuredDependency, removedDependency]).length, 3)
+  assert.deepEqual(feed.parseAssistantActionFeed([{ ...configuredDependency, values: { password: 'secret' } }]), [])
+})
+
 test('parses retrying and recovered mutation linkage with bounded diagnostics', () => {
   const prior = action({
     id: 'feed-prior',

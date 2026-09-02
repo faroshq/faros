@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gorilla/mux"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -32,6 +33,8 @@ import (
 const (
 	projectDependencyEnvironmentDefault = "development"
 	projectDependencyMaxCount           = 32
+	projectDependencyReadyPollInterval  = time.Second
+	projectDependencyReadyTimeout       = 3 * time.Minute
 )
 
 type projectDependencyInterfaceView struct {
@@ -330,8 +333,79 @@ func projectDependencyTargetTemplateName(project *aiv1alpha1.Project, envName st
 	return ""
 }
 
-func projectDependencyTargetInterfaces(ctx context.Context, c *asclient.Client, project *aiv1alpha1.Project, environment string) ([]projectDependencyInterfaceView, error) {
-	name := projectDependencyTargetTemplateName(project, environment, aiv1alpha1.ProjectConnectionEndpointReference{Kind: aiv1alpha1.ProjectConnectionReferenceDevelopmentService})
+func projectDependencySandboxTemplateName(ctx context.Context, c *asclient.Client, project *aiv1alpha1.Project, service *unstructured.Unstructured) (string, error) {
+	if c == nil || project == nil || service == nil {
+		return "", errors.New("project client, Project, and DevelopmentService are required")
+	}
+	serviceName := projectDevelopmentServiceLogicalName(service)
+	sandboxName, _, _ := unstructured.NestedString(service.Object, "spec", "sandboxRef", "name")
+	sandboxUID, _, _ := unstructured.NestedString(service.Object, "spec", "sandboxRef", "uid")
+	sandboxName = strings.TrimSpace(sandboxName)
+	sandboxUID = strings.TrimSpace(sandboxUID)
+	if sandboxName == "" || sandboxUID == "" {
+		return "", fmt.Errorf("DevelopmentService %q has an incomplete sandbox reference", serviceName)
+	}
+
+	instance, err := c.Resource(runSandboxInstancesResource, "").Get(ctx, sandboxName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("resolve DevelopmentService %q sandbox %q: %w", serviceName, sandboxName, err)
+	}
+	if string(instance.GetUID()) != sandboxUID {
+		return "", fmt.Errorf("DevelopmentService %q sandbox %q UID does not match", serviceName, sandboxName)
+	}
+	if instance.GetAnnotations()[projectAssistantRunSandboxLabel] != "true" || !ensureProjectDevelopmentSandboxOwner(instance, project) {
+		return "", fmt.Errorf("DevelopmentService %q sandbox %q is not owned by this Project", serviceName, sandboxName)
+	}
+	templateName, _, _ := unstructured.NestedString(instance.Object, "spec", "template")
+	templateName = strings.TrimSpace(templateName)
+	if templateName == "" {
+		return "", fmt.Errorf("DevelopmentService %q sandbox %q has no Infrastructure Template", serviceName, sandboxName)
+	}
+	return templateName, nil
+}
+
+func (s *Server) resolveProjectDependencyTargetTemplateName(ctx context.Context, c *asclient.Client, project *aiv1alpha1.Project, environment string, ref aiv1alpha1.ProjectConnectionEndpointReference) (string, error) {
+	if name := projectDependencyTargetTemplateName(project, environment, ref); name != "" {
+		return name, nil
+	}
+	if ref.Kind != aiv1alpha1.ProjectConnectionReferenceDevelopmentService || environment != projectDependencyEnvironmentDefault {
+		return "", nil
+	}
+
+	if name := strings.TrimSpace(ref.Name); name != "" {
+		service, err := s.getOwnedDevelopmentService(ctx, c, project, name)
+		if err != nil {
+			return "", err
+		}
+		return projectDependencySandboxTemplateName(ctx, c, project, service)
+	}
+
+	services, err := s.listOwnedDevelopmentServices(ctx, c, project)
+	if err != nil {
+		return "", err
+	}
+	var templateName string
+	for _, service := range services {
+		resolved, err := projectDependencySandboxTemplateName(ctx, c, project, service)
+		if err != nil {
+			return "", err
+		}
+		if templateName == "" {
+			templateName = resolved
+			continue
+		}
+		if resolved != templateName {
+			return "", errors.New("project DevelopmentServices use different sandbox Templates")
+		}
+	}
+	return templateName, nil
+}
+
+func (s *Server) projectDependencyTargetInterfaces(ctx context.Context, c *asclient.Client, project *aiv1alpha1.Project, environment string) ([]projectDependencyInterfaceView, error) {
+	name, err := s.resolveProjectDependencyTargetTemplateName(ctx, c, project, environment, aiv1alpha1.ProjectConnectionEndpointReference{Kind: aiv1alpha1.ProjectConnectionReferenceDevelopmentService})
+	if err != nil {
+		return nil, err
+	}
 	if name == "" {
 		return []projectDependencyInterfaceView{}, nil
 	}
@@ -352,7 +426,7 @@ func (s *Server) getProjectDependencyCatalog(w http.ResponseWriter, r *http.Requ
 		writeProjectError(w, err)
 		return
 	}
-	targets, err := projectDependencyTargetInterfaces(r.Context(), c, project, projectDependencyEnvironmentDefault)
+	targets, err := s.projectDependencyTargetInterfaces(r.Context(), c, project, projectDependencyEnvironmentDefault)
 	if err != nil && !apierrors.IsNotFound(err) {
 		writeProjectError(w, err)
 		return
@@ -471,6 +545,71 @@ func projectDependencyTemplateInterface(obj *unstructured.Unstructured, name str
 	return projectDependencyInterfaceView{}, false
 }
 
+type projectDependencyInterfaceCandidate struct {
+	source   projectDependencyInterfaceView
+	target   projectDependencyInterfaceView
+	mappings []aiv1alpha1.ProjectConnectionMappingSpec
+}
+
+func projectDependencyResolveInterfaces(sourceTemplate, targetTemplate *unstructured.Unstructured, request projectDependencyMutationRequest) (projectDependencyInterfaceView, projectDependencyInterfaceView, []aiv1alpha1.ProjectConnectionMappingSpec, error) {
+	sources := projectDependencyProvidedInterfaces(sourceTemplate)
+	targets := projectDependencyConsumedInterfaces(targetTemplate)
+	sourceName := strings.TrimSpace(request.SourceInterface)
+	targetName := strings.TrimSpace(request.TargetInterface)
+
+	if sourceName != "" {
+		source, ok := projectDependencyTemplateInterface(sourceTemplate, sourceName, true)
+		if !ok {
+			return projectDependencyInterfaceView{}, projectDependencyInterfaceView{}, nil, fmt.Errorf("Template %q does not provide interface %q", sourceTemplate.GetName(), request.SourceInterface)
+		}
+		sources = []projectDependencyInterfaceView{source}
+	}
+	if targetName != "" {
+		target, ok := projectDependencyTemplateInterface(targetTemplate, targetName, false)
+		if !ok {
+			return projectDependencyInterfaceView{}, projectDependencyInterfaceView{}, nil, fmt.Errorf("target Template %q does not consume interface %q", targetTemplate.GetName(), request.TargetInterface)
+		}
+		targets = []projectDependencyInterfaceView{target}
+	}
+
+	var candidates []projectDependencyInterfaceCandidate
+	var mappingErr error
+	for _, source := range sources {
+		for _, target := range targets {
+			if source.Type != target.Type {
+				continue
+			}
+			mappings := append([]aiv1alpha1.ProjectConnectionMappingSpec(nil), request.Mappings...)
+			if len(mappings) == 0 {
+				mappings = append(mappings, target.Mappings...)
+			}
+			if err := projectDependencyValidateMappings(source, target, mappings); err != nil {
+				if mappingErr == nil {
+					mappingErr = err
+				}
+				continue
+			}
+			candidates = append(candidates, projectDependencyInterfaceCandidate{source: source, target: target, mappings: mappings})
+		}
+	}
+
+	switch len(candidates) {
+	case 0:
+		if len(sources) == 1 && len(targets) == 1 && sources[0].Type != targets[0].Type {
+			return projectDependencyInterfaceView{}, projectDependencyInterfaceView{}, nil, fmt.Errorf("source interface type %q is incompatible with target type %q", sources[0].Type, targets[0].Type)
+		}
+		if mappingErr != nil {
+			return projectDependencyInterfaceView{}, projectDependencyInterfaceView{}, nil, mappingErr
+		}
+		return projectDependencyInterfaceView{}, projectDependencyInterfaceView{}, nil, errors.New("no compatible dependency interface connects the selected Template to the target")
+	case 1:
+		candidate := candidates[0]
+		return candidate.source, candidate.target, candidate.mappings, nil
+	default:
+		return projectDependencyInterfaceView{}, projectDependencyInterfaceView{}, nil, errors.New("multiple compatible dependency interfaces are available; specify sourceInterface and targetInterface")
+	}
+}
+
 func projectDependencyValuesValid(schema map[string]any, values map[string]any) error {
 	if err := projectDependencyRejectCredentialValues(values, "dependency values"); err != nil {
 		return err
@@ -503,10 +642,6 @@ func (s *Server) normalizeProjectDependency(ctx context.Context, c *asclient.Cli
 	if err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, err
 	}
-	sourceInterface, ok := projectDependencyTemplateInterface(sourceTemplate, strings.TrimSpace(request.SourceInterface), true)
-	if !ok {
-		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, fmt.Errorf("Template %q does not provide interface %q", templateName, request.SourceInterface)
-	}
 	request.TargetRef.Name = strings.TrimSpace(request.TargetRef.Name)
 	if err := projectDependencyNameValid(request.TargetRef.Name); err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, fmt.Errorf("targetRef.name: %w", err)
@@ -530,7 +665,10 @@ func (s *Server) normalizeProjectDependency(ctx context.Context, c *asclient.Cli
 			return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, fmt.Errorf("DevelopmentService %q does not exist", request.TargetRef.Name)
 		}
 	}
-	targetTemplateName := projectDependencyTargetTemplateName(project, environment, request.TargetRef)
+	targetTemplateName, err := s.resolveProjectDependencyTargetTemplateName(ctx, c, project, environment, request.TargetRef)
+	if err != nil {
+		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, err
+	}
 	if targetTemplateName == "" {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, errors.New("target has no Infrastructure Template connection contract")
 	}
@@ -538,14 +676,8 @@ func (s *Server) normalizeProjectDependency(ctx context.Context, c *asclient.Cli
 	if err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, err
 	}
-	targetInterface, ok := projectDependencyTemplateInterface(targetTemplate, strings.TrimSpace(request.TargetInterface), false)
-	if !ok {
-		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, fmt.Errorf("target Template %q does not consume interface %q", targetTemplateName, request.TargetInterface)
-	}
-	if sourceInterface.Type != targetInterface.Type {
-		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, fmt.Errorf("source interface type %q is incompatible with target type %q", sourceInterface.Type, targetInterface.Type)
-	}
-	if err := projectDependencyValidateMappings(sourceInterface, targetInterface, request.Mappings); err != nil {
+	sourceInterface, targetInterface, mappings, err := projectDependencyResolveInterfaces(sourceTemplate, targetTemplate, request)
+	if err != nil {
 		return aiv1alpha1.ProjectProviderBindingSpec{}, aiv1alpha1.ProjectEnvironmentConnectionSpec{}, err
 	}
 	values := request.Values
@@ -576,7 +708,7 @@ func (s *Server) normalizeProjectDependency(ctx context.Context, c *asclient.Cli
 	}
 	connection := aiv1alpha1.ProjectEnvironmentConnectionSpec{
 		Name: name, SourceRef: aiv1alpha1.ProjectConnectionEndpointReference{Kind: aiv1alpha1.ProjectConnectionReferenceBinding, Name: bindingName}, TargetRef: request.TargetRef,
-		SourceInterface: sourceInterface.Name, TargetInterface: targetInterface.Name, Mappings: request.Mappings,
+		SourceInterface: sourceInterface.Name, TargetInterface: targetInterface.Name, Mappings: mappings,
 	}
 	return binding, connection, nil
 }
@@ -713,7 +845,7 @@ func (s *Server) assistantListProjectDependencyTemplates(ctx context.Context, re
 	if err != nil {
 		return "", err
 	}
-	targets, err := projectDependencyTargetInterfaces(ctx, c, req.Project, projectDependencyEnvironmentDefault)
+	targets, err := s.projectDependencyTargetInterfaces(ctx, c, req.Project, projectDependencyEnvironmentDefault)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return "", err
 	}
@@ -756,9 +888,59 @@ func (s *Server) assistantUpsertProjectDependency(ctx context.Context, req proje
 	if err != nil {
 		return "", err
 	}
+	updated, view, err := waitForProjectDependencyReady(ctx, c, updated, environment, name, projectDependencyReadyPollInterval, projectDependencyReadyTimeout)
 	refreshProjectToolSnapshot(req.Project, updated)
-	view, _ := projectDependencyViewByName(updated, environment, name)
+	if err != nil {
+		return "", err
+	}
 	return projectAssistantToolJSONResult(map[string]any{"dependency": view, "items": projectDependenciesView(updated).Items}, nil)
+}
+
+func waitForProjectDependencyReady(
+	ctx context.Context,
+	c *asclient.Client,
+	project *aiv1alpha1.Project,
+	environment, name string,
+	pollInterval, timeout time.Duration,
+) (*aiv1alpha1.Project, projectDependencyView, error) {
+	if c == nil || project == nil {
+		return project, projectDependencyView{}, errors.New("project dependency readiness requires a Project client and snapshot")
+	}
+	if pollInterval <= 0 || timeout <= 0 {
+		return project, projectDependencyView{}, errors.New("project dependency readiness timing must be positive")
+	}
+
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		view, found := projectDependencyViewByName(project, environment, name)
+		if !found {
+			return project, projectDependencyView{}, fmt.Errorf("dependency %q disappeared while waiting for readiness", name)
+		}
+		if view.Status != nil && strings.EqualFold(view.Status.Phase, "Ready") {
+			return project, view, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return project, view, ctx.Err()
+		case <-deadline.C:
+			phase, message := "Pending", "the controller has not reported status"
+			if view.Status != nil {
+				phase = strings.TrimSpace(view.Status.Phase)
+				message = strings.TrimSpace(view.Status.Message)
+			}
+			return project, view, fmt.Errorf("dependency %q did not become Ready within %s (phase=%s, message=%s)", name, timeout, phase, message)
+		case <-ticker.C:
+			refreshed, err := c.Projects().Get(ctx, project.Name, metav1.GetOptions{})
+			if err != nil {
+				return project, view, fmt.Errorf("refresh dependency %q readiness: %w", name, err)
+			}
+			project = refreshed
+		}
+	}
 }
 
 func (s *Server) assistantDeleteProjectDependency(ctx context.Context, req projectAssistantToolCallRequest) (string, error) {

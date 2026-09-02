@@ -223,8 +223,20 @@ set by the operator. Enabling it also requires
 `name@sha256:<64 lowercase hex digits>` reference, and
 `FAROS_DEV_AGENT_IMAGE` must pin the injected/bootstrap `faros-dev-agent` image
 to the same immutable form. The shipped image recipe is
-`dev-agent/Dockerfile.universal`; it combines Node with Go and Python plus the
-bounded `faros-dev-agent` workspace/exec data plane.
+`dev-agent/Dockerfile.universal`; it composes Python, Node, and Go from explicit
+official runtime-image inputs rather than distribution language packages. It
+generates `/opt/faros/image-manifest.json` from the installed binaries and
+ships `faros-env`, which checks `go.mod`, Node version declarations, and Python
+version declarations before a named application process starts. Unsupported
+requirements fail with the requested and available versions instead of
+starting against an accidental toolchain. `GOTOOLCHAIN=local` also prevents Go
+from downloading an undeclared compiler after the sandbox enters runtime.
+
+For production image builds, pin `UNIVERSAL_DEV_BASE_IMAGE`,
+`UNIVERSAL_DEV_NODE_IMAGE`, and `UNIVERSAL_DEV_GO_IMAGE` by digest. Local builds
+default to Python 3.12, Node 22, and the repository's Go 1.26.3 toolchain line;
+the completed universal image remains subject to the existing immutable
+`FAROS_DEV_IMAGE_UNIVERSAL` admission contract.
 
 The sandbox is private (no hostname or HTTPRoute), uses a persistent workspace,
 and enforces the 12-hour idle and hard lifetime bounds. Hosted installations

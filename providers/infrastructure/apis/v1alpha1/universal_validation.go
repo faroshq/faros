@@ -430,11 +430,11 @@ func validateUniversalResources(value any) error {
 		return fmt.Errorf("universal coding sandbox: %w", err)
 	}
 	requests, err := objectField(resources, "requests")
-	if err != nil || requests["cpu"] != "100m" || requests["memory"] != "128Mi" {
+	if err != nil || requests["cpu"] != "100m" || requests["memory"] != "256Mi" {
 		return fmt.Errorf("universal coding sandbox resource requests are unsafe")
 	}
 	limits, err := objectField(resources, "limits")
-	if err != nil || limits["cpu"] != "500m" || limits["memory"] != "512Mi" {
+	if err != nil || limits["cpu"] != "1" || limits["memory"] != "1Gi" {
 		return fmt.Errorf("universal coding sandbox resource limits are unsafe")
 	}
 	return nil

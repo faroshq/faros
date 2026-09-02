@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,7 @@ type serviceSpec struct {
 	Env                map[string]string `json:"env,omitempty"`
 	EnvFiles           map[string]string `json:"envFiles,omitempty"`
 	ConnectionRevision string            `json:"connectionRevision,omitempty"`
+	RestartToken       string            `json:"restartToken,omitempty"`
 	Enabled            bool              `json:"enabled"`
 	RestartPolicy      string            `json:"restartPolicy,omitempty"`
 }
@@ -75,25 +77,29 @@ type serviceStatus struct {
 }
 
 type managedService struct {
-	spec         serviceSpec
-	cmd          *exec.Cmd
-	done         chan struct{}
-	logs         *ringLog
-	phase        string
-	message      string
-	restartCount int64
-	lastExitCode *int32
-	started      bool
-	startFailed  bool
-	stopping     bool
-	generation   uint64
+	spec           serviceSpec
+	cmd            *exec.Cmd
+	done           chan struct{}
+	logs           *ringLog
+	phase          string
+	message        string
+	restartCount   int64
+	lastExitCode   *int32
+	started        bool
+	startFailed    bool
+	stopping       bool
+	generation     uint64
+	sourceRevision uint64
+	sourceDigest   string
 }
 
 type serviceManager struct {
-	ctx       context.Context
-	workspace string
-	mu        sync.Mutex
-	services  map[string]*managedService
+	ctx            context.Context
+	workspace      string
+	mu             sync.Mutex
+	services       map[string]*managedService
+	sourceRevision uint64
+	sourceDigest   string
 }
 
 // serviceRuntimeOperations is intentionally additive to runtimeOperations:
@@ -104,6 +110,14 @@ type serviceRuntimeOperations interface {
 	RemoveService(context.Context, string) error
 	ServiceStatus(context.Context, string) (serviceStatus, error)
 	ServiceLogs(context.Context, string) (string, error)
+}
+
+// serviceWorkspaceRevisionOperations keeps named processes on the same
+// authoritative workspace revision as stateless exec. It stays separate from
+// serviceRuntimeOperations so legacy runtime fakes do not accidentally gain a
+// mutating capability merely by implementing CRUD for named services.
+type serviceWorkspaceRevisionOperations interface {
+	ApplyServiceWorkspaceRevision(context.Context, uint64, string) (int, error)
 }
 
 func (r *localRuntime) ConfigureService(ctx context.Context, spec serviceSpec) (serviceStatus, error) {
@@ -132,6 +146,13 @@ func (r *localRuntime) ServiceLogs(ctx context.Context, name string) (string, er
 		return "", errors.New("service manager is unavailable")
 	}
 	return r.services.Logs(ctx, name)
+}
+
+func (r *localRuntime) ApplyServiceWorkspaceRevision(ctx context.Context, revision uint64, digest string) (int, error) {
+	if r == nil || r.services == nil {
+		return 0, errors.New("service manager is unavailable")
+	}
+	return r.services.ApplyWorkspaceRevision(ctx, revision, digest)
 }
 
 func (c *httpRuntimeClient) ConfigureService(ctx context.Context, spec serviceSpec) (serviceStatus, error) {
@@ -170,6 +191,17 @@ func (c *httpRuntimeClient) ServiceLogs(ctx context.Context, name string) (strin
 	return string(raw), nil
 }
 
+func (c *httpRuntimeClient) ApplyServiceWorkspaceRevision(ctx context.Context, revision uint64, digest string) (int, error) {
+	var response struct {
+		Restarted int `json:"restarted"`
+	}
+	err := c.call(ctx, http.MethodPost, "service/workspace-revision", struct {
+		SourceRevision uint64 `json:"sourceRevision"`
+		SourceDigest   string `json:"sourceDigest"`
+	}{SourceRevision: revision, SourceDigest: digest}, &response)
+	return response.Restarted, err
+}
+
 func newServiceManager(ctx context.Context, workspace string) *serviceManager {
 	if ctx == nil {
 		ctx = context.Background()
@@ -196,6 +228,12 @@ func (m *serviceManager) Configure(ctx context.Context, spec serviceSpec) (servi
 		m.services[normalized.Name] = current
 	}
 	if serviceSpecsEqual(current.spec, normalized) {
+		if normalized.Enabled && m.sourceRevision > 0 && !serviceWorkspaceRevisionEqual(current, m.sourceRevision, m.sourceDigest) {
+			if err := m.restartForWorkspaceRevisionLocked(current, m.sourceRevision, m.sourceDigest); err != nil {
+				return m.statusLocked(current), err
+			}
+			return m.statusLocked(current), nil
+		}
 		// A failed start is stateful even when the desired contract is not.
 		// Retry it on the next Configure: projected connection files can appear
 		// after the first reconcile without changing the service spec.
@@ -208,6 +246,7 @@ func (m *serviceManager) Configure(ctx context.Context, spec serviceSpec) (servi
 				current.message = err.Error()
 				return m.statusLocked(current), err
 			}
+			m.markServiceWorkspaceRevisionLocked(current)
 		}
 		return m.statusLocked(current), nil
 	}
@@ -223,6 +262,7 @@ func (m *serviceManager) Configure(ctx context.Context, spec serviceSpec) (servi
 	if !normalized.Enabled {
 		current.phase = "Stopped"
 		current.message = "service is disabled"
+		m.markServiceWorkspaceRevisionLocked(current)
 		return m.statusLocked(current), nil
 	}
 	if err := m.startLocked(current); err != nil {
@@ -231,8 +271,92 @@ func (m *serviceManager) Configure(ctx context.Context, spec serviceSpec) (servi
 		current.message = err.Error()
 		return m.statusLocked(current), err
 	}
+	m.markServiceWorkspaceRevisionLocked(current)
 	_ = ctx
 	return m.statusLocked(current), nil
+}
+
+// ApplyWorkspaceRevision restarts every enabled named process onto a newly
+// synchronized authoritative workspace. Replaying the same revision is
+// idempotent, while per-service revision tracking lets a later controller
+// Configure retry only a service whose restart previously failed.
+func (m *serviceManager) ApplyWorkspaceRevision(ctx context.Context, revision uint64, digest string) (int, error) {
+	if m == nil {
+		return 0, errors.New("service manager is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	digest = normalizeSourceDigest(digest)
+	if revision == 0 || digest == "" {
+		return 0, errors.New("service workspace sourceRevision and sourceDigest are required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if revision < m.sourceRevision {
+		return 0, errors.New("service workspace revision is older than the applied revision")
+	}
+	if revision == m.sourceRevision && m.sourceDigest != "" && digest != m.sourceDigest {
+		return 0, errors.New("service workspace revision was already applied with a different digest")
+	}
+	m.sourceRevision = revision
+	m.sourceDigest = digest
+
+	restarted := 0
+	names := make([]string, 0, len(m.services))
+	for name := range m.services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return restarted, err
+		}
+		current := m.services[name]
+		if serviceWorkspaceRevisionEqual(current, revision, digest) {
+			continue
+		}
+		if !current.spec.Enabled {
+			m.markServiceWorkspaceRevisionLocked(current)
+			continue
+		}
+		if err := m.restartForWorkspaceRevisionLocked(current, revision, digest); err != nil {
+			return restarted, fmt.Errorf("restart named service %q for workspace revision %d: %w", name, revision, err)
+		}
+		restarted++
+	}
+	return restarted, nil
+}
+
+func serviceWorkspaceRevisionEqual(current *managedService, revision uint64, digest string) bool {
+	return current != nil && current.sourceRevision == revision && current.sourceDigest == digest
+}
+
+func (m *serviceManager) markServiceWorkspaceRevisionLocked(current *managedService) {
+	if current == nil {
+		return
+	}
+	current.sourceRevision = m.sourceRevision
+	current.sourceDigest = m.sourceDigest
+}
+
+func (m *serviceManager) restartForWorkspaceRevisionLocked(current *managedService, revision uint64, digest string) error {
+	current.stopping = true
+	if err := m.stopLocked(current); err != nil {
+		current.stopping = false
+		return err
+	}
+	current.stopping = false
+	current.lastExitCode = nil
+	if err := m.startLocked(current); err != nil {
+		current.startFailed = true
+		current.phase = "Failed"
+		current.message = err.Error()
+		return err
+	}
+	current.sourceRevision = revision
+	current.sourceDigest = digest
+	return nil
 }
 
 func (m *serviceManager) Remove(ctx context.Context, name string) error {
@@ -374,6 +498,9 @@ func normalizeServiceSpec(spec serviceSpec) (serviceSpec, error) {
 	if len(spec.ConnectionRevision) > 128 || strings.IndexByte(spec.ConnectionRevision, 0) >= 0 {
 		return serviceSpec{}, errors.New("connection revision is invalid")
 	}
+	if len(spec.RestartToken) > 128 || strings.IndexByte(spec.RestartToken, 0) >= 0 {
+		return serviceSpec{}, errors.New("service restart token is invalid")
+	}
 	if spec.EnvFiles != nil {
 		spec.EnvFiles = mapsClone(spec.EnvFiles)
 	}
@@ -423,7 +550,7 @@ func mapsClone(source map[string]string) map[string]string {
 }
 
 func serviceSpecsEqual(left, right serviceSpec) bool {
-	if left.Name != right.Name || left.WorkDir != right.WorkDir || left.Port != right.Port || left.HealthPath != right.HealthPath || left.Enabled != right.Enabled || left.RestartPolicy != right.RestartPolicy || left.ConnectionRevision != right.ConnectionRevision || len(left.Argv) != len(right.Argv) || len(left.Env) != len(right.Env) || len(left.EnvFiles) != len(right.EnvFiles) {
+	if left.Name != right.Name || left.WorkDir != right.WorkDir || left.Port != right.Port || left.HealthPath != right.HealthPath || left.Enabled != right.Enabled || left.RestartPolicy != right.RestartPolicy || left.ConnectionRevision != right.ConnectionRevision || left.RestartToken != right.RestartToken || len(left.Argv) != len(right.Argv) || len(left.Env) != len(right.Env) || len(left.EnvFiles) != len(right.EnvFiles) {
 		return false
 	}
 	for i := range left.Argv {
@@ -460,7 +587,7 @@ func (m *serviceManager) startLocked(current *managedService) error {
 	for name, value := range connectionEnv {
 		childEnv[name] = value
 	}
-	cmd := exec.CommandContext(m.ctx, current.spec.Argv[0], current.spec.Argv[1:]...)
+	cmd := managedServiceCommand(m.ctx, current.spec.Argv)
 	cmd.Dir = workDir
 	cmd.Env = mergeChildEnv(os.Environ(), childEnv, strconv.Itoa(int(current.spec.Port)))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -492,6 +619,17 @@ func (m *serviceManager) startLocked(current *managedService) error {
 	go scanManagedServiceOutput(current.logs, attempt, stderr)
 	go m.wait(current.spec.Name, generation, cmd, done)
 	return nil
+}
+
+// managedServiceCommand lets the platform-owned universal image validate the
+// project's declared runtime requirements before starting application code.
+// Other development images retain the existing direct argv execution contract.
+func managedServiceCommand(ctx context.Context, argv []string) *exec.Cmd {
+	if resolver, err := exec.LookPath("faros-env"); err == nil {
+		wrapped := append([]string{"exec", "--"}, argv...)
+		return exec.CommandContext(ctx, resolver, wrapped...)
+	}
+	return exec.CommandContext(ctx, argv[0], argv[1:]...)
 }
 
 func readConnectionEnvironment(files map[string]string) (map[string]string, error) {
@@ -697,6 +835,30 @@ func registerServiceRuntimeEndpoints(mux *http.ServeMux, manager *serviceManager
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, logs)
 	})
+	mux.HandleFunc("/internal/service/workspace-revision", func(w http.ResponseWriter, r *http.Request) {
+		if manager == nil {
+			http.Error(w, "service manager is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var request struct {
+			SourceRevision uint64 `json:"sourceRevision"`
+			SourceDigest   string `json:"sourceDigest"`
+		}
+		if err := decodeBoundedJSON(w, r, 16<<10, &request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		restarted, err := manager.ApplyWorkspaceRevision(r.Context(), request.SourceRevision, request.SourceDigest)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int{"restarted": restarted})
+	})
 	mux.HandleFunc("/internal/service", func(w http.ResponseWriter, r *http.Request) {
 		if manager == nil {
 			http.Error(w, "service manager is unavailable", http.StatusServiceUnavailable)
@@ -732,6 +894,14 @@ func registerServiceRuntimeEndpoints(mux *http.ServeMux, manager *serviceManager
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+}
+
+func (s *agentServer) applyNamedServiceWorkspaceRevision(ctx context.Context, revision uint64, digest string) (int, error) {
+	runtime, ok := s.runtime.(serviceWorkspaceRevisionOperations)
+	if !ok {
+		return 0, nil
+	}
+	return runtime.ApplyServiceWorkspaceRevision(ctx, revision, digest)
 }
 
 func (s *agentServer) handleService(w http.ResponseWriter, r *http.Request) {

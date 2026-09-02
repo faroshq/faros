@@ -209,6 +209,7 @@ func TestProjectAssistantToolRegistryListsLocalToolsInOrder(t *testing.T) {
 		"edit_file",
 		"delete_file",
 		"move_file",
+		"resolve_project_dependencies",
 		"select_project_template",
 		"get_project_checkpoints",
 		"check_project_build",
@@ -248,9 +249,9 @@ func TestProjectAssistantToolRegistryListsLocalToolsInOrder(t *testing.T) {
 	}
 
 	all := projectChatToolNames(registry.ChatTools(true))
-	wantAll := append([]string(nil), want[:19]...)
+	wantAll := append([]string(nil), want[:20]...)
 	wantAll = append(wantAll, "commit_project_files")
-	wantAll = append(wantAll, want[19:]...)
+	wantAll = append(wantAll, want[20:]...)
 	if strings.Join(all, ",") != strings.Join(wantAll, ",") {
 		t.Fatalf("tool names with commit bridge = %v, want %v", all, wantAll)
 	}
@@ -505,7 +506,11 @@ func TestProjectAssistantWorkspaceInspectPromptUsesCanonicalReads(t *testing.T) 
 		"one bounded repair attempt using authorized version-checked mutations",
 		"rerun the original failed observation once",
 		"Never claim recovery without later success evidence from rerunning that same observation",
-		"The source-mutation tools are create_file, replace_file, edit_file, delete_file, and move_file",
+		"use upsert_project_dependency as the single atomic provisioning-and-connection mutation and wait for Ready",
+		"for the PostgreSQL catalog entry use database, not postgres or postgresql",
+		"omit values.name unless the user explicitly chose an infrastructure name",
+		"never translate the Project environment into values.farosMode",
+		"The source-mutation tools are create_file, replace_file, edit_file, delete_file, move_file, and resolve_project_dependencies",
 		"use verify_development_runtime only when that evidence is relevant",
 		"Never call commit_project_files unless the user explicitly requested repository persistence",
 	} {

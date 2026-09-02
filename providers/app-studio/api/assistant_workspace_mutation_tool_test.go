@@ -27,7 +27,7 @@ import (
 
 func TestAssistantRegistryExposesStrictOrdinaryWorkspaceMutationTools(t *testing.T) {
 	registry := projectAssistantLocalToolRegistry(nil)
-	for _, name := range []string{projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile} {
+	for _, name := range []string{projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile, projectToolResolveProjectDependencies} {
 		spec, ok := registry.Spec(name)
 		if !ok {
 			t.Fatalf("%s is not model-visible", name)
@@ -55,6 +55,12 @@ func TestAssistantRegistryExposesStrictOrdinaryWorkspaceMutationTools(t *testing
 	for _, want := range []string{"oldString", "newString", "replaceAll", "current file", "expectedVersion", "stale or ambiguous"} {
 		if !strings.Contains(string(edit.Parameters)+edit.Description, want) {
 			t.Fatalf("edit_file contract missing %q", want)
+		}
+	}
+	resolve, _ := registry.Spec(projectToolResolveProjectDependencies)
+	for _, want := range []string{"go mod tidy", "isolated", "go.mod", "go.sum", "leaves project source unchanged"} {
+		if !strings.Contains(resolve.Description, want) {
+			t.Fatalf("dependency resolver contract missing %q: %s", want, resolve.Description)
 		}
 	}
 }

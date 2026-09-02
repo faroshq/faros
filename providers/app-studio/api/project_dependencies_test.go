@@ -8,16 +8,19 @@ you may not use this file except in compliance with the License.
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 
 	aiv1alpha1 "github.com/faroshq/provider-app-studio/apis/ai/v1alpha1"
 	asclient "github.com/faroshq/provider-app-studio/client"
@@ -64,6 +67,33 @@ func projectDependencyTestProject() *aiv1alpha1.Project {
 	return p
 }
 
+func projectDependencyMetadataLightProject() *aiv1alpha1.Project {
+	p := developmentServicesTestProject("shop", "project-uid")
+	p.Spec.Template = nil
+	p.Spec.Environments[0].Bindings = nil
+	return p
+}
+
+func projectDependencySandboxInstance(project *aiv1alpha1.Project, name, uid, templateName string) *unstructured.Unstructured {
+	controller := true
+	instance := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "infrastructure.faros.sh/v1alpha1",
+		"kind":       "Instance",
+		"metadata": map[string]any{
+			"name": name,
+		},
+		"spec": map[string]any{
+			"template": templateName,
+		},
+	}}
+	instance.SetUID(types.UID(uid))
+	instance.SetAnnotations(map[string]string{projectAssistantRunSandboxLabel: "true"})
+	instance.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: aiv1alpha1.SchemeGroupVersion.String(), Kind: "Project", Name: project.Name, UID: project.UID, Controller: &controller,
+	}})
+	return instance
+}
+
 func projectDependencyTestServer(objects ...runtime.Object) (*Server, *asclient.Client) {
 	client := developmentServicesTestClient(objects...)
 	return &Server{projectClientFor: func(identity) (*asclient.Client, error) { return client, nil }}, client
@@ -104,13 +134,91 @@ func TestProjectDependencyCatalogIsTypedAndSecretValueFree(t *testing.T) {
 	}
 }
 
+func TestProjectDependencyResolvesMetadataLightDevelopmentServiceSandboxTemplate(t *testing.T) {
+	p := projectDependencyMetadataLightProject()
+	database := projectDependencyTemplate("database", "default", "postgresql", true)
+	consumer := projectDependencyTemplate("universal-coding-sandbox", "postgresql", "postgresql", false)
+	service := newDevelopmentServicesTestObject(t, p, "api", true, "https://api.example")
+	instance := projectDependencySandboxInstance(p, "sandbox", "sandbox-uid", "universal-coding-sandbox")
+	server, client := projectDependencyTestServer(p, database, consumer, service, instance)
+
+	interfaces, err := server.projectDependencyTargetInterfaces(t.Context(), client, p, projectDependencyEnvironmentDefault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interfaces) != 1 || interfaces[0].Name != "postgresql" || interfaces[0].Type != "postgresql" {
+		t.Fatalf("target interfaces=%+v, want postgresql", interfaces)
+	}
+
+	_, connection, err := server.normalizeProjectDependency(t.Context(), client, p, "database", projectDependencyMutationRequest{
+		Template: "database", Values: map[string]any{"version": "16"}, SourceInterface: "default",
+		TargetRef:       aiv1alpha1.ProjectConnectionEndpointReference{Kind: aiv1alpha1.ProjectConnectionReferenceDevelopmentService, Name: "api"},
+		TargetInterface: "postgresql", Mappings: []aiv1alpha1.ProjectConnectionMappingSpec{{SourceKey: "uri", TargetKey: "DATABASE_URL"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.TargetRef.Name != "api" || connection.TargetInterface != "postgresql" {
+		t.Fatalf("connection=%+v, want api postgresql target", connection)
+	}
+}
+
+func TestProjectDependencyRejectsUnsafeDevelopmentServiceSandboxTemplateFallback(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*aiv1alpha1.Project, *unstructured.Unstructured)
+		wantError string
+	}{
+		{
+			name: "UID mismatch",
+			mutate: func(_ *aiv1alpha1.Project, instance *unstructured.Unstructured) {
+				instance.SetUID(types.UID("replacement-uid"))
+			},
+			wantError: "UID does not match",
+		},
+		{
+			name: "foreign owner",
+			mutate: func(_ *aiv1alpha1.Project, instance *unstructured.Unstructured) {
+				owners := instance.GetOwnerReferences()
+				owners[0].UID = types.UID("other-project-uid")
+				instance.SetOwnerReferences(owners)
+			},
+			wantError: "is not owned by this Project",
+		},
+		{
+			name: "missing template",
+			mutate: func(_ *aiv1alpha1.Project, instance *unstructured.Unstructured) {
+				unstructured.RemoveNestedField(instance.Object, "spec", "template")
+			},
+			wantError: "has no Infrastructure Template",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := projectDependencyMetadataLightProject()
+			service := newDevelopmentServicesTestObject(t, p, "api", true, "")
+			instance := projectDependencySandboxInstance(p, "sandbox", "sandbox-uid", "universal-coding-sandbox")
+			tt.mutate(p, instance)
+			server, client := projectDependencyTestServer(p, service, instance)
+
+			_, err := server.resolveProjectDependencyTargetTemplateName(t.Context(), client, p, projectDependencyEnvironmentDefault, aiv1alpha1.ProjectConnectionEndpointReference{
+				Kind: aiv1alpha1.ProjectConnectionReferenceDevelopmentService, Name: "api",
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("error=%v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestProjectDependencyUpsertRoundTripAndDeleteRetainsSource(t *testing.T) {
 	p := projectDependencyTestProject()
 	database := projectDependencyTemplate("database", "default", "postgresql", true)
 	consumer := projectDependencyTemplate("universal-coding-sandbox", "postgresql", "postgresql", false)
 	service := newDevelopmentServicesTestObject(t, p, "web", true, "https://web.example")
 	server, client := projectDependencyTestServer(p, database, consumer, service)
-	body := `{"template":"database","values":{"version":"16"},"sourceInterface":"default","targetRef":{"kind":"developmentService","name":"web"},"targetInterface":"postgresql","mappings":[{"sourceKey":"uri","targetKey":"DATABASE_URL"}]}`
+	body := `{"template":"database","values":{"version":"16"},"targetRef":{"kind":"developmentService","name":"web"}}`
 	request := httptest.NewRequest(http.MethodPut, "/api/projects/shop/dependencies/database", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request = mux.SetURLVars(request, map[string]string{"project": "shop", "dependency": "database"})
@@ -139,6 +247,9 @@ func TestProjectDependencyUpsertRoundTripAndDeleteRetainsSource(t *testing.T) {
 		t.Fatalf("environment=%+v", env)
 	}
 	connection := env.Connections[0]
+	if connection.SourceInterface != "default" || connection.TargetInterface != "postgresql" || len(connection.Mappings) != 2 || connection.Mappings[0].TargetKey != "DATABASE_URL" {
+		t.Fatalf("inferred connection=%+v", connection)
+	}
 	binding := projectDependencyFindBinding(env, connection.SourceRef.Name)
 	if binding == nil || binding.TemplateRef == nil || binding.TemplateRef.Name != "database" || binding.Lifecycle == nil || binding.Lifecycle.DeletionPolicy != aiv1alpha1.ProjectBindingDeletionPolicyRetain {
 		t.Fatalf("source binding=%+v", binding)
@@ -171,6 +282,69 @@ func TestProjectDependencyUpsertRoundTripAndDeleteRetainsSource(t *testing.T) {
 	env = &updated.Spec.Environments[0]
 	if len(env.Connections) != 0 || len(env.Bindings) != 1 || env.Bindings[0].Name != projectDevelopmentBindingName {
 		t.Fatalf("delete left environment=%+v", env)
+	}
+}
+
+func TestWaitForProjectDependencyReadyIgnoresTransientFailure(t *testing.T) {
+	p := projectDependencyTestProject()
+	p.Spec.Environments[0].Connections = []aiv1alpha1.ProjectEnvironmentConnectionSpec{{
+		Name:      "database",
+		SourceRef: aiv1alpha1.ProjectConnectionEndpointReference{Kind: aiv1alpha1.ProjectConnectionReferenceBinding, Name: "database"},
+		TargetRef: aiv1alpha1.ProjectConnectionEndpointReference{Kind: aiv1alpha1.ProjectConnectionReferenceDevelopmentService, Name: "web"},
+	}}
+	p.Status.Environments = []aiv1alpha1.ProjectEnvironmentStatus{{
+		Name:        projectDependencyEnvironmentDefault,
+		Connections: []aiv1alpha1.ProjectEnvironmentConnectionStatus{{Name: "database", Phase: "Failed", Message: "source credentials are not available yet"}},
+	}}
+	_, client := projectDependencyTestServer(p)
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		current, err := client.Projects().Get(context.Background(), p.Name, metav1.GetOptions{})
+		if err != nil {
+			return
+		}
+		current.Status.Environments[0].Connections[0] = aiv1alpha1.ProjectEnvironmentConnectionStatus{Name: "database", Phase: "Ready", Reason: "Ready", Revision: "revision-1"}
+		_, _ = client.Projects().UpdateStatus(context.Background(), current, metav1.UpdateOptions{})
+	}()
+
+	updated, view, err := waitForProjectDependencyReady(t.Context(), client, p, projectDependencyEnvironmentDefault, "database", 5*time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == nil || view.Status == nil || view.Status.Phase != "Ready" || view.Status.Revision != "revision-1" {
+		t.Fatalf("dependency view=%+v project=%+v", view, updated)
+	}
+}
+
+func TestProjectDependencyInferenceRejectsAmbiguousCompatibleInterfaces(t *testing.T) {
+	p := projectDependencyTestProject()
+	database := projectDependencyTemplate("database", "default", "postgresql", true)
+	provides, _, _ := unstructured.NestedSlice(database.Object, "spec", "connections", "provides")
+	provides = append(provides, map[string]any{"name": "readonly", "type": "postgresql", "secretRefPath": "status.connectionSecretRef", "keys": []any{"host", "uri"}})
+	if err := unstructured.SetNestedSlice(database.Object, provides, "spec", "connections", "provides"); err != nil {
+		t.Fatal(err)
+	}
+	consumer := projectDependencyTemplate("universal-coding-sandbox", "postgresql", "postgresql", false)
+	service := newDevelopmentServicesTestObject(t, p, "web", true, "")
+	server, client := projectDependencyTestServer(p, database, consumer, service)
+
+	request := projectDependencyMutationRequest{
+		Template: "database", Values: map[string]any{"version": "16"},
+		TargetRef: aiv1alpha1.ProjectConnectionEndpointReference{Kind: aiv1alpha1.ProjectConnectionReferenceDevelopmentService, Name: "web"},
+	}
+	_, _, err := server.normalizeProjectDependency(t.Context(), client, p, "database", request)
+	if err == nil || !strings.Contains(err.Error(), "multiple compatible dependency interfaces") {
+		t.Fatalf("error=%v, want explicit ambiguity", err)
+	}
+
+	request.SourceInterface = "default"
+	_, connection, err := server.normalizeProjectDependency(t.Context(), client, p, "database", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.SourceInterface != "default" || connection.TargetInterface != "postgresql" || len(connection.Mappings) != 2 {
+		t.Fatalf("explicitly resolved connection=%+v", connection)
 	}
 }
 
@@ -211,6 +385,33 @@ func TestProjectDependencyAssistantToolMetadataRequiresRuntimeConfirmation(t *te
 		spec, ok := registry.Spec(name)
 		if !ok || spec.Risk != projectAssistantToolRiskRuntime || spec.ParallelSafe {
 			t.Fatalf("runtime tool %q spec=%+v ok=%v", name, spec, ok)
+		}
+	}
+	upsertSpec, ok := registry.Spec(projectToolUpsertProjectDependency)
+	if !ok {
+		t.Fatal("dependency upsert tool is missing")
+	}
+	var schema struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(upsertSpec.Parameters, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(schema.Required, ","), "dependency,template,targetRef"; got != want {
+		t.Fatalf("dependency upsert required fields=%q, want %q", got, want)
+	}
+	for _, guidance := range []string{
+		"return successfully only after the connection is Ready",
+		"complete project-dependency flow",
+		"do not call infrastructure__provision",
+		"Copy template exactly from list_dependency_templates.templates[].name",
+		"use template=database, not postgres or postgresql",
+		"Omit values.name unless the user explicitly chose an infrastructure name",
+		"never copy it to values.farosMode",
+		"App Studio infers them",
+	} {
+		if !strings.Contains(upsertSpec.Description, guidance) {
+			t.Errorf("dependency upsert description is missing %q: %q", guidance, upsertSpec.Description)
 		}
 	}
 	serviceSpec, ok := registry.Spec(projectToolUpsertDevelopmentService)

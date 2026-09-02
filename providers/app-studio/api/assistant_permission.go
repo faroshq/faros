@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -308,7 +309,7 @@ func projectAssistantApprovedPlanAllowsWrite(plan *projectAssistantApprovedPlan,
 	}
 	toolName = strings.TrimSpace(toolName)
 	switch toolName {
-	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile:
+	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile, projectToolResolveProjectDependencies:
 	default:
 		return false
 	}
@@ -360,6 +361,8 @@ func projectAssistantValidateWorkspaceMutationArguments(toolName string, args ma
 		allowed = map[string]struct{}{"path": {}, "expectedVersion": {}, "recoveryOf": {}}
 	case projectToolMoveFile:
 		allowed = map[string]struct{}{"sourcePath": {}, "destinationPath": {}, "expectedVersion": {}, "recoveryOf": {}}
+	case projectToolResolveProjectDependencies:
+		allowed = map[string]struct{}{"ecosystem": {}, "workdir": {}}
 	default:
 		return fmt.Errorf("tool %q cannot use workspace mutation arguments", toolName)
 	}
@@ -371,7 +374,7 @@ func projectAssistantValidateWorkspaceMutationArguments(toolName string, args ma
 	if _, err := projectAssistantWriteTargetPaths(toolName, args); err != nil {
 		return err
 	}
-	if toolName != projectToolCreateFile && toolName != projectToolEditFile {
+	if toolName != projectToolCreateFile && toolName != projectToolEditFile && toolName != projectToolResolveProjectDependencies {
 		expectedVersion, ok := projectToolRawString(args["expectedVersion"])
 		if !ok || strings.TrimSpace(expectedVersion) == "" {
 			return fmt.Errorf("%s requires expectedVersion", toolName)
@@ -429,7 +432,7 @@ func projectAssistantApprovedPlanHasCapability(plan *projectAssistantApprovedPla
 
 func projectAssistantWorkspaceMutationTool(name string) bool {
 	switch projectToolBaseName(name) {
-	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile:
+	case projectToolCreateFile, projectToolReplaceFile, projectToolEditFile, projectToolDeleteFile, projectToolMoveFile, projectToolResolveProjectDependencies:
 		return true
 	default:
 		return false
@@ -468,6 +471,20 @@ func projectAssistantWriteTargetPaths(toolName string, args map[string]any) ([]s
 			return nil, fmt.Errorf("move_file sourcePath and destinationPath must differ")
 		}
 		return paths, nil
+	case projectToolResolveProjectDependencies:
+		ecosystem := strings.ToLower(strings.TrimSpace(projectToolString(args["ecosystem"])))
+		if ecosystem != "go" {
+			return nil, errors.New("resolve_project_dependencies requires ecosystem go")
+		}
+		workDir := strings.TrimSpace(projectToolString(args["workdir"]))
+		if workDir == "" || workDir == "." {
+			return []string{"go.mod", "go.sum"}, nil
+		}
+		clean, err := workspace.CleanProjectPath(workDir)
+		if err != nil {
+			return nil, err
+		}
+		return []string{path.Join(clean, "go.mod"), path.Join(clean, "go.sum")}, nil
 	default:
 		return nil, fmt.Errorf("tool %q cannot use workspace mutation grants", toolName)
 	}

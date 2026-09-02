@@ -751,8 +751,8 @@ func devAppResources() map[string]any {
 
 func devExecutorResources() map[string]any {
 	return map[string]any{
-		"requests": map[string]any{"cpu": "25m", "memory": "32Mi"},
-		"limits":   map[string]any{"cpu": "500m", "memory": "512Mi"},
+		"requests": map[string]any{"cpu": "100m", "memory": "256Mi"},
+		"limits":   map[string]any{"cpu": "1", "memory": "1Gi"},
 	}
 }
 

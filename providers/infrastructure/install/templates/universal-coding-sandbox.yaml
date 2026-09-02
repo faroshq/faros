@@ -27,6 +27,12 @@ spec:
       digest with FAROS_DEV_IMAGE_UNIVERSAL and FAROS_DEV_AGENT_IMAGE. There is no public URL, no runtime
       kubeconfig, and no ServiceAccount token in the workload containers.
 
+      Before a named application process starts, the platform image's
+      faros-env resolver checks the workspace's Go, Node, and Python version
+      declarations against its generated toolchain manifest. Incompatible
+      projects fail before application code executes and report both the
+      requested and platform-provided versions.
+
       Use the component data plane at
       /instances/<name>/components/workspace/workspace for bounded list, read,
       mutate, diff, and checkpoint operations. POST /sync remains the
@@ -198,10 +204,10 @@ spec:
                     resources:
                       requests:
                         cpu: 100m
-                        memory: 128Mi
+                        memory: 256Mi
                       limits:
-                        cpu: 500m
-                        memory: 512Mi
+                        cpu: "1"
+                        memory: 1Gi
                     securityContext:
                       runAsNonRoot: true
                       runAsUser: 1000
