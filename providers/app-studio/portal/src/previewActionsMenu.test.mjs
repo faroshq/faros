@@ -62,6 +62,18 @@ test('leaves only primary preview actions visible in the toolbar', async () => {
   assert.doesNotMatch(toolbar, />Switch template</)
 })
 
+test('keeps preview tooltips above the iframe and annotation overlays', async () => {
+  const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const toolbar = await readFile(new URL('./DevelopmentPreviewToolbar.vue', import.meta.url), 'utf8')
+  const toolbarRoot = toolbar.slice(toolbar.indexOf('<header'), toolbar.indexOf('>', toolbar.indexOf('<header')))
+  const previewStart = app.indexOf('v-else-if="activeWorkbenchTab?.kind === \'preview\'"')
+  const preview = app.slice(previewStart, app.indexOf("v-else-if=\"activeWorkbenchTab?.kind === 'review'\"", previewStart))
+
+  assert.match(toolbarRoot, /class="[^"]*\brelative\b[^"]*\bz-40\b[^"]*"/)
+  assert.match(preview, /class="pointer-events-none absolute inset-0 z-30"/)
+  assert.match(preview, /<iframe/)
+})
+
 test('selects one mutually exclusive preview toolbar layout from its measured width', async () => {
   const { previewToolbarLayout } = await importTypeScriptModule('./previewToolbarLayout.ts')
   assert.equal(previewToolbarLayout(900), 'expanded')
