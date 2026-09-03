@@ -420,7 +420,7 @@ onUnmounted(() => {
           <RefreshCw class="button-icon" :class="{ spin: loading }" :stroke-width="1.75" />
           {{ loading ? 'Refreshing…' : 'Refresh' }}
         </button>
-        <SplitCreateButton v-if="!showFirstRun" kind="table" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
+        <SplitCreateButton v-if="loaded && !showFirstRun" kind="table" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
       </div>
     </header>
 
@@ -437,8 +437,8 @@ onUnmounted(() => {
       @action="handleFirstRunAction"
     />
 
-    <ResourceTable
-      v-else
+    <div v-else class="databricks-resource-table">
+      <ResourceTable
       :columns="[
         { key: 'name', label: 'TableRef', primary: true },
         { key: 'fullName', label: 'Databricks table' },
@@ -495,7 +495,8 @@ onUnmounted(() => {
           />
         </div>
       </template>
-    </ResourceTable>
+      </ResourceTable>
+    </div>
 
   </section>
 </template>

@@ -440,7 +440,7 @@ onUnmounted(() => {
         <h2 class="page-title">Warehouses</h2>
         <p class="page-meta">SQL warehouses available to imported Databricks tables. Click one to inspect status and defaults.</p>
       </div>
-      <SplitCreateButton v-if="!showFirstRun" kind="warehouse" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
+      <SplitCreateButton v-if="loaded && !showFirstRun" kind="warehouse" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
     </header>
 
     <div v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
@@ -455,8 +455,8 @@ onUnmounted(() => {
       @action="handleFirstRunAction"
     />
 
-    <ResourceTable
-      v-else
+    <div v-else class="databricks-resource-table">
+      <ResourceTable
       :columns="[
         { key: 'name', label: 'Name', primary: true },
         { key: 'connectionRef', label: 'Connection' },
@@ -511,7 +511,8 @@ onUnmounted(() => {
           />
         </div>
       </template>
-    </ResourceTable>
+      </ResourceTable>
+    </div>
 
   </section>
 </template>
