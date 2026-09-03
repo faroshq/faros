@@ -57,6 +57,46 @@ test('all three collections use one first-run journey without changing page widt
   assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.page-head \{ flex-wrap: wrap; \}/)
 })
 
+test('collection first-run surfaces stay latched during refresh', async () => {
+  const views = await Promise.all([
+    read('./views/ConnectionsView.vue'),
+    read('./views/WarehousesView.vue'),
+    read('./views/TablesView.vue'),
+  ])
+
+  for (const source of views) {
+    const firstRunStart = source.indexOf('const showFirstRun')
+    const firstRunEnd = source.indexOf('\n\nfunction handleFirstRunAction', firstRunStart)
+    const firstRun = source.slice(firstRunStart, firstRunEnd)
+    assert.match(firstRun, /firstPageSettled\.value/)
+    assert.match(firstRun, /rows\.value\.length === 0/)
+    assert.doesNotMatch(firstRun, /loading\.value|fullWalkPending|supportReadPending|serverPageReadPending/)
+  }
+
+  const [connections, warehouses, tables] = views
+  for (const source of [connections, warehouses]) {
+    const requestRefresh = source.match(/function requestRefresh[\s\S]*?\n\}/)?.[0] ?? ''
+    assert.match(requestRefresh, /if \(pendingDeletions\.size > 0\) firstPageSettled\.value = false/)
+    assert.doesNotMatch(requestRefresh, /if \(mode === 'foreground'\)[\s\S]*firstPageSettled\.value = false/)
+  }
+  const tableLoad = tables.slice(tables.indexOf('function load('), tables.indexOf('\n}\n', tables.indexOf('function load(')) + 3)
+  assert.match(tableLoad, /if \(pendingDeletions\.size > 0\) firstPageSettled\.value = false/)
+})
+
+test('collection deletion reconciliation is identity-aware', async () => {
+  const views = await Promise.all([
+    read('./views/ConnectionsView.vue'),
+    read('./views/WarehousesView.vue'),
+    read('./views/TablesView.vue'),
+  ])
+
+  for (const source of views) {
+    assert.match(source, /const pendingDeletions = new Map<string, string \| undefined>\(\)/)
+    assert.match(source, /pendingDeletions\.set\([^\n]+\.uid\)/)
+    assert.match(source, /const replacement = current\?\.uid !== undefined && \(pendingUID === undefined \|\| current\.uid !== pendingUID\)/)
+  }
+})
+
 test('registration results use compact product typography and wrap long identifiers', async () => {
   const styles = await read('./style.css')
   const resultIdentifier = styles.match(/faros-provider-databricks \.result-row > code\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''

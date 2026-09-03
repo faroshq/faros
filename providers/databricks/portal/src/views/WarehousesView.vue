@@ -88,13 +88,9 @@ const rows = computed<Array<Record<string, unknown>>>(() => warehouses.value
   .filter(wh => !operations.isTombstoned(operationKey('warehouse', wh.name), wh.uid))
   .map(wh => ({ ...wh })))
 const firstPageSettled = ref(false)
-const pendingDeletionNames = new Set<string>()
+const pendingDeletions = new Map<string, string | undefined>()
 const showFirstRun = computed(() => firstPageSettled.value
   && !error.value
-  && !loading.value
-  && !fullWalkPending
-  && !supportReadPending
-  && !serverPageReadPending
   && rows.value.length === 0
   && warehousePage.value === 1
   && !hasActiveFilters(warehouseQuery.value, warehouseFiltersValue.value))
@@ -122,10 +118,11 @@ const filterDefinitions = computed(() => warehouseFilters(connections.value))
 const refreshMode = ref<ResourceRefreshMode>('foreground')
 
 function requestRefresh(mode: ResourceRefreshMode): void {
-  // Preserve an already-authoritative empty surface through background
-  // polling. An acknowledged delete is different: keep first-run hidden
-  // until the next complete first page confirms the resource is gone.
-  if (mode === 'foreground' || pendingDeletionNames.size > 0) firstPageSettled.value = false
+  // Preserve an already-authoritative empty surface through foreground and
+  // background revalidation. An acknowledged delete is different: keep
+  // first-run hidden until the next complete first page confirms the resource
+  // is gone.
+  if (pendingDeletions.size > 0) firstPageSettled.value = false
   if (mode === 'foreground') {
     refreshMode.value = 'foreground'
     loading.value = true
@@ -271,7 +268,7 @@ async function remove(row: Record<string, unknown>) {
     await api.deleteWarehouse(wh.name)
     invalidateCompleteAuthority()
     firstPageSettled.value = false
-    pendingDeletionNames.add(wh.name)
+    pendingDeletions.set(wh.name, wh.uid)
     operations.tombstone(lock, wh.uid)
     warehouses.value = warehouses.value.filter(item => item.name !== wh.name)
     load()
@@ -378,10 +375,12 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
         })
         if (completeFirstPage) {
           operations.reconcile('warehouse', warehousePageResult.items.map(({ name, uid }) => ({ name, uid })))
-          for (const name of pendingDeletionNames) {
-            if (!warehousePageResult.items.some(warehouse => warehouse.name === name)) pendingDeletionNames.delete(name)
+          for (const [name, pendingUID] of pendingDeletions) {
+            const current = warehousePageResult.items.find(warehouse => warehouse.name === name)
+            const replacement = current?.uid !== undefined && (pendingUID === undefined || current.uid !== pendingUID)
+            if (!current || replacement) pendingDeletions.delete(name)
           }
-          firstPageSettled.value = pendingDeletionNames.size === 0
+          firstPageSettled.value = pendingDeletions.size === 0
         } else if (request.page === 1 && !request.cursor) {
           firstPageSettled.value = false
         }

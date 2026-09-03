@@ -71,7 +71,7 @@ const tableFiltersValue = ref<TableFilterValues>(cloneTableFilters(EMPTY_TABLE_F
 const tableCursor = ref<string | null>(null)
 const tablePageInfo = ref<ReturnType<typeof toPageInfo> | null>(null)
 const firstPageSettled = ref(false)
-const pendingDeletionNames = new Set<string>()
+const pendingDeletions = new Map<string, string | undefined>()
 let refresh!: LatestRefreshController
 let mounted = false
 let fullWalkPending = false
@@ -99,10 +99,6 @@ const rows = computed<Array<Record<string, unknown>>>(() =>
 )
 const showFirstRun = computed(() => firstPageSettled.value
   && !error.value
-  && !loading.value
-  && !fullWalkPending
-  && !supportReadPending
-  && !serverPageReadPending
   && rows.value.length === 0
   && tablePage.value === 1
   && !hasActiveFilters(tableQuery.value, tableFiltersValue.value))
@@ -125,7 +121,10 @@ function load(forceOrEvent: boolean | Event = false): void {
   if (!force && (fullWalkPending || supportReadPending || serverPageReadPending)) return
   refreshMode.value = 'foreground'
   loading.value = true
-  firstPageSettled.value = false
+  // Keep an authoritative first-run surface mounted while it revalidates.
+  // An acknowledged delete is different: hide first-run until the complete
+  // first page confirms that the deleted resource is gone.
+  if (pendingDeletions.size > 0) firstPageSettled.value = false
   refresh.request('foreground')
 }
 
@@ -249,7 +248,7 @@ async function remove(row: Record<string, unknown>) {
     await api.deleteTable(table.name)
     invalidateCompleteAuthority()
     firstPageSettled.value = false
-    pendingDeletionNames.add(table.name)
+    pendingDeletions.set(table.name, table.uid)
     operations.tombstone(lock, table.uid)
     tables.value = tables.value.filter(item => item.name !== table.name)
     load()
@@ -357,10 +356,12 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
         })
         if (completeFirstPage) {
           operations.reconcile('table', tablePageResult.items.map(({ name, uid }) => ({ name, uid })))
-          for (const name of pendingDeletionNames) {
-            if (!tablePageResult.items.some(table => table.name === name)) pendingDeletionNames.delete(name)
+          for (const [name, pendingUID] of pendingDeletions) {
+            const current = tablePageResult.items.find(table => table.name === name)
+            const replacement = current?.uid !== undefined && (pendingUID === undefined || current.uid !== pendingUID)
+            if (!current || replacement) pendingDeletions.delete(name)
           }
-          firstPageSettled.value = pendingDeletionNames.size === 0
+          firstPageSettled.value = pendingDeletions.size === 0
         } else if (request.page === 1 && !request.cursor) {
           firstPageSettled.value = false
         }

@@ -64,12 +64,9 @@ const rows = computed<Array<Record<string, unknown>>>(() => connections.value
   .filter(conn => !operations.isTombstoned(operationKey('connection', conn.name), conn.uid))
   .map(conn => ({ ...conn })))
 const firstPageSettled = ref(false)
-const pendingDeletionNames = new Set<string>()
+const pendingDeletions = new Map<string, string | undefined>()
 const showFirstRun = computed(() => firstPageSettled.value
   && !error.value
-  && !loading.value
-  && !fullWalkPending
-  && !serverPageReadPending
   && rows.value.length === 0
   && connectionPage.value === 1
   && !hasActiveFilters(connectionQuery.value, connectionFilters.value))
@@ -96,10 +93,11 @@ function invalidateCompleteAuthority(): void {
 const refreshMode = ref<ResourceRefreshMode>('foreground')
 
 function requestRefresh(mode: ResourceRefreshMode): void {
-  // Preserve an already-authoritative empty surface through background
-  // polling. An acknowledged delete is different: keep first-run hidden
-  // until the next complete first page confirms the resource is gone.
-  if (mode === 'foreground' || pendingDeletionNames.size > 0) firstPageSettled.value = false
+  // Preserve an already-authoritative empty surface through foreground and
+  // background revalidation. An acknowledged delete is different: keep
+  // first-run hidden until the next complete first page confirms the resource
+  // is gone.
+  if (pendingDeletions.size > 0) firstPageSettled.value = false
   if (mode === 'foreground') {
     refreshMode.value = 'foreground'
     loading.value = true
@@ -245,7 +243,7 @@ async function remove(row: Record<string, unknown>) {
     await api.deleteConnection(conn)
     invalidateCompleteAuthority()
     firstPageSettled.value = false
-    pendingDeletionNames.add(conn.name)
+    pendingDeletions.set(conn.name, conn.uid)
     operations.tombstone(lock, conn.uid)
     connections.value = connections.value.filter(item => item.name !== conn.name)
     load()
@@ -345,10 +343,12 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
         })
         if (completeFirstPage) {
           operations.reconcile('connection', next.items.map(({ name, uid }) => ({ name, uid })))
-          for (const name of pendingDeletionNames) {
-            if (!next.items.some(connection => connection.name === name)) pendingDeletionNames.delete(name)
+          for (const [name, pendingUID] of pendingDeletions) {
+            const current = next.items.find(connection => connection.name === name)
+            const replacement = current?.uid !== undefined && (pendingUID === undefined || current.uid !== pendingUID)
+            if (!current || replacement) pendingDeletions.delete(name)
           }
-          firstPageSettled.value = pendingDeletionNames.size === 0
+          firstPageSettled.value = pendingDeletions.size === 0
         } else if (request.page === 1 && !request.cursor) {
           firstPageSettled.value = false
         }

@@ -1939,6 +1939,138 @@ test('Databricks resource lists opt into shared search and pagination', async ()
   }
 })
 
+function resourceListStubComponents() {
+  const EmptyStateStub = {
+    props: { kind: String },
+    setup(props) {
+      return () => h('div', { class: 'databricks-first-run', 'data-kind': props.kind }, `Empty ${props.kind}`)
+    },
+  }
+  const ResourceTableStub = {
+    props: { rows: Array, loading: Boolean },
+    setup(props) {
+      return () => h('div', {
+        class: 'k-table',
+        'data-loading': String(props.loading),
+        'data-row-count': String(props.rows?.length ?? 0),
+      }, props.rows?.length ? 'Rows' : 'Table')
+    },
+  }
+  const StatusBadgeStub = { setup: () => () => h('span') }
+  return { DatabricksEmptyState: EmptyStateStub, ResourceTable: ResourceTableStub, StatusBadge: StatusBadgeStub }
+}
+
+function resourceListPendingRead(pendingReads, kind) {
+  const index = pendingReads.findIndex(read => read.kind === kind)
+  assert.ok(index >= 0, `the view started a ${kind} read`)
+  return pendingReads.splice(index, 1)[0].resolve
+}
+
+async function settleResourceListSupport(pendingReads, supportKinds) {
+  for (const kind of supportKinds) resourceListPendingRead(pendingReads, kind)([])
+  await flushVue()
+}
+
+async function settleResourceListPage(pendingReads, pageKind, result) {
+  resourceListPendingRead(pendingReads, pageKind)(result)
+  await flushVue()
+}
+
+test('known-empty collection surfaces stay mounted while foreground refreshes settle', async () => {
+  const ConnectionsView = await loadMountedSFC('/src/views/ConnectionsView.vue')
+  const WarehousesView = await loadMountedSFC('/src/views/WarehousesView.vue')
+  const TablesView = await loadMountedSFC('/src/views/TablesView.vue')
+  const apiModule = await vite.ssrLoadModule('/src/api.ts')
+  const confirmModule = await vite.ssrLoadModule('/src/portalkit/confirm.ts')
+  const original = {
+    listConnections: apiModule.api.listConnections,
+    listWarehouses: apiModule.api.listWarehouses,
+    listConnectionsPage: apiModule.api.listConnectionsPage,
+    listWarehousesPage: apiModule.api.listWarehousesPage,
+    listTablesPage: apiModule.api.listTablesPage,
+    deleteConnection: apiModule.api.deleteConnection,
+  }
+  const cases = [
+    {
+      kind: 'connections', Component: ConnectionsView, pageKind: 'connections-page', supportKinds: [],
+      rows: [{ name: 'orders', uid: 'orders-uid', host: 'https://dbc.example.com', authType: 'pat', status: 'Ready' }],
+    },
+    {
+      kind: 'warehouses', Component: WarehousesView, pageKind: 'warehouses-page', supportKinds: ['connections'],
+      rows: [{ name: 'orders-sql', uid: 'orders-sql-uid', connectionRef: 'orders', warehouseID: 'warehouse-123', status: 'Ready' }],
+    },
+    {
+      kind: 'tables', Component: TablesView, pageKind: 'tables-page', supportKinds: ['connections', 'warehouses'],
+      rows: [{ name: 'orders', uid: 'orders-table-uid', connectionRef: 'orders', warehouseRef: 'orders-sql', catalog: 'main', schema: 'sales', table: 'orders', fullName: 'main.sales.orders', columns: [], status: 'Ready' }],
+    },
+  ]
+
+  try {
+    for (const testCase of cases) {
+      const pendingReads = []
+      const queue = kind => new Promise(resolve => pendingReads.push({ kind, resolve }))
+      apiModule.api.listConnections = () => queue('connections')
+      apiModule.api.listWarehouses = () => queue('warehouses')
+      apiModule.api.listConnectionsPage = () => queue('connections-page')
+      apiModule.api.listWarehousesPage = () => queue('warehouses-page')
+      apiModule.api.listTablesPage = () => queue('tables-page')
+      const mounted = mountDetailView(testCase.Component, {}, resourceListStubComponents())
+      try {
+        await nextTick()
+        assert.equal(pendingReads.filter(read => testCase.supportKinds.includes(read.kind)).length, testCase.supportKinds.length, `${testCase.kind} support reads are pending`)
+        assert.equal(pendingReads.filter(read => read.kind === testCase.pageKind).length, testCase.supportKinds.length ? 0 : 1, `${testCase.kind} initial page read follows support initialization`)
+        assert.equal(mounted.find(node => className(node).includes('k-table'))?.props?.['data-loading'], 'true', `${testCase.kind} initial read shows the table loading state`)
+
+        await settleResourceListSupport(pendingReads, testCase.supportKinds)
+        assert.equal(pendingReads.filter(read => read.kind === testCase.pageKind).length, 1, `${testCase.kind} initial page read is pending`)
+        await settleResourceListPage(pendingReads, testCase.pageKind, { items: [], continue: null })
+        assert.ok(mounted.find(node => className(node).includes('databricks-first-run')), `${testCase.kind} shows onboarding after an authoritative empty result`)
+
+        mounted.instance.setupState.load()
+        await nextTick()
+        assert.ok(mounted.find(node => className(node).includes('databricks-first-run')), `${testCase.kind} keeps onboarding mounted while refresh is pending`)
+        assert.equal(mounted.find(node => className(node).includes('k-table')), null, `${testCase.kind} does not mount a table skeleton during refresh`)
+        await settleResourceListSupport(pendingReads, testCase.supportKinds)
+        assert.ok(mounted.find(node => className(node).includes('databricks-first-run')), `${testCase.kind} keeps onboarding mounted while page refresh is pending`)
+        await settleResourceListPage(pendingReads, testCase.pageKind, { items: [], continue: null })
+        assert.ok(mounted.find(node => className(node).includes('databricks-first-run')), `${testCase.kind} keeps onboarding after an empty refresh`)
+
+        mounted.instance.setupState.load()
+        await nextTick()
+        await settleResourceListSupport(pendingReads, testCase.supportKinds)
+        await settleResourceListPage(pendingReads, testCase.pageKind, { items: testCase.rows, continue: null })
+        const table = mounted.find(node => className(node).includes('k-table'))
+        assert.equal(table?.props?.['data-row-count'], '1', `${testCase.kind} rows replace onboarding directly after refresh`)
+        assert.equal(mounted.find(node => className(node).includes('databricks-first-run')), null, `${testCase.kind} removes onboarding once rows are authoritative`)
+
+        if (testCase.kind === 'connections') {
+          apiModule.api.deleteConnection = async () => {}
+          const removePromise = mounted.instance.setupState.remove(testCase.rows[0])
+          confirmModule.resolveConfirm(true)
+          await removePromise
+          await settleResourceListPage(pendingReads, testCase.pageKind, {
+            items: [{ ...testCase.rows[0], uid: 'replacement-uid' }], continue: null,
+          })
+          mounted.instance.setupState.load()
+          await nextTick()
+          await settleResourceListPage(pendingReads, testCase.pageKind, { items: [], continue: null })
+          assert.ok(mounted.find(node => className(node).includes('databricks-first-run')), 'a same-name replacement clears the old pending deletion identity')
+        }
+      } finally {
+        mounted.unmount()
+        confirmModule.resolveConfirm(false)
+      }
+    }
+  } finally {
+    apiModule.api.listConnections = original.listConnections
+    apiModule.api.listWarehouses = original.listWarehouses
+    apiModule.api.listConnectionsPage = original.listConnectionsPage
+    apiModule.api.listWarehousesPage = original.listWarehousesPage
+    apiModule.api.listTablesPage = original.listTablesPage
+    apiModule.api.deleteConnection = original.deleteConnection
+  }
+})
+
 function inactiveChangeBranch(source, functionMarker, condition) {
   const functionOffset = source.indexOf(functionMarker)
   assert.ok(functionOffset >= 0, `missing ${functionMarker}`)
