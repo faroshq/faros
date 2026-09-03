@@ -319,7 +319,7 @@ faros-provider-databricks .field-disclosure summary {
 
 faros-provider-databricks .field-disclosure summary:focus-visible {
   border-radius: 3px;
-  box-shadow: 0 0 0 2px var(--color-accent-glow, rgba(139, 107, 255, .28));
+  box-shadow: 0 0 0 2px var(--color-accent-glow, rgba(139, 107, 255, 0.3));
 }
 
 faros-provider-databricks .field-disclosure p {
@@ -446,10 +446,6 @@ faros-provider-databricks .databricks-first-run__actions {
   flex-wrap: wrap;
   gap: 8px;
   grid-column: 2;
-}
-
-faros-provider-databricks .databricks-first-run__actions .k-btn {
-  gap: 7px;
 }
 
 faros-provider-databricks .databricks-first-run__actions svg {
