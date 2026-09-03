@@ -1,16 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
+import DatabricksEmptyState from '../components/DatabricksEmptyState.vue'
 import SplitCreateButton from '../components/SplitCreateButton.vue'
+import type { DatabricksJourneyAction, DatabricksPrerequisiteKind } from '../journey'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import ResourceTableEditButton from '../portalkit/ResourceTableEditButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
+import { formatDatabricksError, isTenantMissingError } from '../errors'
 import { confirmDialog } from '../portalkit/confirm'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import { importPrerequisiteMessage, nextValidWarehouseRef, warehousesForConnection } from '../tableRefs'
-import type { Connection, ErrorResponse, Table, Warehouse } from '../types'
+import type { Connection, Table, Warehouse } from '../types'
 import {
   createCoalescedRead,
   createLatestRefreshController,
@@ -34,7 +37,11 @@ import {
   type TableFilterValues,
 } from '../databricksPagination'
 
-const emit = defineEmits<{ (e: 'open', name: string): void; (e: 'create', mode: 'manual' | 'browse'): void }>()
+const emit = defineEmits<{
+  (e: 'open', name: string): void
+  (e: 'create', mode: 'manual' | 'browse'): void
+  (e: 'prerequisite', kind: DatabricksPrerequisiteKind): void
+}>()
 
 const connections = ref<Connection[]>([])
 const warehouses = ref<Warehouse[]>([])
@@ -70,6 +77,8 @@ const submitting = ref(false)
 const formError = ref<string | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
 const formErrorRef = ref<HTMLElement | null>(null)
+const firstPageSettled = ref(false)
+const pendingDeletionNames = new Set<string>()
 let refresh!: LatestRefreshController
 let mounted = false
 let fullWalkPending = false
@@ -81,6 +90,7 @@ let authorityGeneration = 0
 
 function invalidateCompleteAuthority(): void {
   authorityGeneration += 1
+  firstPageSettled.value = false
   completeRead.invalidate()
   supportRead.invalidate()
   serverPageRead.invalidate()
@@ -103,21 +113,34 @@ const rows = computed<Array<Record<string, unknown>>>(() =>
     columnCount: t.columns.length ? String(t.columns.length) : '-',
   })),
 )
+const showFirstRun = computed(() => firstPageSettled.value
+  && !error.value
+  && !loading.value
+  && !fullWalkPending
+  && !supportReadPending
+  && !serverPageReadPending
+  && rows.value.length === 0
+  && tablePage.value === 1
+  && !hasActiveFilters(tableQuery.value, tableFiltersValue.value))
 
-const tableImportBlocker = computed(() => !loaded.value ? '' : importPrerequisiteMessage(connections.value, warehouses.value))
+function handleFirstRunAction(action: DatabricksJourneyAction): void {
+  if (action === 'create-connection') emit('prerequisite', 'connection')
+  else if (action === 'browse-warehouses' || action === 'manual-warehouse') emit('prerequisite', 'warehouse')
+  else if (action === 'browse-tables') emit('create', 'browse')
+  else if (action === 'manual-table') emit('create', 'manual')
+}
+
+const tableImportBlocker = computed(() => !loaded.value
+  ? ''
+  : importPrerequisiteMessage(connections.value, warehouses.value, form.connectionRef))
 const formWarehouses = computed(() => warehousesForConnection(warehouses.value, form.connectionRef))
 const filterDefinitions = computed(() => tableFilters(warehouses.value))
-
-function errMessage(e: unknown): string {
-  const err = e as ErrorResponse
-  return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
-}
 
 function resetForm() {
   editing.value = null
   form.name = ''
   form.connectionRef = connections.value[0]?.name ?? ''
-  form.warehouseRef = warehouses.value[0]?.name ?? ''
+  form.warehouseRef = nextValidWarehouseRef(warehouses.value, form.connectionRef, '')
   form.catalog = ''
   form.schema = ''
   form.table = ''
@@ -152,6 +175,7 @@ function load(forceOrEvent: boolean | Event = false): void {
   if (!force && (fullWalkPending || supportReadPending || serverPageReadPending)) return
   refreshMode.value = 'foreground'
   loading.value = true
+  firstPageSettled.value = false
   refresh.request('foreground')
 }
 
@@ -240,7 +264,7 @@ async function submit() {
     showForm.value = false
     load()
   } catch (e) {
-    await focusFormError(errMessage(e))
+    await focusFormError(formatDatabricksError(e))
   } finally {
     submitting.value = false
     operations.release(lock)
@@ -283,6 +307,7 @@ function tableRequestIsCurrent(requestID: number, request: TableRequest): boolea
 }
 
 function handleTableChange(change: ResourceTableChange): void {
+  firstPageSettled.value = false
   const canReuseCurrentServerPage = tableMode.value === 'server' && isCompleteFirstCursorPage({
     page: tablePage.value,
     cursor: tableCursor.value,
@@ -353,11 +378,13 @@ async function remove(row: Record<string, unknown>) {
   try {
     await api.deleteTable(table.name)
     invalidateCompleteAuthority()
+    firstPageSettled.value = false
+    pendingDeletionNames.add(table.name)
     operations.tombstone(lock, table.uid)
     tables.value = tables.value.filter(item => item.name !== table.name)
     load()
   } catch (e) {
-    mutationError.value = errMessage(e)
+    mutationError.value = formatDatabricksError(e)
   } finally {
     operations.release(lock)
   }
@@ -453,12 +480,19 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
         tables.value = tablePageResult.items
         tableCursor.value = request.cursor
         tablePageInfo.value = nextPageInfo
-        if (isCompleteFirstCursorPage({
+        const completeFirstPage = isCompleteFirstCursorPage({
           page: request.page,
           cursor: request.cursor,
           pageInfo: tablePageInfo.value,
-        })) {
+        })
+        if (completeFirstPage) {
           operations.reconcile('table', tablePageResult.items.map(({ name, uid }) => ({ name, uid })))
+          for (const name of pendingDeletionNames) {
+            if (!tablePageResult.items.some(table => table.name === name)) pendingDeletionNames.delete(name)
+          }
+          firstPageSettled.value = pendingDeletionNames.size === 0
+        } else if (request.page === 1 && !request.cursor) {
+          firstPageSettled.value = false
         }
       }
     }
@@ -477,8 +511,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
     const staleServerPage = serverPageGeneration !== undefined && serverPageGeneration !== authorityGeneration
     const staleServerRequest = !(current.active || current.mode === 'client') && !tableRequestIsCurrent(requestID, request)
     if (!mounted || staleWalk || staleSupport || staleServerPage || staleServerRequest) return
-    const err = e as ErrorResponse
-    error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
+    error.value = isTenantMissingError(e) ? null : formatDatabricksError(e)
   } finally {
     fullWalkPending = false
     supportReadPending = false
@@ -512,7 +545,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page">
+  <section :class="['page', { 'page--first-run': showFirstRun }]">
     <header class="page-head">
       <div>
         <h2 class="page-title">Tables</h2>
@@ -523,11 +556,9 @@ onUnmounted(() => {
           <RefreshCw class="button-icon" :class="{ spin: loading }" :stroke-width="1.75" />
           {{ loading ? 'Refreshing…' : 'Refresh' }}
         </button>
-        <SplitCreateButton kind="table" :disabled="submitting" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
+        <SplitCreateButton v-if="!showFirstRun" kind="table" :disabled="submitting" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
       </div>
     </header>
-
-    <p v-if="tableImportBlocker" class="empty">{{ tableImportBlocker }}</p>
 
     <div v-if="showForm" class="databricks-resource-panel k-card">
       <div class="databricks-resource-panel-head">
@@ -586,7 +617,16 @@ onUnmounted(() => {
       <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
     </div>
 
+    <DatabricksEmptyState
+      v-if="showFirstRun"
+      kind="table"
+      :has-connections="connections.length > 0"
+      :has-warehouses="warehouses.length > 0"
+      @action="handleFirstRunAction"
+    />
+
     <ResourceTable
+      v-else
       :columns="[
         { key: 'name', label: 'TableRef', primary: true },
         { key: 'fullName', label: 'Databricks table' },

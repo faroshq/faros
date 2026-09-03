@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { ExternalLink } from 'lucide-vue-next'
 import { computed, onActivated, onMounted, onUnmounted, ref } from 'vue'
+import DatabricksEmptyState from '../components/DatabricksEmptyState.vue'
+import type { DatabricksJourneyAction } from '../journey'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
 import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
+import { formatDatabricksError, isTenantMissingError } from '../errors'
 import { confirmDialog } from '../portalkit/confirm'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
-import type { Connection, ErrorResponse } from '../types'
+import type { Connection } from '../types'
 import {
   createAdaptiveRefreshTimer,
   createCoalescedRead,
@@ -60,6 +63,20 @@ const connectionPageInfo = ref<ReturnType<typeof toPageInfo> | null>(null)
 const rows = computed<Array<Record<string, unknown>>>(() => connections.value
   .filter(conn => !operations.isTombstoned(operationKey('connection', conn.name), conn.uid))
   .map(conn => ({ ...conn })))
+const firstPageSettled = ref(false)
+const pendingDeletionNames = new Set<string>()
+const showFirstRun = computed(() => firstPageSettled.value
+  && !error.value
+  && !loading.value
+  && !fullWalkPending
+  && !serverPageReadPending
+  && rows.value.length === 0
+  && connectionPage.value === 1
+  && !hasActiveFilters(connectionQuery.value, connectionFilters.value))
+
+function handleFirstRunAction(action: DatabricksJourneyAction): void {
+  if (action === 'create-connection') emit('create')
+}
 
 let poll!: AdaptiveRefreshTimer
 let refresh!: LatestRefreshController
@@ -71,18 +88,18 @@ let authorityGeneration = 0
 
 function invalidateCompleteAuthority(): void {
   authorityGeneration += 1
+  firstPageSettled.value = false
   completeRead.invalidate()
   serverPageRead.invalidate()
-}
-
-function errMessage(e: unknown): string {
-  const err = e as ErrorResponse
-  return err.reason ? `${err.reason}: ${err.message}` : err.message || String(e)
 }
 
 const refreshMode = ref<ResourceRefreshMode>('foreground')
 
 function requestRefresh(mode: ResourceRefreshMode): void {
+  // Preserve an already-authoritative empty surface through background
+  // polling. An acknowledged delete is different: keep first-run hidden
+  // until the next complete first page confirms the resource is gone.
+  if (mode === 'foreground' || pendingDeletionNames.size > 0) firstPageSettled.value = false
   if (mode === 'foreground') {
     refreshMode.value = 'foreground'
     loading.value = true
@@ -154,6 +171,7 @@ function connectionRequestIsCurrent(requestID: number, request: ConnectionReques
 }
 
 function handleConnectionChange(change: ResourceTableChange): void {
+  firstPageSettled.value = false
   const canReuseCurrentServerPage = connectionMode.value === 'server' && isCompleteFirstCursorPage({
     page: connectionPage.value,
     cursor: connectionCursor.value,
@@ -226,11 +244,13 @@ async function remove(row: Record<string, unknown>) {
   try {
     await api.deleteConnection(conn)
     invalidateCompleteAuthority()
+    firstPageSettled.value = false
+    pendingDeletionNames.add(conn.name)
     operations.tombstone(lock, conn.uid)
     connections.value = connections.value.filter(item => item.name !== conn.name)
     load()
   } catch (e) {
-    mutationError.value = errMessage(e)
+    mutationError.value = formatDatabricksError(e)
   } finally {
     operations.release(lock)
   }
@@ -318,12 +338,19 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
         connections.value = next.items
         connectionCursor.value = request.cursor
         connectionPageInfo.value = nextPageInfo
-        if (isCompleteFirstCursorPage({
+        const completeFirstPage = isCompleteFirstCursorPage({
           page: request.page,
           cursor: request.cursor,
           pageInfo: connectionPageInfo.value,
-        })) {
+        })
+        if (completeFirstPage) {
           operations.reconcile('connection', next.items.map(({ name, uid }) => ({ name, uid })))
+          for (const name of pendingDeletionNames) {
+            if (!next.items.some(connection => connection.name === name)) pendingDeletionNames.delete(name)
+          }
+          firstPageSettled.value = pendingDeletionNames.size === 0
+        } else if (request.page === 1 && !request.cursor) {
+          firstPageSettled.value = false
         }
       }
     }
@@ -337,8 +364,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
     const staleServerPage = serverPageGeneration !== undefined && serverPageGeneration !== authorityGeneration
     const staleServerRequest = !(current.active || current.mode === 'client') && !connectionRequestIsCurrent(requestID, request)
     if (!mounted || staleWalk || staleServerPage || staleServerRequest) return
-    const err = e as ErrorResponse
-    error.value = err.reason === 'TenantMissing' ? null : errMessage(e)
+    error.value = isTenantMissingError(e) ? null : formatDatabricksError(e)
   } finally {
     fullWalkPending = false
     serverPageReadPending = false
@@ -371,13 +397,13 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="page">
+  <section :class="['page', { 'page--first-run': showFirstRun }]">
     <header class="page-head">
       <div>
         <h2 class="page-title">Connections</h2>
         <p class="page-meta">Databricks workspaces available to tables in this faros workspace.</p>
       </div>
-      <div class="actions">
+      <div v-if="!showFirstRun" class="actions">
         <button class="k-btn k-btn--primary" type="button" @click="emit('create')">Add connection</button>
       </div>
     </header>
@@ -387,7 +413,14 @@ onUnmounted(() => {
       <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
     </div>
 
+    <DatabricksEmptyState
+      v-if="showFirstRun"
+      kind="connection"
+      @action="handleFirstRunAction"
+    />
+
     <ResourceTable
+      v-else
       :columns="[
         { key: 'name', label: 'Name', primary: true },
         { key: 'host', label: 'Workspace host' },

@@ -2059,7 +2059,8 @@ test('wizard and split-create sources preserve focus across deferred initializat
   const style = await readFile(new URL('./style.css', import.meta.url), 'utf8')
   assert.match(wizard, /focusDialog\(\)/)
   assert.match(wizard, /void initialize\(\)\.then\(token => \{[\s\S]*isCurrentInitializationRun\(token\)[\s\S]*focusStep\(\)/)
-  assert.match(wizard, /function navigateTo/)
+  assert.match(wizard, /function resolvePrerequisite/)
+  assert.match(wizard, /emit\('prerequisite', kind\)/)
   assert.match(app, /navigationDetail/)
   assert.match(app, /function navigate\(path: string, replace = false\)/)
   assert.match(app, /detail: navigationDetail\(path, replace\)/)
@@ -2072,7 +2073,7 @@ test('wizard and split-create sources preserve focus across deferred initializat
   assert.match(split, /function closeMenuAfterTab/)
   assert.match(split, /deferredCloseTimer = window\.setTimeout/)
   assert.match(split, /closeMenuAfterTab\(\)/)
-  assert.match(tables, /tableImportBlocker = computed\(\(\) => !loaded\.value \? '' : importPrerequisiteMessage/)
+  assert.match(tables, /tableImportBlocker = computed\(\(\) => !loaded\.value[\s\S]*importPrerequisiteMessage/)
   assert.match(tables, /class="k-btn k-btn--ghost icon-text"[\s\S]{0,200}@click="load"/)
   assert.match(tables, /@row-click="\(row\) => openResource\(String\(row\.name\)\)"/)
   assert.doesNotMatch(tables, /selectedTable|schemaRows|schemaLoaded|schemaPending|schemaError|schemaCache|schemaCached/)
@@ -2255,6 +2256,56 @@ test('manual creation pages ignore rejected unrelated collection reads', async (
   } finally {
     tableMounted?.unmount()
     warehouseMounted?.unmount()
+    apiModule.api.listConnections = original.listConnections
+    apiModule.api.listWarehouses = original.listWarehouses
+    apiModule.api.listTables = original.listTables
+  }
+})
+
+test('table setup recovers a same-connection warehouse in manual and Browse paths', async () => {
+  const [CreateTableView, Wizard, apiModule] = await Promise.all([
+    loadMountedSFC('/src/views/CreateTableView.vue'),
+    loadMountedSFC('/src/ResourceImportWizard.vue'),
+    vite.ssrLoadModule('/src/api.ts'),
+  ])
+  const original = {
+    listConnections: apiModule.api.listConnections,
+    listWarehouses: apiModule.api.listWarehouses,
+    listTables: apiModule.api.listTables,
+  }
+  const connections = [
+    { name: 'orders', host: 'https://orders.example.com', authType: 'pat', secretName: 'orders-token', secretNamespace: 'default', secretKey: 'token', status: 'Ready', conditions: [] },
+    { name: 'finance', host: 'https://finance.example.com', authType: 'pat', secretName: 'finance-token', secretNamespace: 'default', secretKey: 'token', status: 'Ready', conditions: [] },
+  ]
+  const warehouses = [
+    { name: 'orders-sql', connectionRef: 'orders', warehouseID: 'orders-id', status: 'Ready', conditions: [] },
+    { name: 'finance-sql', connectionRef: 'finance', warehouseID: 'finance-id', status: 'Ready', conditions: [] },
+  ]
+  apiModule.api.listConnections = async () => connections
+  apiModule.api.listWarehouses = async () => warehouses
+  apiModule.api.listTables = async () => []
+
+  let manual
+  let browse
+  try {
+    manual = mountDetailView(CreateTableView, {}, {})
+    await flushVue()
+    assert.equal(manual.instance.setupState.form.connectionRef, 'orders')
+    assert.equal(manual.instance.setupState.form.warehouseRef, 'orders-sql', 'manual table setup starts with a warehouse on its selected connection')
+    manual.instance.setupState.form.connectionRef = 'finance'
+    await flushVue()
+    assert.equal(manual.instance.setupState.form.warehouseRef, 'finance-sql', 'manual table setup replaces a foreign warehouse after connection change')
+
+    browse = mountDetailView(Wizard, { kind: 'table', routeOwned: true }, {})
+    await flushVue()
+    assert.equal(browse.instance.setupState.connectionRef, 'orders')
+    assert.equal(browse.instance.setupState.warehouseRef, 'orders-sql', 'Browse setup starts with a warehouse on its selected connection')
+    browse.instance.setupState.connectionRef = 'finance'
+    await flushVue()
+    assert.equal(browse.instance.setupState.warehouseRef, 'finance-sql', 'Browse setup replaces a foreign warehouse after connection change')
+  } finally {
+    browse?.unmount()
+    manual?.unmount()
     apiModule.api.listConnections = original.listConnections
     apiModule.api.listWarehouses = original.listWarehouses
     apiModule.api.listTables = original.listTables
@@ -2811,9 +2862,10 @@ test('route-owned import is a page while modal mode keeps modal semantics', asyn
   assert.doesNotMatch(routeHTML, /aria-modal=/)
   assert.match(modalHTML, /role="dialog"/)
   assert.match(modalHTML, /aria-modal="true"/)
-  assert.match(wizard, /if \(props\.routeOwned\) return/)
+  assert.match(wizard, /if \(props\.routeOwned\) \{[\s\S]*focusStep\(\)/)
   assert.match(wizard, /if \(!props\.routeOwned && event\.target === event\.currentTarget\) close\(\)/)
-  assert.match(wizard, /if \(props\.routeOwned \|\| !mounted\) return/)
+  assert.match(wizard, /routeHeading/)
+  assert.match(wizard, /routeAnnouncement/)
   assert.match(wizard, /if \(!props\.routeOwned\) \{[\s\S]*previousFocus = document\.activeElement/)
   assert.match(app, /provide\(contextGenerationKey, contextVersion\)/)
   assert.match(app, /immediate: true, flush: 'sync'/)

@@ -3,18 +3,20 @@ import { ArrowLeft, LoaderCircle, RefreshCw } from 'lucide-vue-next'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import { contextGenerationKey } from '../context'
+import { formatDatabricksError } from '../errors'
 import {
   createOperationLocks,
   operationKey,
 } from '../refresh'
 import { importPrerequisiteMessage, nextValidWarehouseRef, warehousesForConnection } from '../tableRefs'
 import { resourceNameError } from '../resourceName'
-import type { Connection, ErrorResponse, Warehouse } from '../types'
+import type { DatabricksPrerequisiteKind } from '../journey'
+import type { Connection, Warehouse } from '../types'
 
 const emit = defineEmits<{
   (event: 'cancel'): void
   (event: 'created', name: string): void
-  (event: 'navigate', path: 'connections' | 'warehouses'): void
+  (event: 'prerequisite', kind: DatabricksPrerequisiteKind): void
 }>()
 
 const connections = ref<Connection[]>([])
@@ -50,15 +52,12 @@ const form = reactive({
   table: '',
 })
 
-const tableImportBlocker = computed(() => !loaded.value ? '' : importPrerequisiteMessage(connections.value, warehouses.value))
+const tableImportBlocker = computed(() => !loaded.value
+  ? ''
+  : importPrerequisiteMessage(connections.value, warehouses.value, form.connectionRef))
 const formWarehouses = computed(() => warehousesForConnection(warehouses.value, form.connectionRef))
 const hasConnections = computed(() => connections.value.length > 0)
-const hasWarehouses = computed(() => warehouses.value.length > 0)
-
-function errMessage(error: unknown): string {
-  const response = error as Partial<ErrorResponse>
-  return response.reason ? `${response.reason}: ${response.message}` : response.message || String(error)
-}
+const hasSelectedConnection = computed(() => hasConnections.value && connections.value.some(connection => connection.name === form.connectionRef))
 
 function isCurrentRead(generation: number, expectedContext: number): boolean {
   return mounted && generation === readGeneration && contextGeneration.value === expectedContext
@@ -90,7 +89,7 @@ async function load(): Promise<ReadToken | null> {
     return { generation, context: expectedContext }
   } catch (error) {
     if (!isCurrentRead(generation, expectedContext)) return null
-    loadError.value = errMessage(error)
+    loadError.value = formatDatabricksError(error)
     return null
   } finally {
     if (isCurrentRead(generation, expectedContext)) loading.value = false
@@ -181,7 +180,7 @@ async function submit(): Promise<void> {
     if (!isCurrentMutation(generation, expectedContext)) return
     emit('created', created.name)
   } catch (error) {
-    await focusFormError(errMessage(error), generation, expectedContext)
+    await focusFormError(formatDatabricksError(error), generation, expectedContext)
   } finally {
     operations.release(lock)
     if (isCurrentMutation(generation, expectedContext)) submitting.value = false
@@ -233,8 +232,8 @@ watch(() => form.connectionRef, connectionRef => {
       </p>
       <div v-if="tableImportBlocker" class="prerequisite" role="status">
         {{ tableImportBlocker }}
-        <button v-if="!hasConnections" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('navigate', 'connections')">Go to connections</button>
-        <button v-else-if="!hasWarehouses" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('navigate', 'warehouses')">Go to warehouses</button>
+        <button v-if="!hasSelectedConnection" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'connection')">Create connection</button>
+        <button v-else-if="!formWarehouses.length" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'warehouse')">Register warehouse</button>
       </div>
       <div class="form-grid">
         <label class="field" for="table-name">
