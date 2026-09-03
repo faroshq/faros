@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, onUnmounted, ref } from 'vue'
 import { RefreshCw } from 'lucide-vue-next'
 import DatabricksEmptyState from '../components/DatabricksEmptyState.vue'
 import SplitCreateButton from '../components/SplitCreateButton.vue'
@@ -12,7 +12,6 @@ import { api } from '../api'
 import { formatDatabricksError, isTenantMissingError } from '../errors'
 import { confirmDialog } from '../portalkit/confirm'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
-import { importPrerequisiteMessage, nextValidWarehouseRef, warehousesForConnection } from '../tableRefs'
 import type { Connection, Table, Warehouse } from '../types'
 import {
   createCoalescedRead,
@@ -22,7 +21,6 @@ import {
   type LatestRefreshController,
   type ResourceRefreshMode,
 } from '../refresh'
-import { resourceNameError } from '../resourceName'
 import {
   cloneTableFilters,
   databricksHybridTransition,
@@ -40,6 +38,7 @@ import {
 const emit = defineEmits<{
   (e: 'open', name: string): void
   (e: 'create', mode: 'manual' | 'browse'): void
+  (e: 'edit', name: string): void
   (e: 'prerequisite', kind: DatabricksPrerequisiteKind): void
 }>()
 
@@ -71,12 +70,6 @@ const tableQuery = ref('')
 const tableFiltersValue = ref<TableFilterValues>(cloneTableFilters(EMPTY_TABLE_FILTERS))
 const tableCursor = ref<string | null>(null)
 const tablePageInfo = ref<ReturnType<typeof toPageInfo> | null>(null)
-const showForm = ref(false)
-const editing = ref<string | null>(null)
-const submitting = ref(false)
-const formError = ref<string | null>(null)
-const nameInput = ref<HTMLInputElement | null>(null)
-const formErrorRef = ref<HTMLElement | null>(null)
 const firstPageSettled = ref(false)
 const pendingDeletionNames = new Set<string>()
 let refresh!: LatestRefreshController
@@ -96,15 +89,6 @@ function invalidateCompleteAuthority(): void {
   serverPageRead.invalidate()
   forceNextLoad = true
 }
-
-const form = reactive({
-  name: '',
-  connectionRef: '',
-  warehouseRef: '',
-  catalog: '',
-  schema: '',
-  table: '',
-})
 
 const visibleTables = computed(() => tables.value.filter(table => !operations.isTombstoned(operationKey('table', table.name), table.uid)))
 const rows = computed<Array<Record<string, unknown>>>(() =>
@@ -130,41 +114,7 @@ function handleFirstRunAction(action: DatabricksJourneyAction): void {
   else if (action === 'manual-table') emit('create', 'manual')
 }
 
-const tableImportBlocker = computed(() => !loaded.value
-  ? ''
-  : importPrerequisiteMessage(connections.value, warehouses.value, form.connectionRef))
-const formWarehouses = computed(() => warehousesForConnection(warehouses.value, form.connectionRef))
 const filterDefinitions = computed(() => tableFilters(warehouses.value))
-
-function resetForm() {
-  editing.value = null
-  form.name = ''
-  form.connectionRef = connections.value[0]?.name ?? ''
-  form.warehouseRef = nextValidWarehouseRef(warehouses.value, form.connectionRef, '')
-  form.catalog = ''
-  form.schema = ''
-  form.table = ''
-  formError.value = null
-}
-
-function closeForm() {
-  resetForm()
-  showForm.value = false
-}
-
-function editTable(row: Record<string, unknown>) {
-  const table = row as unknown as Table
-  if (operationLocked(table.name)) return
-  editing.value = table.name
-  form.name = table.name
-  form.connectionRef = table.connectionRef
-  form.warehouseRef = table.warehouseRef
-  form.catalog = table.catalog
-  form.schema = table.schema
-  form.table = table.table
-  formError.value = null
-  showForm.value = true
-}
 
 function load(): void
 function load(force: boolean): void
@@ -189,86 +139,6 @@ function operationPhase(name: string) {
 
 function openResource(name: string): void {
   if (!operationLocked(name)) emit('open', name)
-}
-
-async function focusFormError(message: string) {
-  formError.value = message
-  await nextTick()
-  formErrorRef.value?.focus()
-}
-
-async function submit() {
-  formError.value = null
-  mutationError.value = null
-  if (!loaded.value) {
-    await focusFormError('Table list is still loading. Retry the read before saving a table.')
-    return
-  }
-  if (tableImportBlocker.value) {
-    await focusFormError(tableImportBlocker.value)
-    return
-  }
-  if (!form.name || !form.connectionRef || !form.warehouseRef || !form.catalog || !form.schema || !form.table) {
-    await focusFormError('All table fields are required.')
-    return
-  }
-  const nameError = resourceNameError(form.name, 'Name')
-  if (nameError) {
-    await focusFormError(nameError)
-    return
-  }
-  const desiredName = form.name.trim()
-  const lock = operationKey('table', desiredName)
-  if (!operations.acquire(lock, editing.value ? 'saving' : 'creating')) {
-    await focusFormError(`Table "${desiredName}" already has an update in progress.`)
-    return
-  }
-  submitting.value = true
-  try {
-    // The visible table/supporting rows may be partial cursor pages. Resolve
-    // every duplicate and foreign-key check against complete authoritative
-    // collections before saving.
-    const [existingTables, availableConnections, availableWarehouses] = await Promise.all([
-      completeRead.request(),
-      api.listConnections(),
-      api.listWarehouses(),
-    ])
-    operations.reconcile('table', existingTables.map(({ name, uid }) => ({ name, uid })))
-    if (operations.isTombstoned(lock)) {
-      await focusFormError(`Table "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`)
-      return
-    }
-    const duplicate = existingTables.find(table => table.name === desiredName)
-    if (duplicate && duplicate.name !== editing.value) {
-      await focusFormError(`Table "${desiredName}" already exists.`)
-      return
-    }
-    if (!availableConnections.some(connection => connection.name === form.connectionRef)) {
-      await focusFormError('Selected connection is no longer available in this workspace.')
-      return
-    }
-    if (!availableWarehouses.some(warehouse => warehouse.name === form.warehouseRef && warehouse.connectionRef === form.connectionRef)) {
-      await focusFormError('Selected warehouse must belong to the selected connection.')
-      return
-    }
-    await api.saveTable({
-      name: desiredName,
-      connectionRef: form.connectionRef,
-      warehouseRef: form.warehouseRef,
-      catalog: form.catalog,
-      schema: form.schema,
-      table: form.table,
-    })
-    invalidateCompleteAuthority()
-    resetForm()
-    showForm.value = false
-    load()
-  } catch (e) {
-    await focusFormError(formatDatabricksError(e))
-  } finally {
-    submitting.value = false
-    operations.release(lock)
-  }
 }
 
 interface TableRequest {
@@ -498,9 +368,6 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
     }
     loaded.value = true
     error.value = null
-    if (!form.connectionRef) form.connectionRef = connections.value[0]?.name ?? ''
-    if (connections.value.length && !connections.value.some(c => c.name === form.connectionRef)) form.connectionRef = connections.value[0].name
-    form.warehouseRef = nextValidWarehouseRef(warehouses.value, form.connectionRef, form.warehouseRef)
   } catch (e) {
     fullWalkPending = false
     supportReadPending = false
@@ -518,10 +385,6 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
     serverPageReadPending = false
     if (refresh.isCurrent(requestID) && mode === 'foreground') loading.value = false
   }
-})
-
-watch(() => form.connectionRef, connectionRef => {
-  form.warehouseRef = nextValidWarehouseRef(warehouses.value, connectionRef, form.warehouseRef)
 })
 onMounted(() => {
   mounted = true
@@ -556,61 +419,9 @@ onUnmounted(() => {
           <RefreshCw class="button-icon" :class="{ spin: loading }" :stroke-width="1.75" />
           {{ loading ? 'Refreshing…' : 'Refresh' }}
         </button>
-        <SplitCreateButton v-if="!showFirstRun" kind="table" :disabled="submitting" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
+        <SplitCreateButton v-if="!showFirstRun" kind="table" @manual="emit('create', 'manual')" @browse="emit('create', 'browse')" />
       </div>
     </header>
-
-    <div v-if="showForm" class="databricks-resource-panel k-card">
-      <div class="databricks-resource-panel-head">
-        <h3 class="databricks-resource-panel-title">Update table</h3>
-      </div>
-      <div v-if="tableImportBlocker" class="warning" role="status">
-        {{ tableImportBlocker }}
-      </div>
-      <form class="form-grid" @submit.prevent="submit">
-        <label class="field" for="table-name">
-          <span class="field-label">Name</span>
-          <input id="table-name" class="k-input" ref="nameInput" v-model="form.name" :disabled="!!editing || submitting" autocomplete="off" placeholder="order-history" required aria-required="true" aria-describedby="table-name-hint table-form-error" :aria-invalid="!!formError" />
-          <span id="table-name-hint" class="field-hint">The stable tableRef exposed to App Studio. Use lowercase letters, numbers, and hyphens; the name is preserved exactly.</span>
-        </label>
-        <label class="field" for="table-connection">
-          <span class="field-label">Connection</span>
-          <select id="table-connection" class="k-input" v-model="form.connectionRef" :disabled="submitting" required aria-required="true" aria-describedby="table-connection-hint table-form-error" :aria-invalid="!!formError">
-            <option value="" disabled>Select connection</option>
-            <option v-for="conn in connections" :key="conn.name" :value="conn.name">{{ conn.name }}</option>
-          </select>
-          <span id="table-connection-hint" class="field-hint">The Databricks workspace connection for this table.</span>
-        </label>
-        <label class="field" for="table-warehouse">
-          <span class="field-label">Warehouse</span>
-          <select id="table-warehouse" class="k-input" v-model="form.warehouseRef" :disabled="submitting" required aria-required="true" aria-describedby="table-warehouse-hint table-form-error" :aria-invalid="!!formError">
-            <option value="" disabled>{{ formWarehouses.length ? 'Select warehouse' : 'No warehouses for this connection' }}</option>
-            <option v-for="wh in formWarehouses" :key="wh.name" :value="wh.name">{{ wh.name }}</option>
-          </select>
-          <span id="table-warehouse-hint" class="field-hint">A warehouse that belongs to the selected connection.</span>
-        </label>
-        <label class="field" for="table-catalog">
-          <span class="field-label">Catalog</span>
-          <input id="table-catalog" class="k-input" v-model="form.catalog" :disabled="submitting" autocomplete="off" placeholder="sales" required aria-required="true" aria-describedby="table-catalog-hint table-form-error" :aria-invalid="!!formError" />
-          <span id="table-catalog-hint" class="field-hint">The Databricks catalog containing the table.</span>
-        </label>
-        <label class="field" for="table-schema">
-          <span class="field-label">Schema</span>
-          <input id="table-schema" class="k-input" v-model="form.schema" :disabled="submitting" autocomplete="off" placeholder="gold" required aria-required="true" aria-describedby="table-schema-hint table-form-error" :aria-invalid="!!formError" />
-          <span id="table-schema-hint" class="field-hint">The Databricks schema containing the table.</span>
-        </label>
-        <label class="field" for="table-table">
-          <span class="field-label">Table</span>
-          <input id="table-table" class="k-input" v-model="form.table" :disabled="submitting" autocomplete="off" placeholder="order_history" required aria-required="true" aria-describedby="table-table-hint table-form-error" :aria-invalid="!!formError" />
-          <span id="table-table-hint" class="field-hint">The exact table identifier in the selected catalog and schema.</span>
-        </label>
-        <div class="form-actions span-2">
-          <button class="k-btn k-btn--primary" type="submit" :disabled="submitting">{{ submitting ? 'Saving...' : 'Save' }}</button>
-          <button class="k-btn k-btn--ghost" type="button" :disabled="submitting" @click="closeForm">Cancel</button>
-          <span v-if="formError" id="table-form-error" ref="formErrorRef" class="error" role="alert" aria-live="assertive" tabindex="-1">{{ formError }}</span>
-        </div>
-      </form>
-    </div>
 
     <div v-if="mutationError" class="error mutation-error" role="alert" aria-live="assertive">
       <span>{{ mutationError }}</span>
@@ -672,7 +483,7 @@ onUnmounted(() => {
           <ResourceTableEditButton
             :label="`Edit table ${String(row.name)}`"
             :disabled="operationLocked(String(row.name))"
-            @click="editTable(row)"
+            @click="emit('edit', String(row.name))"
           />
           <ResourceTableDeleteButton
             :label="`Delete table ${String(row.name)}`"

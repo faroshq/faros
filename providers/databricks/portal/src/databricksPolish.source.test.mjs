@@ -36,6 +36,14 @@ test('all three collections use one first-run journey without changing page widt
   assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.page-head \{ flex-wrap: wrap; \}/)
 })
 
+test('registration results use compact product typography and wrap long identifiers', async () => {
+  const styles = await read('./style.css')
+  const resultIdentifier = styles.match(/faros-provider-databricks \.result-row > code\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''
+  assert.match(resultIdentifier, /font-size:\s*12px/)
+  assert.match(resultIdentifier, /line-height:\s*1\.45/)
+  assert.match(resultIdentifier, /overflow-wrap:\s*anywhere/)
+})
+
 test('credential help is concise with progressive disclosure', async () => {
   const [connection, warehouse] = await Promise.all([
     read('./views/CreateConnectionView.vue'),

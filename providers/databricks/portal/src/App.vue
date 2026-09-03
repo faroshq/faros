@@ -20,7 +20,7 @@ import ResourceImportWizard from './ResourceImportWizard.vue'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
 import Tabs from './portalkit/Tabs.vue'
 import type { FarosContext } from './types'
-import { collectionPath, createPath, detailPath, parseSubPath, type DatabricksRoute } from './route'
+import { collectionPath, createPath, detailPath, parseSubPath, tableEditPath, type DatabricksRoute } from './route'
 import ConnectionDetailView from './views/ConnectionDetailView.vue'
 import ConnectionsView from './views/ConnectionsView.vue'
 import CreateConnectionView from './views/CreateConnectionView.vue'
@@ -181,6 +181,13 @@ function beginActiveBrowsePrerequisite(kind: DatabricksPrerequisiteKind): void {
         @created="(name: string) => created('table', name)"
         @prerequisite="(kind: DatabricksPrerequisiteKind) => beginManualPrerequisite(kind, 'table')"
       />
+      <CreateTableView
+        v-else-if="route.page === 'tables' && route.table && route.edit"
+        :key="`edit-table:${route.table}:${contextVersion}`"
+        :edit-name="route.table"
+        @cancel="cancelCreate('tables')"
+        @created="(name: string) => created('table', name)"
+      />
       <ResourceImportWizard
         v-else-if="route.page === 'create' && (route.kind === 'warehouse' || route.kind === 'table') && route.mode === 'browse'"
         :key="`browse-${route.kind}:${contextVersion}`"
@@ -191,7 +198,7 @@ function beginActiveBrowsePrerequisite(kind: DatabricksPrerequisiteKind): void {
       />
       <ConnectionDetailView v-if="route.page === 'connections' && route.connection" :key="`connection-detail:${route.connection}:${contextVersion}`" :name="route.connection" @back="navigate('connections')" />
       <WarehouseDetailView v-else-if="route.page === 'warehouses' && route.warehouse" :key="`warehouse-detail:${route.warehouse}:${contextVersion}`" :name="route.warehouse" @back="navigate('warehouses')" />
-      <TableDetailView v-else-if="route.page === 'tables' && route.table" :key="`table-detail:${route.table}:${contextVersion}`" :name="route.table" @back="navigate('tables')" />
+      <TableDetailView v-else-if="route.page === 'tables' && route.table && !route.edit" :key="`table-detail:${route.table}:${contextVersion}`" :name="route.table" @back="navigate('tables')" />
 
       <!-- Keep collection controls and the horizontal table scroll position
            alive across create/detail routes. Keying the cache by the context
@@ -215,6 +222,7 @@ function beginActiveBrowsePrerequisite(kind: DatabricksPrerequisiteKind): void {
           :key="`tables:${contextVersion}`"
           @create="(mode: 'manual' | 'browse') => openCreate('table', mode)"
           @open="(n: string) => navigate(detailPath('tables', n))"
+          @edit="(n: string) => navigate(tableEditPath(n))"
           @prerequisite="(kind: DatabricksPrerequisiteKind) => beginBrowsePrerequisite(kind, 'table')"
         />
       </KeepAlive>

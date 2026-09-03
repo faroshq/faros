@@ -598,6 +598,13 @@ faros-provider-databricks .result-summary strong { font-size: 13px; font-weight:
 faros-provider-databricks .review-row small,
 faros-provider-databricks .result-summary small,
 faros-provider-databricks .result-row small { color: var(--color-text-secondary, #8a8ca6); font-size: 11px; line-height: 1.45; }
+faros-provider-databricks .result-row > code {
+  color: var(--color-text-primary, #e9e9f2);
+  font-size: 12px;
+  line-height: 1.45;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 faros-provider-databricks .review-row,
 faros-provider-databricks .result-row { align-items: center; background: var(--color-surface-overlay, #171927); border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.07)); border-radius: 4px; display: grid; gap: 10px; padding: 10px 12px; }

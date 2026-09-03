@@ -11,7 +11,12 @@ import {
 import { importPrerequisiteMessage, nextValidWarehouseRef, warehousesForConnection } from '../tableRefs'
 import { resourceNameError } from '../resourceName'
 import type { DatabricksPrerequisiteKind } from '../journey'
-import type { Connection, Warehouse } from '../types'
+import type { Connection, Table, Warehouse } from '../types'
+
+const props = defineProps<{
+  /** When set, this route edits the named table instead of creating one. */
+  editName?: string
+}>()
 
 const emit = defineEmits<{
   (event: 'cancel'): void
@@ -27,9 +32,11 @@ const loadError = ref<string | null>(null)
 const submitting = ref(false)
 const formError = ref<string | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
+const connectionInput = ref<HTMLSelectElement | null>(null)
 const formErrorRef = ref<HTMLElement | null>(null)
 const operations = createOperationLocks()
 const contextGeneration = inject(contextGenerationKey, ref(0))
+const editing = computed(() => props.editName !== undefined)
 
 // Route-owned forms may be replaced while a read or write is in flight. Every
 // async continuation must belong to the mounted form and latest attempt that
@@ -74,17 +81,32 @@ async function load(): Promise<ReadToken | null> {
   loaded.value = false
   loadError.value = null
   try {
-    const [availableConnections, availableWarehouses] = await Promise.all([
+    const tableRead: Promise<Table | null> = editing.value
+      ? api.getTable(props.editName as string)
+      : Promise.resolve(null)
+    const [table, availableConnections, availableWarehouses] = await Promise.all([
+      tableRead,
       api.listConnections(),
       api.listWarehouses(),
     ])
     if (!isCurrentRead(generation, expectedContext)) return null
     connections.value = availableConnections
     warehouses.value = availableWarehouses
-    if (!connections.value.some(connection => connection.name === form.connectionRef)) {
-      form.connectionRef = connections.value[0]?.name ?? ''
+    if (table) {
+      // Keep the route-owned name as the immutable identity. The server read
+      // supplies every editable reference and Databricks locator.
+      form.name = props.editName as string
+      form.connectionRef = table.connectionRef
+      form.warehouseRef = table.warehouseRef
+      form.catalog = table.catalog
+      form.schema = table.schema
+      form.table = table.table
+    } else {
+      if (!connections.value.some(connection => connection.name === form.connectionRef)) {
+        form.connectionRef = connections.value[0]?.name ?? ''
+      }
+      form.warehouseRef = nextValidWarehouseRef(warehouses.value, form.connectionRef, form.warehouseRef)
     }
-    form.warehouseRef = nextValidWarehouseRef(warehouses.value, form.connectionRef, form.warehouseRef)
     loaded.value = true
     return { generation, context: expectedContext }
   } catch (error) {
@@ -106,6 +128,7 @@ async function focusFormError(message: string, generation: number, expectedConte
 // Prefill the Databricks-provided samples catalog (readable in every
 // workspace) so a first import needs no lookup: samples.nyctaxi.trips.
 function fillDemo(): void {
+  if (editing.value) return
   form.name = 'nyctaxi-trips'
   form.catalog = 'samples'
   form.schema = 'nyctaxi'
@@ -119,7 +142,13 @@ async function submit(): Promise<void> {
   const expectedContext = contextGeneration.value
   formError.value = null
   if (!loaded.value) {
-    await focusFormError('Connection and warehouse lists are still loading. Retry the read before creating a table.', generation, expectedContext)
+    await focusFormError(
+      editing.value
+        ? 'Table and prerequisite reads are still loading. Retry before saving the table.'
+        : 'Connection and warehouse lists are still loading. Retry the read before creating a table.',
+      generation,
+      expectedContext,
+    )
     return
   }
   if (tableImportBlocker.value) {
@@ -135,7 +164,7 @@ async function submit(): Promise<void> {
     await focusFormError(nameError, generation, expectedContext)
     return
   }
-  const desiredName = form.name.trim()
+  const desiredName = (props.editName ?? form.name).trim()
   const payload = {
     name: desiredName,
     connectionRef: form.connectionRef,
@@ -145,7 +174,7 @@ async function submit(): Promise<void> {
     table: form.table,
   }
   const lock = operationKey('table', desiredName)
-  if (!operations.acquire(lock, 'creating')) {
+  if (!operations.acquire(lock, editing.value ? 'saving' : 'creating')) {
     await focusFormError(`Table "${desiredName}" already has an update in progress.`, generation, expectedContext)
     return
   }
@@ -164,8 +193,13 @@ async function submit(): Promise<void> {
       await focusFormError(`Table "${desiredName}" is still being removed. Retry after the list refresh confirms it is gone.`, generation, expectedContext)
       return
     }
-    if (existingTables.some(table => table.name === desiredName)) {
+    const existingTable = existingTables.find(table => table.name === desiredName)
+    if (!editing.value && existingTable) {
       await focusFormError(`Table "${desiredName}" already exists.`, generation, expectedContext)
+      return
+    }
+    if (editing.value && !existingTable) {
+      await focusFormError(`Table "${desiredName}" no longer exists in this workspace.`, generation, expectedContext)
       return
     }
     if (!availableConnections.some(connection => connection.name === payload.connectionRef)) {
@@ -194,7 +228,11 @@ function cancel(): void {
 onMounted(() => {
   mounted = true
   void load().then(readToken => {
-    if (readToken && isCurrentRead(readToken.generation, readToken.context)) nameInput.value?.focus()
+    if (!readToken || !isCurrentRead(readToken.generation, readToken.context)) return
+    // The edit identity is intentionally disabled. Put focus on the first
+    // editable control so keyboard users can continue immediately.
+    const initialInput = editing.value ? connectionInput.value : nameInput.value
+    initialInput?.focus()
   })
 })
 
@@ -215,35 +253,35 @@ watch(() => form.connectionRef, connectionRef => {
       <ArrowLeft :size="14" aria-hidden="true" /> Tables
     </button>
     <header class="k-create-header">
-      <h2 class="k-create-title">Register table</h2>
-      <p class="k-create-description">Register a metadata-only Databricks table handle for App Studio and MCP.</p>
+      <h2 class="k-create-title">{{ editing ? 'Edit table' : 'Register table' }}</h2>
+      <p class="k-create-description">{{ editing ? 'Update the metadata-only Databricks table handle used by App Studio and MCP.' : 'Register a metadata-only Databricks table handle for App Studio and MCP.' }}</p>
     </header>
 
     <form class="k-create-surface k-create-surface--wide" @submit.prevent="submit">
       <div class="k-create-body">
       <div class="databricks-resource-panel-head">
-        <span class="databricks-resource-panel-title">Table details</span>
-        <button class="k-btn k-btn--ghost databricks-inline-action" type="button" :disabled="loading || submitting" @click="fillDemo" title="Prefill samples.nyctaxi.trips — Databricks demo data available in every workspace">Fill with demo data</button>
+        <span class="databricks-resource-panel-title">{{ editing ? 'Table configuration' : 'Table details' }}</span>
+        <button v-if="!editing" class="k-btn k-btn--ghost databricks-inline-action" type="button" :disabled="loading || submitting" @click="fillDemo" title="Prefill samples.nyctaxi.trips — Databricks demo data available in every workspace">Fill with demo data</button>
       </div>
-      <p v-if="loading" class="muted" role="status"><LoaderCircle class="spin" :size="14" aria-hidden="true" /> Loading connections and warehouses…</p>
+      <p v-if="loading" class="muted" role="status"><LoaderCircle class="spin" :size="14" aria-hidden="true" /> {{ editing ? 'Loading table, connections, and warehouses…' : 'Loading connections and warehouses…' }}</p>
       <p v-if="loadError" class="error" role="alert" aria-live="assertive">
-        <span>Could not load table prerequisites: {{ loadError }}</span>
+        <span>{{ editing ? 'Could not load table and prerequisites' : 'Could not load table prerequisites' }}: {{ loadError }}</span>
         <button class="k-btn k-btn--ghost" type="button" @click="load"><RefreshCw :size="14" aria-hidden="true" /> Retry</button>
       </p>
       <div v-if="tableImportBlocker" class="prerequisite" role="status">
         {{ tableImportBlocker }}
-        <button v-if="!hasSelectedConnection" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'connection')">Create connection</button>
-        <button v-else-if="!formWarehouses.length" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'warehouse')">Register warehouse</button>
+        <button v-if="!editing && !hasSelectedConnection" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'connection')">Create connection</button>
+        <button v-else-if="!editing && !formWarehouses.length" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'warehouse')">Register warehouse</button>
       </div>
       <div class="form-grid">
         <label class="field" for="table-name">
           <span class="field-label">Name</span>
-          <input id="table-name" ref="nameInput" class="k-input" v-model="form.name" :disabled="loading || submitting" autocomplete="off" placeholder="order-history" required aria-required="true" aria-describedby="table-name-hint table-form-error" :aria-invalid="!!formError" />
-          <span id="table-name-hint" class="field-hint">The stable tableRef exposed to App Studio. Use lowercase letters, numbers, and hyphens; the name is preserved exactly.</span>
+          <input id="table-name" ref="nameInput" class="k-input" v-model="form.name" :disabled="loading || submitting" :readonly="editing" autocomplete="off" placeholder="order-history" required aria-required="true" aria-describedby="table-name-hint table-form-error" :aria-invalid="!!formError" />
+          <span id="table-name-hint" class="field-hint">The stable tableRef exposed to App Studio. Use lowercase letters, numbers, and hyphens; the name is preserved exactly{{ editing ? ' and cannot be changed.' : '.' }}</span>
         </label>
         <label class="field" for="table-connection">
           <span class="field-label">Connection</span>
-          <select id="table-connection" class="k-input" v-model="form.connectionRef" :disabled="loading || submitting || !hasConnections" required aria-required="true" aria-describedby="table-connection-hint table-form-error" :aria-invalid="!!formError">
+          <select id="table-connection" ref="connectionInput" class="k-input" v-model="form.connectionRef" :disabled="loading || submitting || !hasConnections" required aria-required="true" aria-describedby="table-connection-hint table-form-error" :aria-invalid="!!formError">
             <option value="" disabled>Select connection</option>
             <option v-for="conn in connections" :key="conn.name" :value="conn.name">{{ conn.name }}</option>
           </select>
@@ -277,7 +315,7 @@ watch(() => form.connectionRef, connectionRef => {
       <div class="k-create-actions">
         <span v-if="formError" id="table-form-error" ref="formErrorRef" class="error" role="alert" aria-live="assertive" tabindex="-1">{{ formError }}</span>
         <button class="k-btn k-btn--ghost" type="button" :disabled="submitting" @click="cancel">Cancel</button>
-        <button class="k-btn k-btn--primary" type="submit" :disabled="loading || submitting || !!tableImportBlocker">{{ submitting ? 'Registering…' : 'Register table' }}</button>
+        <button class="k-btn k-btn--primary" type="submit" :disabled="loading || submitting || !!tableImportBlocker">{{ submitting ? (editing ? 'Saving…' : 'Registering…') : (editing ? 'Save changes' : 'Register table') }}</button>
       </div>
     </form>
   </section>

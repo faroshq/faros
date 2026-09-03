@@ -2055,6 +2055,7 @@ test('wizard and split-create sources preserve focus across deferred initializat
   const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
   const split = await readFile(new URL('./components/SplitCreateButton.vue', import.meta.url), 'utf8')
   const tables = await readFile(new URL('./views/TablesView.vue', import.meta.url), 'utf8')
+  const createTable = await readFile(new URL('./views/CreateTableView.vue', import.meta.url), 'utf8')
   const tableDetail = await readFile(new URL('./views/TableDetailView.vue', import.meta.url), 'utf8')
   const style = await readFile(new URL('./style.css', import.meta.url), 'utf8')
   assert.match(wizard, /focusDialog\(\)/)
@@ -2073,7 +2074,10 @@ test('wizard and split-create sources preserve focus across deferred initializat
   assert.match(split, /function closeMenuAfterTab/)
   assert.match(split, /deferredCloseTimer = window\.setTimeout/)
   assert.match(split, /closeMenuAfterTab\(\)/)
-  assert.match(tables, /tableImportBlocker = computed\(\(\) => !loaded\.value[\s\S]*importPrerequisiteMessage/)
+  assert.match(createTable, /tableImportBlocker = computed\(\(\) => !loaded\.value[\s\S]*importPrerequisiteMessage/)
+  assert.match(createTable, /void load\(\)\.then\(readToken => \{[\s\S]*isCurrentRead\(readToken\.generation, readToken\.context\)[\s\S]*editing\.value \? connectionInput\.value : nameInput\.value/)
+  assert.match(tables, /@click="emit\('edit', String\(row\.name\)\)"/)
+  assert.doesNotMatch(tables, /showForm|editing|formError|formWarehouses|tableImportBlocker|function submit\(/)
   assert.match(tables, /class="k-btn k-btn--ghost icon-text"[\s\S]{0,200}@click="load"/)
   assert.match(tables, /@row-click="\(row\) => openResource\(String\(row\.name\)\)"/)
   assert.doesNotMatch(tables, /selectedTable|schemaRows|schemaLoaded|schemaPending|schemaError|schemaCache|schemaCached/)
@@ -2113,7 +2117,8 @@ test('resource detail views use the shared shell without dropping resource behav
   assert.match(app, /<template v-if="route\.page !== 'create' && !route\.connection && !route\.warehouse && !route\.table">[\s\S]*<Tabs :tabs=/)
   assert.match(app, /ConnectionDetailView v-if="route\.page === 'connections' && route\.connection"/)
   assert.match(app, /WarehouseDetailView v-else-if="route\.page === 'warehouses' && route\.warehouse"/)
-  assert.match(app, /TableDetailView v-else-if="route\.page === 'tables' && route\.table"/)
+  assert.match(app, /TableDetailView v-else-if="route\.page === 'tables' && route\.table && !route\.edit"/)
+  assert.match(app, /CreateTableView[\s\S]*route\.page === 'tables' && route\.table && route\.edit[\s\S]*:edit-name="route\.table"/)
 
   const headerKinds = { connection: 'Connection', warehouse: 'Warehouse', table: 'Table' }
   for (const [kind, source] of Object.entries(details)) {
@@ -2309,6 +2314,180 @@ test('table setup recovers a same-connection warehouse in manual and Browse path
     apiModule.api.listConnections = original.listConnections
     apiModule.api.listWarehouses = original.listWarehouses
     apiModule.api.listTables = original.listTables
+  }
+})
+
+test('route-owned table edit loads the resource, permits its authoritative name, and saves with the immutable identity', async () => {
+  const [CreateTableView, apiModule] = await Promise.all([
+    loadMountedSFC('/src/views/CreateTableView.vue'),
+    vite.ssrLoadModule('/src/api.ts'),
+  ])
+  const original = {
+    getTable: apiModule.api.getTable,
+    listTables: apiModule.api.listTables,
+    listConnections: apiModule.api.listConnections,
+    listWarehouses: apiModule.api.listWarehouses,
+    saveTable: apiModule.api.saveTable,
+  }
+  const table = {
+    name: 'orders', uid: 'table-uid', connectionRef: 'orders', warehouseRef: 'orders-sql',
+    catalog: 'main', schema: 'sales', table: 'orders', fullName: 'main.sales.orders',
+    status: 'Ready', columns: [], conditions: [],
+  }
+  const connection = {
+    name: 'orders', host: 'https://dbc.example.com', authType: 'pat', secretName: 'orders-token',
+    secretNamespace: 'default', secretKey: 'token', status: 'Ready', conditions: [],
+  }
+  const warehouse = {
+    name: 'orders-sql', connectionRef: 'orders', warehouseID: 'warehouse-123', status: 'Ready', conditions: [],
+  }
+  let getCalls = 0
+  let savePayload
+  let saveResolve
+  const savePending = new Promise(resolve => { saveResolve = resolve })
+  const saved = []
+  apiModule.api.getTable = async name => {
+    getCalls += 1
+    assert.equal(name, 'orders', 'edit route reads the encoded table identity')
+    return table
+  }
+  apiModule.api.listTables = async () => [table]
+  apiModule.api.listConnections = async () => [connection]
+  apiModule.api.listWarehouses = async () => [warehouse]
+  apiModule.api.saveTable = async payload => {
+    savePayload = payload
+    return savePending
+  }
+  const mounted = mountDetailView(
+    CreateTableView,
+    { editName: 'orders', onCreated: name => saved.push(name) },
+    {},
+  )
+  try {
+    const nameInput = mounted.find(node => node.props?.id === 'table-name')
+    const connectionInput = mounted.find(node => node.props?.id === 'table-connection')
+    let nameFocuses = 0
+    let connectionFocuses = 0
+    nameInput.focus = () => { nameFocuses += 1 }
+    connectionInput.focus = () => { connectionFocuses += 1 }
+    await flushVue()
+    assert.equal(getCalls, 1, 'edit page loads the table through getTable')
+    assert.equal(mounted.instance.setupState.loaded, true, 'edit page waits for prerequisites and table data')
+    assert.deepEqual(
+      {
+        name: mounted.instance.setupState.form.name,
+        connectionRef: mounted.instance.setupState.form.connectionRef,
+        warehouseRef: mounted.instance.setupState.form.warehouseRef,
+        catalog: mounted.instance.setupState.form.catalog,
+        schema: mounted.instance.setupState.form.schema,
+        table: mounted.instance.setupState.form.table,
+      },
+      {
+        name: 'orders', connectionRef: 'orders', warehouseRef: 'orders-sql',
+        catalog: 'main', schema: 'sales', table: 'orders',
+      },
+      'edit page seeds fields from the fetched table',
+    )
+    assert.equal(nameInput?.props?.readonly, true, 'table name is immutable but remains readable and copyable on the edit page')
+    assert.equal(nameInput?.props?.disabled, false, 'immutable table name does not use inaccessible disabled styling')
+    assert.equal(nameFocuses, 0, 'edit page skips the immutable name')
+    assert.equal(connectionFocuses, 1, 'edit page focuses the first enabled connection control')
+
+    const submitPromise = mounted.instance.setupState.submit()
+    await flushVue()
+    assert.equal(mounted.instance.setupState.submitting, true, 'edit save exposes a pending lock')
+    assert.equal(mounted.instance.setupState.operations.phase('table:orders'), 'saving', 'edit save uses the saving operation phase')
+    assert.deepEqual(savePayload, {
+      name: 'orders', connectionRef: 'orders', warehouseRef: 'orders-sql',
+      catalog: 'main', schema: 'sales', table: 'orders',
+    }, 'edit save keeps the route-owned name and form references')
+    saveResolve(table)
+    await submitPromise
+    await flushVue()
+    assert.deepEqual(saved, ['orders'], 'successful edit emits one result for detail navigation')
+    assert.equal(mounted.instance.setupState.submitting, false, 'edit save releases its pending state')
+  } finally {
+    mounted.unmount()
+    apiModule.api.getTable = original.getTable
+    apiModule.api.listTables = original.listTables
+    apiModule.api.listConnections = original.listConnections
+    apiModule.api.listWarehouses = original.listWarehouses
+    apiModule.api.saveTable = original.saveTable
+  }
+})
+
+test('route-owned table edit rejects stale authority and fences load/save failures', async () => {
+  const [CreateTableView, apiModule, contextModule] = await Promise.all([
+    loadMountedSFC('/src/views/CreateTableView.vue'),
+    vite.ssrLoadModule('/src/api.ts'),
+    vite.ssrLoadModule('/src/context.ts'),
+  ])
+  const original = {
+    getTable: apiModule.api.getTable,
+    listTables: apiModule.api.listTables,
+    listConnections: apiModule.api.listConnections,
+    listWarehouses: apiModule.api.listWarehouses,
+    saveTable: apiModule.api.saveTable,
+  }
+  const table = {
+    name: 'orders', uid: 'table-uid', connectionRef: 'orders', warehouseRef: 'orders-sql',
+    catalog: 'main', schema: 'sales', table: 'orders', fullName: 'main.sales.orders',
+    status: 'Ready', columns: [], conditions: [],
+  }
+  const connection = {
+    name: 'orders', host: 'https://dbc.example.com', authType: 'pat', secretName: 'orders-token',
+    secretNamespace: 'default', secretKey: 'token', status: 'Ready', conditions: [],
+  }
+  const warehouse = {
+    name: 'orders-sql', connectionRef: 'orders', warehouseID: 'warehouse-123', status: 'Ready', conditions: [],
+  }
+  apiModule.api.getTable = async () => table
+  apiModule.api.listConnections = async () => [connection]
+  apiModule.api.listWarehouses = async () => [warehouse]
+  apiModule.api.saveTable = async () => table
+
+  const mounted = mountDetailView(CreateTableView, { editName: 'orders' }, {})
+  try {
+    await flushVue()
+    apiModule.api.listTables = async () => []
+    await mounted.instance.setupState.submit()
+    await flushVue()
+    assert.match(mounted.instance.setupState.formError, /no longer exists/, 'edit validation rejects a target omitted from the authoritative list')
+
+    let resolveSave
+    const savePending = new Promise(resolve => { resolveSave = resolve })
+    apiModule.api.listTables = async () => [table]
+    apiModule.api.saveTable = async () => savePending
+    const contextGeneration = ref(0)
+    mounted.unmount()
+    let saved = 0
+    const staleMounted = mountDetailView(
+      CreateTableView,
+      { editName: 'orders', onCreated: () => { saved += 1 } },
+      {},
+      { [contextModule.contextGenerationKey]: contextGeneration },
+    )
+    try {
+      await flushVue()
+      const submitPromise = staleMounted.instance.setupState.submit()
+      await flushVue()
+      assert.equal(staleMounted.instance.setupState.submitting, true, 'save remains pending before authority rotation')
+      staleMounted.unmount()
+      resolveSave(table)
+      await submitPromise
+      await flushVue()
+      assert.equal(saved, 0, 'late edit save does not emit after route unmount')
+      assert.equal(staleMounted.instance.setupState.submitting, true, 'late edit save does not rewrite abandoned state')
+    } finally {
+      staleMounted.unmount()
+    }
+  } finally {
+    mounted.unmount()
+    apiModule.api.getTable = original.getTable
+    apiModule.api.listTables = original.listTables
+    apiModule.api.listConnections = original.listConnections
+    apiModule.api.listWarehouses = original.listWarehouses
+    apiModule.api.saveTable = original.saveTable
   }
 })
 
