@@ -1,10 +1,10 @@
 # Code Freeze UX / Regression Audit — Newly Enabled Providers
 
-**Audit date:** 2026-09-02  
-**Target:** `https://console.dev.kyrosos.com/ui/`  
-**Authentication:** `dev-token`  
-**Scope:** Providers enabled after the baseline audit: Edges, Agents, Databricks, and Kuery  
-**Mode:** Audit only; no source, configuration, infrastructure, or provider data was changed
+- **Audit date:** 2026-09-02
+- **Target:** `https://console.dev.kyrosos.com/ui/`
+- **Authentication:** `dev-token`
+- **Scope:** Providers enabled after the baseline audit: Edges, Agents, Databricks, and Kuery
+- **Mode:** Audit only; no source, configuration, infrastructure, or provider data was changed
 
 ## Executive summary
 

@@ -1,11 +1,11 @@
 # Code Freeze UX / Regression Audit — provider-databricks
 
-**Audit date:** 2026-09-02  
-**Target:** `https://console.dev.kyrosos.com/ui/`  
-**Authentication:** `dev-token`  
-**Scope:** Databricks provider only, desktop-first  
-**Viewports:** 1280×720, 1440×900, and 3840×2160  
-**Mode:** Audit only; no source, configuration, infrastructure, or provider data was changed
+- **Audit date:** 2026-09-02
+- **Target:** `https://console.dev.kyrosos.com/ui/`
+- **Authentication:** `dev-token`
+- **Scope:** Databricks provider only, desktop-first
+- **Viewports:** 1280×720, 1440×900, and 3840×2160
+- **Mode:** Audit only; no source, configuration, infrastructure, or provider data was changed
 
 ## Executive summary
 

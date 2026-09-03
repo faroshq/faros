@@ -1,12 +1,12 @@
 # Code Freeze UX / Regression Audit — Newly Enabled Providers, Desktop Priority
 
-**Audit date:** 2026-09-02  
-**Target:** `https://console.dev.kyrosos.com/ui/`  
-**Authentication:** `dev-token`  
-**Scope:** Desktop-first reassessment of Edges, Agents, Databricks, and Kuery  
-**Primary viewport:** 1440×900  
-**Secondary viewport:** 1280×720 attempted but blocked by target availability  
-**Mode:** Audit only; no source, configuration, infrastructure, or provider data was changed
+- **Audit date:** 2026-09-02
+- **Target:** `https://console.dev.kyrosos.com/ui/`
+- **Authentication:** `dev-token`
+- **Scope:** Desktop-first reassessment of Edges, Agents, Databricks, and Kuery
+- **Primary viewport:** 1440×900
+- **Secondary viewport:** 1280×720 attempted but blocked by target availability
+- **Mode:** Audit only; no source, configuration, infrastructure, or provider data was changed
 
 ## How this report supersedes the earlier addendum
 
