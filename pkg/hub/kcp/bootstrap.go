@@ -933,6 +933,21 @@ func (b *Bootstrapper) SetWorkspaceDisplayName(ctx context.Context, orgUUID, wsU
 	return b.patchWorkspaceAnnotation(ctx, orgUUID, wsUUID, WorkspaceDisplayNameAnnotation, displayName)
 }
 
+// EnsureChildWorkspaceDisplayName stamps the display-name annotation
+// only when the Workspace does not carry one yet. Reconcilers use this
+// to give bootstrap-provisioned workspaces a human-readable default
+// without clobbering a rename the user made since.
+func (b *Bootstrapper) EnsureChildWorkspaceDisplayName(ctx context.Context, orgUUID, wsUUID, displayName string) error {
+	current, err := b.GetWorkspaceDisplayName(ctx, orgUUID, wsUUID)
+	if err != nil {
+		return err
+	}
+	if current != "" {
+		return nil
+	}
+	return b.patchWorkspaceAnnotation(ctx, orgUUID, wsUUID, WorkspaceDisplayNameAnnotation, displayName)
+}
+
 // GetWorkspaceDisplayName reads the display-name annotation. Empty
 // string if absent. Workspace-not-found surfaces as IsNotFound.
 func (b *Bootstrapper) GetWorkspaceDisplayName(ctx context.Context, orgUUID, wsUUID string) (string, error) {
