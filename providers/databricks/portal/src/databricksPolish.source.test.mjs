@@ -189,8 +189,8 @@ test('wide provider surfaces stay readable at 4K and in detail/import views', as
   assert.match(styles, /@container manual-create-form \(min-width: 1800px\)[\s\S]*\.manual-create-body--guided[\s\S]*minmax\(17\.5rem, min\(32rem, 40%\)\)/)
   assert.match(styles, /@container manual-create-form \(min-width: 1800px\)[\s\S]*\.manual-create-fields-grid--connection[\s\S]*repeat\(3, minmax\(0, 1fr\)/)
   assert.match(styles, /@container manual-create-form \(min-width: 3000px\)[\s\S]*\.manual-create-form-fields--table \.form-grid[\s\S]*repeat\(4, minmax\(0, 1fr\)/)
-  assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.manual-create-form \.k-input[\s\S]*min-height: 44px/)
-  assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.manual-create-form \.k-create-actions\s*\{[\s\S]*position: static[\s\S]*z-index: auto/)
+  assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.manual-create-form input:not\(\[type='hidden'\]\)[\s\S]*min-height: 44px/)
+  assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.manual-create-form > \.manual-create-body--guided \+ div\s*\{[\s\S]*position: static[\s\S]*z-index: auto/)
   assert.match(warehouseCreate, /manual-create-support-note/)
   assert.match(warehouseCreate, /Can use and startable access before it reports Ready/)
   assert.match(wizard, /:class="\['import-body', `import-body--\$\{step\}`\]"/)
@@ -209,8 +209,8 @@ test('wide provider surfaces stay readable at 4K and in detail/import views', as
     assert.match(source, /<div(?: v-else)? class="databricks-resource-table">[\s\S]*<ResourceTable/)
     assert.doesNotMatch(source, /<ResourceTable\s+class="databricks-resource-table"/)
   }
-  assert.match(styles, /@media \(min-width: 1800px\)[\s\S]*databricks-resource-table \.k-table\.k-table--resource \.k-table__table[\s\S]*table-layout: fixed/)
-  assert.match(styles, /@media \(min-width: 1800px\)[\s\S]*databricks-resource-table \.k-table\.k-table--resource[\s\S]*width: 52%/)
+  assert.match(styles, /@media \(min-width: 1800px\)[\s\S]*databricks-resource-table table[\s\S]*table-layout: fixed/)
+  assert.match(styles, /@media \(min-width: 1800px\)[\s\S]*databricks-resource-table table > thead > tr > th:first-child[\s\S]*width: 52%/)
 })
 
 test('provider remount waits for tenant context before restoring return intent', async () => {

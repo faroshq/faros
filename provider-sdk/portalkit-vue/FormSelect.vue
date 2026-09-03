@@ -1,6 +1,14 @@
+<!-- CANONICAL SOURCE — provider-sdk/portalkit-vue. Do not edit vendored copies
+     under providers/*/portal/src/portalkit/; edit here and run
+     `make sync-portalkit`.
+
+     FormSelect owns its accessible combobox behavior and composes the shared
+     k-input/k-menu recipes. Its teleported panel carries a generic PortalKit
+     scope class because it is rendered outside the component root. -->
 <script setup lang="ts">
 import { Check, ChevronDown } from 'lucide-vue-next'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import { ensureFarosUIStyles } from '../portalkit/styles'
 
 export interface FormSelectOption {
   value: string
@@ -33,6 +41,8 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
+
+ensureFarosUIStyles()
 
 const instanceID = useId()
 const triggerID = computed(() => props.id || `form-select-${instanceID}`)
@@ -312,7 +322,7 @@ onBeforeUnmount(() => {
     <Teleport v-if="open" to="body">
       <div
         ref="panel"
-        class="k-menu k-form-select__panel faros-provider-databricks"
+        class="k-menu k-form-select__panel k-form-select__portal"
         :style="panelStyle"
         role="listbox"
         :id="listboxID"

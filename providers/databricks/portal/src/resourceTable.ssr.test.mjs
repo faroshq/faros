@@ -483,10 +483,10 @@ test('Databricks table wrapper keeps the local primary-column selector attached 
 
   assert.match(html, /<div class="databricks-resource-table">(?:<!--[\s\S]*?-->)?<div class="[^"]*k-table--queryable[^"]*k-table[^"]*k-table--resource[^"]*"/)
   assert.match(html, /databricks-resource-table">[\s\S]*<th class="[^"]*k-table__heading--primary/)
-  assert.match(style, /\.databricks-resource-table \.k-table\.k-table--resource \.k-table__heading--primary/)
-  assert.match(style, /\.databricks-resource-table \.k-table\.k-table--resource \.k-table__cell--primary/)
-  assert.match(style, /\.databricks-resource-table \.k-table\.k-table--resource \.k-table__table \{\s*table-layout: fixed;/)
-  assert.doesNotMatch(style, /\.databricks-resource-table\.k-table\.k-table--resource/)
+  assert.match(style, /\.databricks-resource-table table > thead > tr > th:first-child/)
+  assert.match(style, /\.databricks-resource-table table > tbody > tr:has\(> td:nth-child\(2\)\) > td:first-child/)
+  assert.match(style, /\.databricks-resource-table table \{\s*table-layout: fixed;/)
+  assert.doesNotMatch(style, /\.databricks-resource-table \.k-/)
 })
 
 test('simple tables are an explicit bounded-list variant without query or pagination controls', async () => {
@@ -3312,7 +3312,7 @@ test('import surfaces preserve modal caps and route width contracts through ultr
   const ultrawideBodyOffset = style.indexOf('faros-provider-databricks .import-route .import-primary > .import-body {', ultrawideOffset)
   const ultrawideBody = style.slice(ultrawideBodyOffset, style.indexOf('\n}', ultrawideBodyOffset) + 2)
   assert.match(ultrawideBody, /grid-column:\s*2[\s\S]*grid-row:\s*1/)
-  const ultrawideFooterOffset = style.indexOf('faros-provider-databricks .import-route .import-primary > .k-create-actions {', ultrawideOffset)
+  const ultrawideFooterOffset = style.indexOf('faros-provider-databricks .import-route .import-primary > footer {', ultrawideOffset)
   const ultrawideFooter = style.slice(ultrawideFooterOffset, style.indexOf('\n}', ultrawideFooterOffset) + 2)
   assert.match(ultrawideFooter, /grid-column:\s*2[\s\S]*grid-row:\s*2/)
   const ultrawideSourceOffset = style.indexOf('faros-provider-databricks .import-route .import-body--source .import-stack {', ultrawideOffset)
@@ -3812,7 +3812,7 @@ async function loadNavigationApp() {
   const components = {}
   for (const [name, path] of [
     ['ResourceImportWizard', '/src/ResourceImportWizard.vue'],
-    ['FormSelect', '/src/components/FormSelect.vue'],
+    ['FormSelect', '/src/portalkit/FormSelect.vue'],
     ['ConfirmDialog', '/src/portalkit/ConfirmDialog.vue'],
     ['CreateConnectionView', '/src/views/CreateConnectionView.vue'],
     ['ManualCreateGuidance', '/src/components/ManualCreateGuidance.vue'],

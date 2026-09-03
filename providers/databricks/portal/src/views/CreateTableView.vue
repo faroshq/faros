@@ -12,7 +12,7 @@ import { importPrerequisiteMessage, nextValidWarehouseRef, warehousesForConnecti
 import { resourceNameError } from '../resourceName'
 import type { DatabricksPrerequisiteKind } from '../journey'
 import type { Connection, Table, Warehouse } from '../types'
-import FormSelect from '../components/FormSelect.vue'
+import FormSelect from '../portalkit/FormSelect.vue'
 import ManualCreateGuidance from '../components/ManualCreateGuidance.vue'
 
 const props = defineProps<{

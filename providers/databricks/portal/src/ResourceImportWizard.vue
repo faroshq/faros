@@ -27,7 +27,7 @@ import {
   summarizeRegistration,
 } from './registrationFlow'
 import { resourceNameError } from './resourceName'
-import FormSelect from './components/FormSelect.vue'
+import FormSelect from './portalkit/FormSelect.vue'
 import type {
   DiscoveryCoordinates,
   InitializationResource,

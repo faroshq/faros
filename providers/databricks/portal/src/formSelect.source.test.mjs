@@ -11,6 +11,8 @@ const read = path => readFile(new URL(path, import.meta.url), 'utf8')
 const testDirectory = dirname(fileURLToPath(import.meta.url))
 const portalRoot = resolve(testDirectory, '..')
 const repositoryRoot = resolve(portalRoot, '../../..')
+const canonicalFormSelect = resolve(repositoryRoot, 'provider-sdk/portalkit-vue/FormSelect.vue')
+const vendoredFormSelect = resolve(portalRoot, 'src/portalkit/FormSelect.vue')
 let vite
 
 test.before(async () => {
@@ -33,8 +35,8 @@ test.before(async () => {
 test.after(async () => vite?.close())
 
 async function loadFormSelect() {
-  const module = await vite.ssrLoadModule('/src/components/FormSelect.vue')
-  const source = await readFile(resolve(portalRoot, 'src/components/FormSelect.vue'), 'utf8')
+  const module = await vite.ssrLoadModule('/src/portalkit/FormSelect.vue')
+  const source = await readFile(vendoredFormSelect, 'utf8')
   const template = source.match(/<template(?:\s[^>]*)?>([\s\S]*)<\/template>/)?.[1]
   assert.ok(template, 'FormSelect has a template for mounted behavior coverage')
   const [{ compile }, vueRuntime] = await Promise.all([
@@ -232,7 +234,13 @@ function keyEvent(key) {
 }
 
 test('FormSelect exposes the accessible keyboard and option contract', async () => {
-  const source = await read('./components/FormSelect.vue')
+  const [source, canonicalSource] = await Promise.all([
+    readFile(vendoredFormSelect, 'utf8'),
+    readFile(canonicalFormSelect, 'utf8'),
+  ])
+
+  assert.equal(source, canonicalSource, 'Databricks uses the synced canonical FormSelect')
+  assert.doesNotMatch(source, /databricks|faros-provider-databricks/, 'canonical FormSelect has no provider marker')
 
   for (const contract of [
     /export interface FormSelectOption/, /modelValue: string/, /options: readonly FormSelectOption\[\]/,
@@ -242,7 +250,8 @@ test('FormSelect exposes the accessible keyboard and option contract', async () 
     /:aria-activedescendant="activeDescendant"/, /:aria-describedby="describedby/, /:aria-labelledby="accessibleLabelledby"/,
     /:aria-required="required/, /:aria-invalid="invalid/, /data-form-select-trigger/,
     /role="listbox"/, /role="option"/, /:aria-selected=/, /:aria-disabled=/, /:disabled="option.disabled"/,
-    /class="k-menu-item k-form-select__option"/, /class="k-form-select__check"/,
+    /class="k-form-select"/, /class="k-input k-form-select__trigger"/,
+    /class="k-menu k-form-select__panel k-form-select__portal"/, /class="k-menu-item k-form-select__option"/, /class="k-form-select__check"/,
     /event\.key === 'ArrowDown'/, /event\.key === 'ArrowUp'/, /event\.key === 'Home'/, /event\.key === 'End'/,
     /event\.key === 'Enter'/, /event\.key === ' '/, /event\.key === 'Escape'/, /event\.key === 'Tab'/,
     /document\.addEventListener\('pointerdown'/, /document\.addEventListener\('focusin'/,
@@ -387,13 +396,16 @@ test('FormSelect mounts its teleported listbox and preserves keyboard interactio
 })
 
 test('FormSelect styling inherits k-menu language and stays viewport aware', async () => {
-  const styles = await read('./style.css')
-  assert.match(styles, /\.k-form-select\s*\{[\s\S]*min-width: 0/)
-  assert.match(styles, /\.k-form-select__panel[\s\S]*position: fixed/)
-  assert.match(styles, /\.k-form-select__panel[\s\S]*overflow-y: auto/)
-  assert.match(styles, /\.k-form-select__panel[\s\S]*z-index: 1000/)
-  assert.match(styles, /\.faros-provider-databricks\.k-form-select__panel/)
-  assert.match(styles, /\.k-form-select__option\.is-active:not\(:disabled\):not\(\.is-selected\)/)
-  assert.match(styles, /\.k-form-select__trigger[\s\S]*cursor: pointer/)
-  assert.match(styles, /\.manual-create-form \.k-form-select__trigger[\s\S]*min-height: 44px/)
+  const [canonicalStyles, providerStyles] = await Promise.all([
+    readFile(resolve(repositoryRoot, 'provider-sdk/portalkit/faros-ui.css'), 'utf8'),
+    read('./style.css'),
+  ])
+  assert.match(canonicalStyles, /\.k-form-select\s*\{[\s\S]*min-width: 0/)
+  assert.match(canonicalStyles, /\.k-form-select__panel\.k-form-select__portal[\s\S]*position: fixed/)
+  assert.match(canonicalStyles, /\.k-form-select__panel\.k-form-select__portal[\s\S]*overflow-y: auto/)
+  assert.match(canonicalStyles, /\.k-form-select__panel\.k-form-select__portal[\s\S]*z-index: 1000/)
+  assert.match(canonicalStyles, /\.k-form-select__portal \.k-form-select__option\.is-active:not\(:disabled\):not\(\.is-selected\)/)
+  assert.match(canonicalStyles, /\.k-form-select__trigger[\s\S]*cursor: pointer/)
+  assert.match(providerStyles, /\.manual-create-form \[data-form-select-trigger\][\s\S]*min-height: 44px/)
+  assert.doesNotMatch(providerStyles, /\.k-[A-Za-z0-9_-]+/)
 })

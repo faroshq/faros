@@ -117,10 +117,11 @@ test('lazy tree uses dense transparent rows without decorative focus glow', asyn
 
 test('import surfaces keep readable placeholders, semantic status colors, and unique review IDs', async () => {
   const styles = await readFile(new URL('./style.css', import.meta.url), 'utf8')
+  const canonicalStyles = await readFile(new URL('../../../../provider-sdk/portalkit/faros-ui.css', import.meta.url), 'utf8')
   const wizard = await readFile(new URL('./ResourceImportWizard.vue', import.meta.url), 'utf8')
   const providerTokens = styles.match(/faros-provider-databricks \{([\s\S]*?)\n\}/)?.[1] ?? ''
-  const selectPlaceholder = styles.match(/faros-provider-databricks \.k-form-select__value\.is-placeholder \{([^}]*)\}/)?.[1] ?? ''
-  const inputPlaceholder = styles.match(/faros-provider-databricks \.import-dialog \.k-input::placeholder \{([^}]*)\}/)?.[1] ?? ''
+  const selectPlaceholder = canonicalStyles.match(/\.k-form-select__value\.is-placeholder \{([^}]*)\}/)?.[1] ?? ''
+  const inputPlaceholder = styles.match(/faros-provider-databricks \.import-dialog input::placeholder \{([^}]*)\}/)?.[1] ?? ''
   for (const token of ['accent', 'danger', 'success', 'warning']) {
     assert.match(providerTokens, new RegExp(`--databricks-readable-${token}:\\s*color-mix\\([^;]*var\\(--color-${token}`), `${token} has a foreground-aware semantic token`)
   }

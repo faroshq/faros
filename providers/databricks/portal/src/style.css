@@ -187,16 +187,17 @@ faros-provider-databricks .databricks-resource-sections {
   /* The shared resource-table contract gives the primary column all remaining
    * width. On ultrawide Databricks views, switch to a fixed distribution so
    * identity stays prominent without starving the operational columns. */
-  faros-provider-databricks .databricks-resource-table .k-table.k-table--resource .k-table__table {
+  faros-provider-databricks .databricks-resource-table table {
     table-layout: fixed;
   }
 
-  faros-provider-databricks .databricks-resource-table .k-table.k-table--resource .k-table__heading--primary,
-  faros-provider-databricks .databricks-resource-table .k-table.k-table--resource .k-table__cell--primary {
+  faros-provider-databricks .databricks-resource-table table > thead > tr > th:first-child,
+  faros-provider-databricks .databricks-resource-table table > tbody > tr:has(> td:nth-child(2)) > td:first-child {
     width: 52%;
   }
 
-  faros-provider-databricks .databricks-resource-table .k-table.k-table--resource :is(.k-table__heading, .k-table__cell):not(.k-table__heading--primary, .k-table__cell--primary) {
+  faros-provider-databricks .databricks-resource-table table > thead > tr > th:not(:first-child),
+  faros-provider-databricks .databricks-resource-table table > tbody > tr:has(> td:nth-child(2)) > td:not(:first-child) {
     overflow: hidden;
     text-overflow: ellipsis;
     width: auto;
@@ -532,102 +533,10 @@ faros-provider-databricks .field-hint {
   line-height: 1.5;
 }
 
-/* FormSelect keeps the shared menu grammar while carrying the sizing and
- * viewport behavior needed by route-owned forms. The trigger remains a normal
- * form control; the listbox is teleported so clipped cards cannot hide it. */
-faros-provider-databricks .k-form-select {
-  min-width: 0;
-  position: relative;
-}
-
-faros-provider-databricks .k-form-select__trigger {
-  align-items: center;
-  cursor: pointer;
-  display: flex;
-  gap: 8px;
-  justify-content: space-between;
-  min-width: 0;
-  text-align: left;
-}
-
-faros-provider-databricks .k-form-select__trigger:disabled {
-  cursor: not-allowed;
-}
-
-faros-provider-databricks .k-form-select__value {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-faros-provider-databricks .k-form-select__value.is-placeholder {
+/* Keep imported text-entry placeholders readable; FormSelect owns its
+ * canonical placeholder recipe in PortalKit. */
+faros-provider-databricks .import-dialog input::placeholder {
   color: var(--color-text-secondary, #8a8ca6);
-}
-
-faros-provider-databricks .import-dialog .k-input::placeholder {
-  color: var(--color-text-secondary, #8a8ca6);
-}
-
-faros-provider-databricks .k-form-select__chevron {
-  flex: none;
-  transition: transform 0.15s ease;
-}
-
-faros-provider-databricks .k-form-select.is-open .k-form-select__chevron {
-  transform: rotate(180deg);
-}
-
-/* Teleported panels carry the provider marker class because they sit under
- * body rather than under the light-DOM provider element. Both selectors keep
- * local rules scoped without leaking a bare component class into the host. */
-faros-provider-databricks .k-form-select__panel,
-.faros-provider-databricks.k-form-select__panel {
-  box-sizing: border-box;
-  max-width: calc(100vw - 16px);
-  min-width: 200px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  position: fixed;
-  z-index: 1000;
-}
-
-faros-provider-databricks .k-form-select__option,
-.faros-provider-databricks.k-form-select__panel .k-form-select__option {
-  justify-content: space-between;
-  min-width: 0;
-}
-
-faros-provider-databricks .k-form-select__option.is-active:not(:disabled):not(.is-selected),
-.faros-provider-databricks.k-form-select__panel .k-form-select__option.is-active:not(:disabled):not(.is-selected) {
-  background: var(--color-surface-overlay, #171927);
-  color: var(--color-text-primary, #e9e9f2);
-}
-
-faros-provider-databricks .k-form-select__option-label,
-.faros-provider-databricks.k-form-select__panel .k-form-select__option-label {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-faros-provider-databricks .k-form-select__check,
-.faros-provider-databricks.k-form-select__panel .k-form-select__check {
-  color: var(--color-accent, #8b6bff);
-  flex: none;
-}
-
-faros-provider-databricks .k-form-select__empty,
-.faros-provider-databricks.k-form-select__panel .k-form-select__empty {
-  color: var(--color-text-secondary, #8a8ca6);
-  font-size: 12px;
-  margin: 6px 8px;
-}
-
-faros-provider-databricks .k-form-select__value-input {
-  block-size: 0;
-  inline-size: 0;
-  position: absolute;
 }
 
 faros-provider-databricks .field-disclosure {
@@ -911,7 +820,7 @@ faros-provider-databricks .import-primary {
   min-width: 0;
 }
 
-faros-provider-databricks .import-primary > :is(.import-steps, .import-body, .import-actions, .k-create-actions) {
+faros-provider-databricks .import-primary > :is(.import-steps, .import-body, .import-actions, footer) {
   width: 100%;
 }
 
@@ -991,7 +900,7 @@ faros-provider-databricks .import-context-values code {
   font-size: inherit;
 }
 
-faros-provider-databricks .import-route .k-create-description {
+faros-provider-databricks .import-route > header > p {
   color: var(--color-text-secondary, #8a8ca6);
 }
 
@@ -1098,7 +1007,7 @@ faros-provider-databricks .lazy-tree-expander svg { height: 14px; transition: tr
 faros-provider-databricks .lazy-tree-expander svg.expanded { transform: rotate(90deg); }
 faros-provider-databricks .lazy-tree-expander-spacer { height: 44px; min-height: 44px; min-width: 44px; width: 44px; }
 faros-provider-databricks .lazy-tree-checkbox-hit { align-items: center; cursor: pointer; display: flex; height: 44px; justify-content: center; min-height: 44px; min-width: 44px; width: 44px; }
-faros-provider-databricks .lazy-tree-checkbox-hit .k-checkbox { flex: 0 0 auto; }
+faros-provider-databricks .lazy-tree-checkbox-hit input { flex: 0 0 auto; }
 faros-provider-databricks .lazy-tree-copy { display: grid; gap: 2px; min-width: 0; }
 faros-provider-databricks .lazy-tree-copy strong { color: var(--color-text-primary, #e9e9f2); font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace); font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 faros-provider-databricks .lazy-tree-copy small { color: var(--color-text-secondary, #8a8ca6); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1128,7 +1037,7 @@ faros-provider-databricks .spin { animation: provider-spin .8s linear infinite; 
 faros-provider-databricks .import-actions { border-top: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.07)); }
 faros-provider-databricks .import-spacer { flex: 1; }
 
-faros-provider-databricks .import-primary > :is(.import-actions, .k-create-actions) .k-btn {
+faros-provider-databricks .import-primary > :is(.import-actions, footer) :where(button, a) {
   min-height: 44px;
 }
 
@@ -1173,7 +1082,7 @@ faros-provider-databricks .import-primary > :is(.import-actions, .k-create-actio
     grid-row: 1;
   }
 
-  faros-provider-databricks .import-route .import-primary > .k-create-actions {
+  faros-provider-databricks .import-route .import-primary > footer {
     grid-column: 2;
     grid-row: 2;
   }
@@ -1282,12 +1191,12 @@ faros-provider-databricks .import-primary > :is(.import-actions, .k-create-actio
   faros-provider-databricks .prerequisite-action { margin-left: 0; }
   faros-provider-databricks .review-row,
   faros-provider-databricks .result-row { grid-template-columns: minmax(0, 1fr); }
-  faros-provider-databricks .manual-create-form .k-input,
-  faros-provider-databricks .manual-create-form .k-form-select__trigger,
-  faros-provider-databricks .manual-create-form .k-create-actions :is(button, a) {
+  faros-provider-databricks .manual-create-form input:not([type='hidden']),
+  faros-provider-databricks .manual-create-form [data-form-select-trigger],
+  faros-provider-databricks .manual-create-form > .manual-create-body--guided + div :is(button, a) {
     min-height: 44px;
   }
-  faros-provider-databricks .manual-create-form .k-create-actions {
+  faros-provider-databricks .manual-create-form > .manual-create-body--guided + div {
     position: static;
     z-index: auto;
   }
