@@ -1987,26 +1987,19 @@ function resourceListStubComponents() {
       }, props.rows?.length ? 'Rows' : 'Table')
     },
   }
-  const StatusBadgeStub = { setup: () => () => h('span') }
   const SplitCreateButtonStub = {
     props: { kind: String },
     setup(props) {
-      return () => h('button', { class: 'split-create-main' }, `Create ${props.kind}`)
+      return () => h('div', { class: 'split-create', 'data-kind': props.kind }, `New ${props.kind}`)
     },
   }
+  const StatusBadgeStub = { setup: () => () => h('span') }
   return {
     DatabricksEmptyState: EmptyStateStub,
     ResourceTable: ResourceTableStub,
     SplitCreateButton: SplitCreateButtonStub,
     StatusBadge: StatusBadgeStub,
   }
-}
-
-function collectionCreateAction(mounted, kind) {
-  if (kind === 'connections') {
-    return mounted.find(node => node.type === 'button' && hostText(node).includes('Add connection'))
-  }
-  return mounted.find(node => node.type === 'button' && className(node).includes('split-create-main'))
 }
 
 function resourceListPendingRead(pendingReads, kind) {
@@ -2025,7 +2018,13 @@ async function settleResourceListPage(pendingReads, pageKind, result) {
   await flushVue()
 }
 
-test('known-empty collection surfaces stay mounted while foreground refreshes settle', async () => {
+function resourceListCreateControl(mounted, kind) {
+  return mounted.find(node => kind === 'connections'
+    ? node.type === 'button' && hostText(node).includes('Add connection')
+    : className(node).split(/\s+/).includes('split-create'))
+}
+
+test('collection create controls wait for authority and known-empty surfaces stay mounted during refresh', async () => {
   const ConnectionsView = await loadMountedSFC('/src/views/ConnectionsView.vue')
   const WarehousesView = await loadMountedSFC('/src/views/WarehousesView.vue')
   const TablesView = await loadMountedSFC('/src/views/TablesView.vue')
@@ -2069,13 +2068,14 @@ test('known-empty collection surfaces stay mounted while foreground refreshes se
         assert.equal(pendingReads.filter(read => testCase.supportKinds.includes(read.kind)).length, testCase.supportKinds.length, `${testCase.kind} support reads are pending`)
         assert.equal(pendingReads.filter(read => read.kind === testCase.pageKind).length, testCase.supportKinds.length ? 0 : 1, `${testCase.kind} initial page read follows support initialization`)
         assert.equal(mounted.find(node => className(node).includes('k-table'))?.props?.['data-loading'], 'true', `${testCase.kind} initial read shows the table loading state`)
-        assert.equal(collectionCreateAction(mounted, testCase.kind), null, `${testCase.kind} hides create actions before the first authoritative result`)
+        assert.equal(resourceListCreateControl(mounted, testCase.kind), null, `${testCase.kind} withholds create controls while initial authority is unknown`)
 
         await settleResourceListSupport(pendingReads, testCase.supportKinds)
         assert.equal(pendingReads.filter(read => read.kind === testCase.pageKind).length, 1, `${testCase.kind} initial page read is pending`)
+        assert.equal(resourceListCreateControl(mounted, testCase.kind), null, `${testCase.kind} withholds create controls until its collection page settles`)
         await settleResourceListPage(pendingReads, testCase.pageKind, { items: [], continue: null })
         assert.ok(mounted.find(node => className(node).includes('databricks-first-run')), `${testCase.kind} shows onboarding after an authoritative empty result`)
-        assert.equal(collectionCreateAction(mounted, testCase.kind), null, `${testCase.kind} keeps create actions hidden for an authoritative empty result`)
+        assert.equal(resourceListCreateControl(mounted, testCase.kind), null, `${testCase.kind} onboarding owns the empty-state action`)
 
         mounted.instance.setupState.load()
         await nextTick()
@@ -2093,7 +2093,7 @@ test('known-empty collection surfaces stay mounted while foreground refreshes se
         const table = mounted.find(node => className(node).includes('k-table'))
         assert.equal(table?.props?.['data-row-count'], '1', `${testCase.kind} rows replace onboarding directly after refresh`)
         assert.equal(mounted.find(node => className(node).includes('databricks-first-run')), null, `${testCase.kind} removes onboarding once rows are authoritative`)
-        assert.ok(collectionCreateAction(mounted, testCase.kind), `${testCase.kind} shows create actions for a loaded non-empty paginated result`)
+        assert.ok(resourceListCreateControl(mounted, testCase.kind), `${testCase.kind} shows create controls once non-empty authority is established`)
 
         if (testCase.kind === 'connections') {
           apiModule.api.deleteConnection = async () => {}
