@@ -3037,6 +3037,8 @@ test('route-owned import is a page while modal mode keeps modal semantics', asyn
   const Wizard = (await vite.ssrLoadModule('/src/ResourceImportWizard.vue')).default
   const routeHTML = await renderToString(createSSRApp(Wizard, { kind: 'table', routeOwned: true }))
   const modalHTML = await renderToString(createSSRApp(Wizard, { kind: 'table', routeOwned: false }))
+  assert.match(routeHTML, /class="[^"]*import-dialog--route[^"]*k-create-surface[^"]*k-create-surface--wide[^"]*"/)
+  assert.doesNotMatch(modalHTML, /class="[^"]*import-dialog--route[^"]*"/)
   assert.doesNotMatch(routeHTML, /role="dialog"/)
   assert.doesNotMatch(routeHTML, /aria-modal=/)
   assert.match(modalHTML, /role="dialog"/)
@@ -3057,6 +3059,28 @@ test('route-owned import is a page while modal mode keeps modal semantics', asyn
   assert.match(app, /<TablesView[\s\S]*:key="`tables:\$\{contextVersion\}`"/)
   assert.doesNotMatch(app, /resourceVersion/)
   assert.match(app, /Keying the cache by the context[\s\S]*generation clears every cached tenant snapshot/)
+})
+
+test('import surfaces preserve the modal cap and fill the shared create column on routes', async () => {
+  const [style, shared] = await Promise.all([
+    readFile(new URL('./style.css', import.meta.url), 'utf8'),
+    readFile(canonicalFarosUIStyle, 'utf8'),
+  ])
+  const modalOffset = style.indexOf('faros-provider-databricks .import-dialog {')
+  const routeOffset = style.indexOf('faros-provider-databricks .import-dialog--route {')
+  assert.ok(modalOffset >= 0, 'modal import surface has a base rule')
+  assert.ok(routeOffset > modalOffset, 'route import override follows the modal rule in the cascade')
+
+  const modalRule = style.slice(modalOffset, style.indexOf('\n}', modalOffset) + 2)
+  const routeRule = style.slice(routeOffset, style.indexOf('\n}', routeOffset) + 2)
+  assert.match(modalRule, /width:\s*min\(720px,\s*100%\)/)
+  assert.match(routeRule, /width:\s*100%/)
+  assert.match(routeRule, /max-height:\s*none/)
+
+  const createSurface = shared.match(/\.k-create-surface\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''
+  const wideSurface = shared.match(/\.k-create-surface--wide\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''
+  assert.match(createSurface, /width:\s*100%/)
+  assert.match(wideSurface, /max-width:\s*none/)
 })
 
 test('resource detail deletes expose pending state, truthful status, and real browser backlinks', async () => {
