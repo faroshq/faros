@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ArrowLeft, Database, LoaderCircle, X } from 'lucide-vue-next'
+import { ArrowLeft, ArrowRight, Database, LoaderCircle, X } from 'lucide-vue-next'
 import { api } from './api'
 import { contextGenerationKey } from './context'
 import { formatDatabricksError } from './errors'
@@ -553,8 +553,18 @@ onBeforeUnmount(() => {
               </p>
             </template>
           </div>
-          <div v-if="!connections.length && !initializationPending && initializationState.connections === 'success'" class="prerequisite">A connection is required. <button class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="resolvePrerequisite('connection')">Create connection</button></div>
-          <div v-else-if="sameConnectionWarehouseMissing" class="prerequisite">A registered warehouse on this connection is required. <button class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="resolvePrerequisite('warehouse')">Register warehouse</button></div>
+          <div v-if="!connections.length && !initializationPending && initializationState.connections === 'success'" class="prerequisite" role="status">
+            <span class="prerequisite-copy">A connection is required.</span>
+            <button class="k-btn k-btn--ghost prerequisite-action" type="button" @click="resolvePrerequisite('connection')">
+              Create connection <ArrowRight :size="14" :stroke-width="1.75" aria-hidden="true" />
+            </button>
+          </div>
+          <div v-else-if="sameConnectionWarehouseMissing" class="prerequisite" role="status">
+            <span class="prerequisite-copy">A registered warehouse on this connection is required.</span>
+            <button class="k-btn k-btn--ghost prerequisite-action" type="button" @click="resolvePrerequisite('warehouse')">
+              Register warehouse <ArrowRight :size="14" :stroke-width="1.75" aria-hidden="true" />
+            </button>
+          </div>
           <p v-if="!browseReady" :id="browseGuidanceID" class="sr-only">{{ browseGuidance }}</p>
         </div>
         <LazyCheckboxTree v-else-if="step === 'browse'" :tree="tree" :label="`Available ${plural}`" :root-loading="rootLoading" :root-error="rootError" :root-next-page-token="rootNextPageToken" :busy="branchChecking || submitting" @expand="expandNode" @toggle="toggleNode" @load-more="loadMore" />

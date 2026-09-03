@@ -7,12 +7,33 @@ const read = path => readFile(new URL(path, import.meta.url), 'utf8')
 test('browse prerequisites are actionable and describe disabled Browse', async () => {
   const source = await read('./ResourceImportWizard.vue')
   assert.match(source, /emit\('prerequisite', kind\)/)
-  assert.match(source, />Create connection<\/button>/)
-  assert.match(source, />Register warehouse<\/button>/)
+  assert.match(source, /class="k-btn k-btn--ghost prerequisite-action"[\s\S]*Create connection\s*<ArrowRight/)
+  assert.match(source, /class="k-btn k-btn--ghost prerequisite-action"[\s\S]*Register warehouse\s*<ArrowRight/)
   assert.match(source, /:aria-describedby="!browseReady \? browseGuidanceID : undefined"/)
   assert.match(source, /:id="browseGuidanceID" class="sr-only"/)
   assert.doesNotMatch(source, /class="initialization-status"[^>]*aria-live/)
   assert.match(source, /browseReady \? 'Prerequisites ready\.' : 'Prerequisite checks complete\.'/)
+})
+
+test('prerequisite recovery actions share the compact callout pattern', async () => {
+  const [wizard, warehouse, table, styles] = await Promise.all([
+    read('./ResourceImportWizard.vue'),
+    read('./views/CreateWarehouseView.vue'),
+    read('./views/CreateTableView.vue'),
+    read('./style.css'),
+  ])
+
+  for (const source of [wizard, warehouse, table]) {
+    assert.match(source, /class="prerequisite-copy"/)
+    assert.match(source, /class="k-btn k-btn--ghost prerequisite-action"/)
+    assert.match(source, /<ArrowRight[^>]*:stroke-width="1\.75"[^>]*aria-hidden="true"\s*\/>/)
+  }
+
+  const prerequisite = styles.match(/faros-provider-databricks \.prerequisite \{([\s\S]*?)\n\}/)?.[1] ?? ''
+  assert.match(prerequisite, /display:\s*flex/)
+  assert.match(prerequisite, /gap:\s*12px/)
+  assert.match(prerequisite, /justify-content:\s*space-between/)
+  assert.match(styles, /@media \(max-width: 620px\) \{[\s\S]*?\.prerequisite \{[\s\S]*?flex-wrap:\s*wrap;/)
 })
 
 test('all three collections use one first-run journey without changing page width', async () => {

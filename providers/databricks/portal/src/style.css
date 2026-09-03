@@ -634,8 +634,9 @@ faros-provider-databricks .result-state.created { background: var(--color-succes
 faros-provider-databricks .result-state.existing { background: var(--color-accent-subtle, rgba(139, 107, 255, 0.14)); color: var(--color-accent, #8b6bff); }
 faros-provider-databricks .result-state.conflict,
 faros-provider-databricks .result-state.failed { background: var(--color-danger-subtle, rgba(255, 93, 93, 0.12)); color: var(--color-danger, #ff5d5d); }
-faros-provider-databricks .prerequisite { background: var(--color-warning-subtle, rgba(240, 166, 58, 0.12)); border: 1px solid color-mix(in srgb, var(--color-warning, #f0a63a) 35%, transparent); border-radius: 4px; color: var(--color-text-primary, #e9e9f2); font-size: 12px; padding: 10px 12px; }
-faros-provider-databricks .prerequisite .databricks-inline-action { color: var(--color-accent, #8b6bff); margin-left: 5px; }
+faros-provider-databricks .prerequisite { align-items: center; background: var(--color-warning-subtle, rgba(240, 166, 58, 0.12)); border: 1px solid color-mix(in srgb, var(--color-warning, #f0a63a) 35%, transparent); border-radius: 4px; color: var(--color-text-primary, #e9e9f2); display: flex; font-size: 12px; gap: 12px; justify-content: space-between; padding: 10px 12px; }
+faros-provider-databricks .prerequisite-copy { min-width: 0; }
+faros-provider-databricks .prerequisite-action { flex: 0 0 auto; margin-left: auto; }
 faros-provider-databricks .initialization-status { min-height: 18px; }
 faros-provider-databricks .initialization-phase,
 faros-provider-databricks .initialization-summary { align-items: center; color: var(--color-text-secondary, #8a8ca6); display: flex; font-size: 11px; gap: 7px; margin: 0; }
@@ -665,6 +666,9 @@ faros-provider-databricks .import-spacer { flex: 1; }
     padding: 10px calc(10px + var(--app-inset-right, 0px)) calc(10px + var(--app-inset-bottom, 0px)) calc(10px + var(--app-inset-left, 0px));
   }
   faros-provider-databricks .import-dialog { max-height: calc(100vh - 20px); }
+  faros-provider-databricks .prerequisite { align-items: flex-start; flex-wrap: wrap; }
+  faros-provider-databricks .prerequisite-copy { flex: 1 1 100%; }
+  faros-provider-databricks .prerequisite-action { margin-left: 0; }
   faros-provider-databricks .review-row,
   faros-provider-databricks .result-row { grid-template-columns: minmax(0, 1fr); }
 }

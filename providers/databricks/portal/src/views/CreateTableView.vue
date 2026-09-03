@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, LoaderCircle, RefreshCw } from 'lucide-vue-next'
+import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-vue-next'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../api'
 import { contextGenerationKey } from '../context'
@@ -269,9 +269,13 @@ watch(() => form.connectionRef, connectionRef => {
         <button class="k-btn k-btn--ghost" type="button" @click="load"><RefreshCw :size="14" aria-hidden="true" /> Retry</button>
       </p>
       <div v-if="tableImportBlocker" class="prerequisite" role="status">
-        {{ tableImportBlocker }}
-        <button v-if="!editing && !hasSelectedConnection" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'connection')">Create connection</button>
-        <button v-else-if="!editing && !formWarehouses.length" class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'warehouse')">Register warehouse</button>
+        <span class="prerequisite-copy">{{ tableImportBlocker }}</span>
+        <button v-if="!editing && !hasSelectedConnection" class="k-btn k-btn--ghost prerequisite-action" type="button" @click="emit('prerequisite', 'connection')">
+          Create connection <ArrowRight :size="14" :stroke-width="1.75" aria-hidden="true" />
+        </button>
+        <button v-else-if="!editing && !formWarehouses.length" class="k-btn k-btn--ghost prerequisite-action" type="button" @click="emit('prerequisite', 'warehouse')">
+          Register warehouse <ArrowRight :size="14" :stroke-width="1.75" aria-hidden="true" />
+        </button>
       </div>
       <div class="form-grid">
         <label class="field" for="table-name">

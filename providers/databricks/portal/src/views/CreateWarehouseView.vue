@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeft, LoaderCircle, RefreshCw } from 'lucide-vue-next'
+import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-vue-next'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { contextGenerationKey } from '../context'
@@ -186,8 +186,10 @@ onBeforeUnmount(() => {
         <button class="k-btn k-btn--ghost" type="button" @click="load"><RefreshCw :size="14" aria-hidden="true" /> Retry</button>
       </p>
       <p v-if="loaded && !hasConnections" class="prerequisite" role="status">
-        Add a connection before registering a warehouse.
-        <button class="k-btn k-btn--ghost databricks-inline-action" type="button" @click="emit('prerequisite', 'connection')">Create connection</button>
+        <span class="prerequisite-copy">Add a connection before registering a warehouse.</span>
+        <button class="k-btn k-btn--ghost prerequisite-action" type="button" @click="emit('prerequisite', 'connection')">
+          Create connection <ArrowRight :size="14" :stroke-width="1.75" aria-hidden="true" />
+        </button>
       </p>
         <div class="field">
           <label class="field-label" for="warehouse-connection">Connection</label>
