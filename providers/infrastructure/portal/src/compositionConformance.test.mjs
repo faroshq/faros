@@ -8,6 +8,10 @@ const viewValue = readFileSync(new URL('./components/ViewValue.vue', import.meta
 const templateCard = readFileSync(new URL('./components/TemplateCard.vue', import.meta.url), 'utf8')
 
 describe('Infrastructure composition contracts', () => {
+  it('separates provider tabs from routed page content', () => {
+    expect(styles).toMatch(/\.app > \.k-tabs \{[\s\S]*margin-bottom: 16px;/)
+  })
+
   it('adds deliberate columns for wide template catalogs', () => {
     expect(styles).toMatch(/@media \(min-width: 1440px\)[\s\S]*repeat\(4, minmax\(0, 1fr\)\)/)
     expect(styles).toMatch(/@media \(min-width: 1920px\)[\s\S]*repeat\(5, minmax\(0, 1fr\)\)/)
