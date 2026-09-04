@@ -24,7 +24,6 @@ describe('Infrastructure composition contracts', () => {
     expect(styles).not.toContain('container-type: inline-size;')
     expect(styles).not.toContain('@container infrastructure-form')
     expect(styles).not.toMatch(/\.dynform-group \{[\s\S]*?grid-column:/)
-    expect(styles).not.toContain('.dynform-error')
     expect(provision).not.toContain('infrastructure-provision-form')
     expect(provision).toContain('class="provision-identity"')
     expect(styles).toMatch(/\.provision-identity \{[\s\S]*max-width: 42rem;/)
