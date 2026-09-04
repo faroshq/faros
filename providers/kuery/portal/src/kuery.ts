@@ -21,7 +21,7 @@ export function useKueryApi(context: Ref<FarosContext | null>): { api: Readonly<
   const api = computed(() => {
     const request = requestContext.value
     return request.basePath && request.token
-      ? createKueryApi({ basePath: request.basePath, headers: request.headers })
+      ? createKueryApi({ basePath: request.basePath, headers: request.headers, fetch: request.fetch })
       : null
   })
   return {

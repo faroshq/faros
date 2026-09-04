@@ -8,7 +8,7 @@ import MissingCredentialsPage from './views/MissingCredentialsPage.vue'
 import Tabs from './portalkit/Tabs.vue'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
 import { resolveConfirm } from './portalkit/confirm'
-import { setBasePath, setTenant, setToken } from './api'
+import { setBasePath, setHostFetch, setTenant, setToken } from './api'
 import { createResourceTombstones } from './refresh'
 import type { FarosContext } from './types'
 import { useDelayedLoading } from './portalkit/useDelayedLoading'
@@ -85,6 +85,7 @@ watch(
     // setter invalidates in-flight reads, while this owner remounts pages so
     // no route-local state crosses an authority change.
     setBasePath(basePath)
+    setHostFetch(props.ctx?.fetch)
     setToken(token)
     setTenant(tenant)
     resolveConfirm(false)

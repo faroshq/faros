@@ -1,7 +1,8 @@
-import { serviceBase as providerServiceBase } from './portalkit/tenant'
+import { providerFetch, serviceBase as providerServiceBase, type ProviderFetch } from './portalkit/tenant'
 
 /** The context fields that affect a Kuery service request. */
 export interface KueryRequestContextInput {
+  fetch?: ProviderFetch | null
   token?: string | null
   tenant?: string | null
   orgUUID?: string | null
@@ -12,6 +13,8 @@ export interface KueryRequestContextInput {
 /** Immutable request inputs captured before an async Kuery read starts. */
 export interface KueryRequestContext {
   basePath: string
+  /** Host-owned transport (injects Authorization); falls back to fetch + token on older hosts. */
+  fetch: ProviderFetch
   headers: Record<string, string>
   /** Includes the bearer token so token rotation fences an in-flight read. */
   identity: string
@@ -38,8 +41,7 @@ export function createKueryRequestContext(context: KueryRequestContextInput | nu
   const scopeIdentity = JSON.stringify([basePath, orgUUID, workspaceUUID])
   const identity = JSON.stringify([basePath, token, orgUUID, workspaceUUID])
   const headers: Record<string, string> = {}
-  if (token) headers.Authorization = `Bearer ${token}`
   if (orgUUID) headers['X-Faros-Org'] = orgUUID
   if (workspaceUUID) headers['X-Faros-Workspace'] = workspaceUUID
-  return { basePath, headers, identity, scopeIdentity, token }
+  return { basePath, fetch: providerFetch(context), headers, identity, scopeIdentity, token }
 }

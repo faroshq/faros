@@ -80,12 +80,23 @@ function revokeProviderBootstrapGeneration(doc: Document, name: string, generati
   generations[name] = nextProviderBootstrapGeneration(doc)
 }
 
+export interface ProviderScriptOptions {
+  // Subresource Integrity metadata ("sha384-...") the hub computed for this
+  // bundle at registration (catalog `mainJSIntegrity`). When present the
+  // browser refuses a /main.js whose content differs; the ?v= cache-buster is
+  // irrelevant to that check because SRI hashes the response body, not the
+  // URL. When absent the bundle loads unpinned, which is logged: a provider
+  // bundle executes as trusted code in this document.
+  integrity?: string | null
+}
+
 function injectProviderScript(
   doc: Document,
   name: string,
   version: string,
   bootstrapGeneration: string,
   timeoutMs: number,
+  integrity: string | null,
 ): ProviderScriptAttempt {
   const scriptID = `faros-provider-script-${name}`
   const current = doc.getElementById(scriptID) as HTMLScriptElement | null
@@ -123,6 +134,18 @@ function injectProviderScript(
     script.id = scriptID
     script.src = src
     script.async = true
+    if (integrity) {
+      // crossorigin is required for the browser to enforce integrity even on
+      // a same-origin script when the response is served with CORS headers;
+      // 'anonymous' sends no credentials the bundle fetch does not need.
+      script.integrity = integrity
+      script.crossOrigin = 'anonymous'
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[faros] loading provider "${name}" bundle without an integrity pin; the hub has not hashed ${src}`,
+      )
+    }
     script.dataset.farosProviderVersion = version
     // Provider bootstraps with mutable global side effects must verify this
     // host-issued generation before installing them. Removing a prepared
@@ -153,8 +176,10 @@ export function loadProviderScript(
   version: string | undefined,
   doc: Document = document,
   timeoutMs: number = PROVIDER_SCRIPT_LOAD_TIMEOUT_MS,
+  options: ProviderScriptOptions = {},
 ): Promise<void> {
   const requestedVersion = version ?? '0'
+  const integrity = options.integrity || null
   const loads = documentLoads(doc)
   const current = loads.get(name)
   if (current?.version === requestedVersion) return current.promise
@@ -184,7 +209,7 @@ export function loadProviderScript(
     bootstrapGeneration,
     promise: predecessor.then(() => {
       if (cancelled) throw cancelled
-      attempt = injectProviderScript(doc, name, requestedVersion, bootstrapGeneration, timeoutMs)
+      attempt = injectProviderScript(doc, name, requestedVersion, bootstrapGeneration, timeoutMs, integrity)
       return attempt.promise
     }),
     cancel: (reason = new Error(`cancelled provider "${name}" version ${requestedVersion}`)) => {

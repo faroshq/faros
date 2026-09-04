@@ -644,6 +644,35 @@ type CatalogEntryStatus struct {
 	// Conditions describe the current state of the provider.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// UI reports what the hub observed about the provider's portal bundle.
+	// Nil when the hub serves no /main.js for this entry: UI-less providers,
+	// builtinRoute providers, and org-owned providers whose bundle travels the
+	// edge tunnel and is never dialled by the hub.
+	// +optional
+	UI *ProviderUIStatus `json:"ui,omitempty"`
+}
+
+// ProviderUIStatus records the Subresource Integrity pin the hub computed for
+// a provider's portal bundle. Provider bundles execute as fully trusted code in
+// the portal document, so the pin is what ties the code the browser runs to
+// the code the hub admitted at registration.
+type ProviderUIStatus struct {
+	// MainJSIntegrity is the SRI metadata ("sha384-<base64>") of the
+	// provider's /main.js as fetched by the hub from spec.ui.url, or read from
+	// the embedded assets of a first-party provider. The portal sets it as the
+	// integrity attribute of the <script> that loads the bundle, so a bundle
+	// that changes after registration without a version change is refused by
+	// the browser instead of executing in the host document. The hub recomputes
+	// it whenever spec.version or status.reportedVersion changes and on a
+	// periodic resync.
+	// +optional
+	MainJSIntegrity string `json:"mainJSIntegrity,omitempty"`
+
+	// MainJSIntegrityVersion is the provider version (status.reportedVersion,
+	// falling back to spec.version) MainJSIntegrity was computed for.
+	// +optional
+	MainJSIntegrityVersion string `json:"mainJSIntegrityVersion,omitempty"`
 }
 
 // ProviderEndpoints holds resolved endpoint URLs for status reporting.
