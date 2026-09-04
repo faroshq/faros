@@ -23,6 +23,10 @@ test('top-level navigation and inventory use PortalKit contracts', () => {
   assert.match(inventory, /searchable search-placeholder="Exact resource name…"/u)
   assert.match(inventory, /pagination-mode="server"/u)
   assert.match(inventory, /:page-info="pager\.pageInfo"/u)
+  assert.match(inventory, /@submit\.prevent="applyFacetFilters"/u)
+  assert.match(inventory, /id="inventory-kind-filter"/u)
+  assert.match(inventory, /id="inventory-namespace-filter"/u)
+  assert.doesNotMatch(inventory, /learned from pages you visit/u)
   assert.match(inventory, /@row-click="inspect"/u)
 })
 
@@ -41,4 +45,23 @@ test('impact drill-down preserves mounted tab state and falls back to the host r
   assert.match(app, /:active="!impact && active === 'playground'"/u)
   assert.match(impact, /<ResourceBackLink href="\/providers\/kuery"/u)
   assert.doesNotMatch(impact, /href="\/ui\/providers\/kuery"/u)
+})
+
+test('edge discovery fences late responses to the request and context that started them', () => {
+  assert.match(app, /let edgesRequestID = 0/u)
+  assert.match(app, /const requestID = \+\+edgesRequestID/u)
+  assert.match(app, /const requestContext = context\.value/u)
+  assert.match(app, /const isCurrent = \(\): boolean =>[\s\S]*edgesRequestID === requestID[\s\S]*identity\.value === requestIdentity[\s\S]*\(context\.value\?\.token \?\? null\) === requestToken/u)
+  assert.match(app, /if \(!isCurrent\(\)\) return[\s\S]*edges\.value = parsed\.edges/u)
+  assert.match(app, /if \(isCurrent\(\)\) \{[\s\S]*edgesLoading\.value = false/u)
+  assert.match(app, /watch\(\[identity, token\],[\s\S]*currentIdentity === previousIdentity && currentToken !== previousToken/u)
+})
+
+test('secondary views mount lazily and stay mounted after first visit', () => {
+  assert.match(app, /const visited = ref<Record<TabID, boolean>>\(\{ topology: true, inventory: false, playground: false \}\)/u)
+  assert.match(app, /visited\.value\[id\] = true/u)
+  assert.match(app, /<InventoryView v-if="visited\.inventory" v-show="active === 'inventory'"/u)
+  assert.match(app, /<PlaygroundView v-if="visited\.playground" v-show="active === 'playground'"/u)
+  assert.doesNotMatch(app, /<InventoryView v-show="active === 'inventory'"/u)
+  assert.doesNotMatch(app, /<PlaygroundView v-show="active === 'playground'"/u)
 })
