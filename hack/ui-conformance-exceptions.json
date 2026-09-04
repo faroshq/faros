@@ -3,15 +3,6 @@
   "exceptions": [
     {
       "rule": "raw-color",
-      "path": "providers/kuery/portal/src/element.ts",
-      "line": 1159,
-      "column": 44,
-      "match": "#888",
-      "reference": "design-book §8 Kuery graph",
-      "reason": "The legend fallback is rendered inside the Cytoscape graph canvas and is part of the sanctioned Kuery graph palette."
-    },
-    {
-      "rule": "raw-color",
       "path": "providers/kuery/portal/src/graph.ts",
       "line": 27,
       "column": 12,

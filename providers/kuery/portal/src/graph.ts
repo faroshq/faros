@@ -11,7 +11,7 @@
 // erased at build time, so this module pulls in zero Cytoscape bytes.
 
 import type cytoscape from 'cytoscape'
-import type { ObjectResult } from './element'
+import type { ObjectResult } from './api'
 
 // The UMD bundle assigns this global.
 declare global {
@@ -415,6 +415,7 @@ export interface GraphHandle {
   panBy(dx: number, dy: number): void
   zoomBy(factor: number): void
   fit(): void
+  restyle(style: cytoscape.StylesheetStyle[]): void
   nodeCount(): number
 }
 
@@ -579,6 +580,7 @@ export async function mountGraph(
       cy.resize()
       cy.fit(undefined, 24)
     },
+    restyle: (style) => { cy.style(style).update() },
     nodeCount: () => cy.nodes().length,
   }
 }

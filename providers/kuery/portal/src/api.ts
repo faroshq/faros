@@ -95,7 +95,11 @@ export interface ObjectResult {
   id?: string
   cluster?: string
   mutablePath?: string
-  object?: Record<string, unknown>
+  object?: {
+    kind?: string
+    apiVersion?: string
+    metadata?: { name?: string; namespace?: string; creationTimestamp?: string }
+  }
   relations?: Record<string, ObjectResult[]>
 }
 
