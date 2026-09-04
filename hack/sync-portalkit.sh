@@ -32,10 +32,10 @@ VUE_PORTALS=(
   "providers/infrastructure/portal"
   "providers/kuery/portal"
 )
-VUE_FILES=(ActionMenu.vue confirm.ts ConditionsPanel.vue ConfirmDialog.vue CreateGuidance.vue FirstRunGuide.vue FormSelect.vue LayoutSelector.vue layoutPreference.ts ResourceBackLink.vue ResourcePage.vue ResourceSectionCard.vue ResourceStatCards.vue ResourceTable.vue ResourceTableFilter.vue table.ts ResourceTableActionButton.vue ResourceTableDeleteButton.vue ResourceTableEditButton.vue StatusBadge.vue Tabs.vue useDelayedLoading.ts)
+VUE_FILES=(ActionMenu.vue confirm.ts ConditionsPanel.vue ConfirmDialog.vue CreateGuidance.vue FirstRunGuide.vue FormSelect.vue InlineNotification.vue LayoutSelector.vue layoutPreference.ts ResourceBackLink.vue ResourcePage.vue ResourceSectionCard.vue ResourceStatCards.vue ResourceTable.vue ResourceTableFilter.vue table.ts ResourceTableActionButton.vue ResourceTableDeleteButton.vue ResourceTableEditButton.vue StatusBadge.vue Tabs.vue ToastHost.vue toast.ts useDelayedLoading.ts)
 
 # Plain assets from the vanilla kit are shared by both portal styles.
-VUE_SHARED_FILES=(dashboardtile.ts faros-ui.css icons.ts page-state.ts styles.ts tabs.ts tenant.ts toast.ts)
+VUE_SHARED_FILES=(dashboardtile.ts faros-ui.css icons.ts page-state.ts styles.ts tabs.ts tenant.ts)
 ALL_PORTALS=("${TS_PORTALS[@]}" "${VUE_PORTALS[@]}")
 HOST_UI="$ROOT/portal/src/assets/faros-ui.css"
 
@@ -43,7 +43,7 @@ HOST_UI="$ROOT/portal/src/assets/faros-ui.css"
 # asset. Every other direct file in the canonical directories must be listed
 # above so adding a new source file cannot silently skip every portal.
 TS_CANONICAL_ONLY=(README.md page-state.ts)
-VUE_CANONICAL_ONLY=(ActionMenu.conformance.test.mjs)
+VUE_CANONICAL_ONLY=(ActionMenu.conformance.test.mjs Toast.behavior.test.mjs Toast.conformance.test.mjs)
 
 # Kuery was originally a vanilla-TS portal. Its Vue migration no longer
 # needs the vanilla confirm/alert implementation; remove that one legacy copy

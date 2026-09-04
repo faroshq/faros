@@ -1,9 +1,10 @@
 # portalkit — shared portal UI primitives
 
-Canonical source for framework-neutral UI primitives shared across provider
-portals. The vanilla-TS kit is vendored into the string-building portals
-`agents`, `kuery`, and `quickstart`; Vue portals consume the shared plain assets
-too, alongside the SFC kit in `provider-sdk/portalkit-vue`.
+Canonical source for shared PortalKit assets. The vanilla-TS kit is vendored into
+the string-building portals `agents` and `quickstart`; Vue portals, including
+`kuery`, use the SFC kit in `provider-sdk/portalkit-vue` plus shared plain assets
+where appropriate. The framework-neutral `toast.ts` is a frozen legacy bus for
+Agents only and is not copied into Vue portals.
 
 - `icons.ts` — inline SVG icon set (`ic(name)` returns an `<svg class="k-icon">`
   string). Use in HTML template literals instead of emoji.
@@ -16,8 +17,9 @@ too, alongside the SFC kit in `provider-sdk/portalkit-vue`.
   exposes `data-k-tab-id`, while routing remains caller-owned.
 - `modal.ts` — promise-based `confirmModal()` / `alertModal()`, replacing native
   `window.confirm` / `window.alert` with an on-brand in-page dialog.
-- `toast.ts` — framework-free toast bus. It emits the `.k-toast` recipe and
-  uses the shared stylesheet rather than injecting a second visual language.
+- `toast.ts` — frozen framework-neutral toast bus retained for Agents' existing
+  Lit integration. It is not the Vue toast implementation and is not copied to
+  Vue portals.
 - `styles.ts` — the standalone handoff for the exact canonical
   `provider-sdk/portalkit/faros-ui.css` bytes.
 - `FirstRunGuide.vue` — Vue first-use value, action, and ordered journey
@@ -58,7 +60,7 @@ vendored kit directory and verifies that no unexpected asset is present. CI can
 run `make sync-portalkit && git diff --exit-code` to guard against drift.
 
 The Vue portals (`app-studio`, `code`, `databricks`, `edges`, `infrastructure`,
-and the root `faros-portal`) use `lucide-vue-next` for icons and the
+`kuery`, and the root `faros-portal`) use `lucide-vue-next` for icons and the
 `confirm.ts` + `ConfirmDialog.vue` pattern for modals. Agents, App Studio,
 Code, Databricks, Edges, and Kuery use the provider-level tab bar;
 Infrastructure and Quickstart have no equivalent provider-level bar. Vue
@@ -88,8 +90,43 @@ actions.
 
 ## Toasts
 
-The canonical `toast.ts` bus auto-dismisses `ok` after 4s, `info` after 6s, and
-`error` after 9s; hover pauses and re-arms the full duration on leave, and every
-card has an explicit dismiss button. Agents keeps its subscription-facing
-adapter for existing Lit callers, but delegates DOM rendering, timers, actions,
-and visible-item eviction to this bus and reconciles renderer removals.
+### Vue PortalKit
+
+The Vue toast standard consists of the canonical
+`provider-sdk/portalkit-vue/toast.ts`, `ToastHost.vue`, and
+`InlineNotification.vue`. The root portal mounts exactly one
+`<ToastHost owner="primary" />`. A Vue provider may also mount
+`<ToastHost owner="fallback" />` for standalone embeds; a primary host owns the
+queue whenever it is present, leaving fallback hosts dormant until takeover.
+Ownership takeover preserves the visible toast's remaining timer, action
+busy/error state, and focused toast control.
+
+The versioned document command transport crosses independently bundled Vue
+portals. Toast copy is rendered as plain text; the active `ToastHost` owns
+rendering, the priority queue, timers, and visual lifecycle. Only one toast is
+visible at a time. Priority is `error > warning > info > ok`; only a strictly
+higher-priority toast preempts the visible toast, which is requeued with its
+remaining time.
+`ok` lasts 5s and `info` 6s by default. Warnings and errors are persistent by
+default, but an explicitly supplied finite numeric duration overrides that
+default and clamps to at least 5s. Toasts with an action remain persistent
+regardless of duration. A toast has plain text, at most one action, and an
+explicit dismiss button. Render `source` only when the caller supplies it;
+never infer a provenance label.
+
+The host keeps separate pre-mounted polite and assertive live regions. With
+`announcement: "auto"`, errors announce assertively and other kinds politely;
+callers may explicitly choose `polite`, `assertive`, or `off`. Focus pauses a
+timer just like hover or a hidden document, and resuming preserves remaining
+time. Escape dismisses only when focus is within the toast host; focus returns
+to the next toast or its recorded origin as the queue changes. The shared CSS
+gives coarse-pointer action and dismiss controls 44×44px targets, and removes
+toast transitions/spinners under reduced motion. The root portal owns
+`--k-toast-bottom-offset`, combining navigation and terminal chrome; shared CSS
+applies the safe-area insets.
+
+Use `InlineNotification` beside the operation for contextual failures and
+recovery. Do not emit a duplicate toast for the same contextual failure. The
+root portal and App Studio use these Vue primitives. Agents' existing
+framework-neutral bus remains out of scope for migration, as is adoption by
+other providers.
