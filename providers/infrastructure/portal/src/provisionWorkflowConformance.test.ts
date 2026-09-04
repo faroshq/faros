@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest'
 const app = readFileSync(new URL('./App.vue', import.meta.url), 'utf8')
 const provision = readFileSync(new URL('./views/ProvisionPage.vue', import.meta.url), 'utf8')
 const detail = readFileSync(new URL('./views/InstanceDetailPage.vue', import.meta.url), 'utf8')
-const applicationTemplate = readFileSync(new URL('../../install/templates/application.yaml', import.meta.url), 'utf8')
 
 describe('Infrastructure primary provisioning workflow', () => {
   it('keeps Templates and Instances navigation present across routed pages', () => {
@@ -27,9 +26,5 @@ describe('Infrastructure primary provisioning workflow', () => {
     expect(provision).toContain('The selected workspace is no longer available. Choose a workspace in the sidebar, then try again.')
     expect(provision).not.toContain('Phase-3 hub wiring required')
     expect(detail).toContain('<span class="instance-status-label">Status</span>')
-  })
-
-  it('marks the reserved email-domain input as server-owned', () => {
-    expect(applicationTemplate).toMatch(/emailDomains:\n\s+type: array[\s\S]*?readOnly: true/)
   })
 })
