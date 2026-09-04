@@ -114,8 +114,11 @@ export function writeHash(route: Route, mode: HashHistoryMode = 'push'): void {
   const h = hashFor(route)
   if (location.hash !== h) {
     try {
-      if (mode === 'replace') history.replaceState(null, '', h)
-      else history.pushState(null, '', h)
+      // Embedded navigation is delegated to the host router by App.vue. Keep
+      // any ambient state intact in the standalone/fallback path so a host
+      // that does not acknowledge the event still avoids clobbering it.
+      if (mode === 'replace') history.replaceState(history.state, '', h)
+      else history.pushState(history.state, '', h)
     } catch {
       // Sandboxed history — assignment still gives the host a usable route.
       location.hash = h

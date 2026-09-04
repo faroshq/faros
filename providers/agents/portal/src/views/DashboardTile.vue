@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AlertTriangle, Bot, ChevronRight, Clock } from 'lucide-vue-next'
 import { ApiClient } from '../api'
+import { hashFor } from '../router'
 import type { Agent, FarosContext, RunSummary, Schedule } from '../types'
 import {
   TILE_ROWS,
@@ -172,7 +173,7 @@ defineExpose({ load, api, applyContext })
       <div class="agents-tile-label">Recent runs</div>
       <ul class="agents-tile-rows">
         <li v-for="run in visibleRuns" :key="run.id">
-          <button class="k-btn k-btn--ghost" type="button" @click="emit('navigate', `activity/${run.id}`)">
+          <button class="k-btn k-btn--ghost" type="button" @click="emit('navigate', hashFor({ kind: 'run', id: run.id }))">
             <span :class="['agents-tile-dot', phaseDot(run.phase)]" aria-hidden="true" />
             <span class="agents-tile-agent">{{ run.agent }}</span>
             <span :class="FAILED_PHASES.has(run.phase) ? 'agents-tile-bad' : 'agents-tile-dim'">{{ run.phase.toLowerCase() }} · {{ relative(run.createdAt) }}</span>

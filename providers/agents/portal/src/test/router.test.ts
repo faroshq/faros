@@ -74,6 +74,41 @@ describe('hash history writes', () => {
     expect(replace).not.toHaveBeenCalled()
   })
 
+  it('preserves ambient history state in the standalone fallback', () => {
+    const hostState = {
+      back: '/dashboard',
+      current: '/providers/agents',
+      forward: null,
+      position: 7,
+      replaced: false,
+      scroll: null,
+    }
+    history.replaceState(hostState, '', '#/agents')
+    const push = vi.spyOn(history, 'pushState')
+
+    writeHash({ kind: 'menu', menu: 'activity' })
+
+    expect(push).toHaveBeenCalledWith(hostState, '', '#/activity')
+    expect(history.state).toEqual(hostState)
+  })
+
+  it('updates the current host route without changing its traversal position on replace', () => {
+    const hostState = {
+      back: '/providers/agents#/agents',
+      current: '/providers/agents#/create/agent',
+      forward: null,
+      position: 8,
+      replaced: false,
+      scroll: null,
+    }
+    history.replaceState(hostState, '', '#/create/agent')
+    const replace = vi.spyOn(history, 'replaceState')
+
+    writeHash({ kind: 'agent', name: 'scout', tab: 'config' }, 'replace')
+
+    expect(replace).toHaveBeenCalledWith(hostState, '', '#/agents/scout/config')
+  })
+
   it('does not throw on malformed externally supplied encoded segments', () => {
     expect(parseHash('#/agents/%E0%A4%A')).toEqual({ kind: 'agent', name: '%E0%A4%A', tab: 'config' })
   })

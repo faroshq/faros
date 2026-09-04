@@ -61,6 +61,43 @@ function populateToolsets(element: AgentsElement, toolsets: Toolset[]): void {
 }
 
 describe('public Agents shell routing', () => {
+  it('preserves a dashboard run deep link when the host supplies context after mounting', async () => {
+    history.replaceState(null, '', '#/activity/run%2F42')
+    const element = document.createElement('faros-provider-agents') as AgentsElement
+    document.body.appendChild(element)
+    await settleVue()
+
+    expect(text(element)).toContain('Connecting')
+    expect(element.route).toEqual({ kind: 'run', id: 'run/42' })
+
+    element.farosContext = ctx()
+    await settleVue(6)
+
+    expect(location.hash).toBe('#/activity/run%2F42')
+    expect(element.route).toEqual({ kind: 'run', id: 'run/42' })
+    expect(element.querySelector('.agents-nav-wrap')).toBeNull()
+    expect(element.querySelector('.k-resource-page__title')).not.toBeNull()
+  })
+
+  it('delegates embedded navigation to the host router without mutating history itself', async () => {
+    const element = await mountShell()
+    const navigate = vi.fn((event: Event) => event.preventDefault())
+    document.body.addEventListener('faros-navigate', navigate)
+    const push = vi.spyOn(history, 'pushState')
+    push.mockClear()
+    try {
+      element.querySelector<HTMLButtonElement>('[data-k-tab-id="connections"]')!.click()
+      await settleVue(4, 5)
+
+      expect(navigate).toHaveBeenCalledOnce()
+      expect((navigate.mock.calls[0][0] as CustomEvent).detail).toEqual({ path: '#/connections', replace: false })
+      expect(push).not.toHaveBeenCalled()
+      expect(element.route).toEqual({ kind: 'menu', menu: 'connections' })
+    } finally {
+      document.body.removeEventListener('faros-navigate', navigate)
+    }
+  })
+
   it('pushes menu navigation and restores externally assigned hashes', async () => {
     const element = await mountShell()
     const push = vi.spyOn(history, 'pushState')

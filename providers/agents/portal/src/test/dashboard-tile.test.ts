@@ -26,6 +26,37 @@ async function mountTile(api: ApiClient): Promise<AgentsDashboardTileElement> {
 }
 
 describe('agents dashboard tile refresh resilience', () => {
+  it('navigates recent runs through the provider hash route', async () => {
+    const tile = await mountTile(stubApi({
+      listRuns: vi.fn().mockResolvedValue({
+        items: [{
+          id: 'run/42',
+          agent: 'scout',
+          trigger: 'chat',
+          class: 'interactive',
+          phase: 'Succeeded',
+          inputTokens: 1,
+          outputTokens: 1,
+          usdMicros: 0,
+          createdAt: new Date().toISOString(),
+          durationMS: 10,
+        }],
+        nextCursor: '',
+      }),
+    }))
+    const navigate = vi.fn()
+    tile.addEventListener('faros-navigate', navigate)
+
+    tile.querySelector<HTMLButtonElement>('.agents-tile-rows button')!.click()
+
+    expect(navigate).toHaveBeenCalledOnce()
+    expect((navigate.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      provider: 'agents',
+      path: '#/activity/run%2F42',
+    })
+    tile.remove()
+  })
+
   it('does not run a coalesced refresh after the poller stops', async () => {
     let release!: () => void
     const load = vi.fn(async () => new Promise<void>(resolve => { release = resolve }))

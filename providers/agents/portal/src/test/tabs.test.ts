@@ -5,8 +5,11 @@ import { Bot } from 'lucide-vue-next'
 import Tabs from '../portalkit/Tabs.vue'
 import { mountVue, settleVue } from './vue-helper'
 
-const tabStyles = readFileSync(resolve(process.cwd(), '../../../portal/src/assets/faros-ui.css'), 'utf8')
-const tabsComponent = readFileSync(resolve(process.cwd(), '../../../provider-sdk/portalkit-vue/Tabs.vue'), 'utf8')
+// Portal Docker builds intentionally receive only this portal directory during
+// the frontend stage. Exercise the synced PortalKit copies that the standalone
+// bundle actually ships so the prebuild remains hermetic in that context.
+const tabStyles = readFileSync(resolve(process.cwd(), 'src/portalkit/faros-ui.css'), 'utf8')
+const tabsComponent = readFileSync(resolve(process.cwd(), 'src/portalkit/Tabs.vue'), 'utf8')
 
 // Import the real entrypoint so this contract covers the light-DOM bundle's
 // stylesheet handoff, not only the vendored component in isolation.

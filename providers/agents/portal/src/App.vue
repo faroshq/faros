@@ -100,7 +100,16 @@ function go(next: Route, mode?: 'push' | 'replace'): void {
   const historyMode = mode ?? (route.value.kind === 'create' && next.kind === 'create' ? 'replace' : 'push')
   advanceCreateSession(route.value, next)
   route.value = next
-  writeHash(next, historyMode)
+  // Let the host's Vue Router own browser history when this provider is
+  // embedded. ProviderFrame acknowledges the event synchronously with
+  // preventDefault(); the standalone portal falls back to its hash router.
+  const navigation = new CustomEvent('faros-navigate', {
+    detail: { path: hashFor(next), replace: historyMode === 'replace' },
+    bubbles: true,
+    composed: true,
+    cancelable: true,
+  })
+  if (props.host.dispatchEvent(navigation)) writeHash(next, historyMode)
   if (!focusCollectionAfterEdit) scheduleRouteFocus(next)
 }
 
@@ -156,7 +165,12 @@ function maybeLoad(): void {
 }
 
 function shouldResetRoute(previous: ContextAuthority | null, next: ContextAuthority): boolean {
-  if (!previous?.usable || previous.tenantKey !== next.tenantKey) return true
+  // The host mounts the custom element before it can push farosContext. That
+  // first null -> usable hydration must keep a dashboard/deep-link hash. A
+  // real authority withdrawal already resets the route when it becomes
+  // unusable, so restoring authority does not need to reset it a second time.
+  if (!previous?.usable) return false
+  if (previous.tenantKey !== next.tenantKey) return true
   return !(previous.userKey && next.userKey && previous.userKey === next.userKey)
 }
 
