@@ -53,6 +53,25 @@ function edgeLabel(t: { workspace: string; workspaceDisplayName?: string; name: 
 // button is disabled rather than left to 409.
 const canSelfHost = computed(() => orgProviders.installTargetsEligible && !!selectedEdge.value)
 
+// The hub-owned catalog is authoritative for whether the Edges prerequisite
+// exists and is ready to open. Do not manufacture a provider route when the
+// entry is absent: ProviderFrame can explain a known-but-unready provider, but
+// it cannot make an unavailable catalog entry actionable.
+type EdgesSelfHostState = 'absent' | 'unready' | 'ready'
+
+const edgesProvider = computed(() => providers.byName('edges'))
+const edgesSelfHostState = computed<EdgesSelfHostState>(() => {
+  const edges = edgesProvider.value
+  if (!edges) return 'absent'
+  return edges.ready && edges.hasUI ? 'ready' : 'unready'
+})
+
+function showEdgesCatalogEntry() {
+  tab.value = 'catalog'
+  selectedCategory.value = null
+  search.value = 'edges'
+}
+
 function bindingAction(p: ProviderDTO) {
   return providerBindingAction({
     hasAPIExport: !!p.apiExportName,
@@ -61,6 +80,7 @@ function bindingAction(p: ProviderDTO) {
     disabling: providers.isDisabling(p.name),
   })
 }
+
 async function selfHost(p: ProviderDTO) {
   const edge = selectedEdge.value
   if (!edge) {
@@ -398,12 +418,26 @@ function dependencyNotice(p: ProviderDTO): string {
           <div class="min-w-0">
             <p>{{ orgProviders.installTargetsReason || 'no connected cluster to install into' }}</p>
             <router-link
+              v-if="edgesSelfHostState === 'ready'"
               to="/providers/edges"
               class="mt-1 inline-flex items-center gap-1 text-[11px] font-medium underline"
             >
               Connect a Kubernetes cluster
               <ExternalLink class="h-3 w-3" :stroke-width="2" />
             </router-link>
+            <div v-else-if="edgesSelfHostState === 'unready'" class="mt-1 text-[11px] leading-relaxed">
+              <p>Edges is installed but is not ready. Open its catalog entry for status, or ask a platform administrator to repair it.</p>
+              <button
+                type="button"
+                class="mt-1 font-medium underline"
+                @click="showEdgesCatalogEntry"
+              >
+                View Edges in catalog
+              </button>
+            </div>
+            <p v-else-if="edgesSelfHostState === 'absent'" class="mt-1 text-[11px] leading-relaxed">
+              Edges is not installed in this catalog. Ask a platform administrator to install it before self-hosting a provider.
+            </p>
           </div>
         </div>
 
