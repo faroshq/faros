@@ -19,6 +19,33 @@ import (
 	providersv1alpha1 "github.com/faroshq/faros/apis/providers/v1alpha1"
 )
 
+func TestProviderReadinessAggregatesBackendAndHeartbeat(t *testing.T) {
+	p := Provider{
+		EndpointsValid:        true,
+		BackendHealthRequired: true,
+		BackendHealthy:        false,
+		HeartbeatRequired:     true,
+		HeartbeatStale:        false,
+	}
+	ready, reason, message := p.Readiness()
+	if ready || reason != "BackendUnhealthy" || message != "Provider backend is unavailable." {
+		t.Fatalf("backend readiness = (%v, %q, %q)", ready, reason, message)
+	}
+
+	p.BackendHealthy = true
+	p.HeartbeatStale = true
+	ready, reason, message = p.Readiness()
+	if ready || reason != "HeartbeatStale" || message != "Provider heartbeat is stale." {
+		t.Fatalf("heartbeat readiness = (%v, %q, %q)", ready, reason, message)
+	}
+
+	p.HeartbeatStale = false
+	ready, reason, message = p.Readiness()
+	if !ready || reason != "" || message != "" {
+		t.Fatalf("healthy readiness = (%v, %q, %q)", ready, reason, message)
+	}
+}
+
 func TestParseProviderActionsCanonicalCatalogShape(t *testing.T) {
 	parsed, err := ParseProviderActions([]providersv1alpha1.ProviderActionSpec{{
 		ID: "query_table/v1",

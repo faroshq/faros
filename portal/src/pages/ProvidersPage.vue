@@ -684,7 +684,7 @@ function dependencyNotice(p: ProviderDTO): string {
                   class="rounded-sm px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider"
                   :class="
                     !p.ready
-                      ? 'border border-border-default bg-surface-overlay text-text-muted'
+                      ? 'border border-warning/30 bg-warning-subtle text-warning'
                       : p.builtinRoute
                         ? 'border border-border-default bg-surface-overlay text-text-secondary'
                         : providers.isDisabling(p.name)
@@ -698,7 +698,7 @@ function dependencyNotice(p: ProviderDTO): string {
                                 : 'border border-success/30 bg-success-subtle text-success'
                   "
                 >
-                  {{ !p.ready ? 'Pending' : p.builtinRoute ? 'Built-in' : providers.isDisabling(p.name) ? 'Disabling' : providers.hasStaleClaims(p.name) ? 'Degraded' : providers.isEnabled(p.name) ? 'Enabled' : providers.hasMissingDependencies(p) ? 'Blocked' : 'Available' }}
+                  {{ !p.ready ? 'Not ready' : p.builtinRoute ? 'Built-in' : providers.isDisabling(p.name) ? 'Disabling' : providers.hasStaleClaims(p.name) ? 'Degraded' : providers.isEnabled(p.name) ? 'Enabled' : providers.hasMissingDependencies(p) ? 'Blocked' : 'Available' }}
                 </span>
               </div>
               <p class="mt-0.5 truncate font-mono text-[10px] text-text-muted">{{ p.name }}<span v-if="p.version"> · {{ p.version }}</span></p>
@@ -849,7 +849,7 @@ function dependencyNotice(p: ProviderDTO): string {
             </template>
 
             <span v-if="!p.ready" class="text-[11px] text-text-muted/70">
-              Provider is starting&hellip;
+              {{ p.readinessMessage || 'Provider is unavailable.' }}
             </span>
           </div>
           </li>
