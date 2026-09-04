@@ -695,6 +695,10 @@ html.light .k-menu {
   min-width: 0;
   position: relative;
 }
+faros-form-select {
+  display: block;
+  min-width: 0;
+}
 .k-form-select__trigger {
   align-items: center;
   cursor: pointer;
@@ -1630,6 +1634,7 @@ html.light [data-k-tip]::after {
   position: relative;
   transition: border-color 120ms ease;
 }
+faros-resource-table-filter { display: contents; }
 .k-table__filter--combobox {
   grid-template-columns: auto minmax(116px, 1fr);
   min-width: 210px;
