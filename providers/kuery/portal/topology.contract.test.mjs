@@ -182,6 +182,28 @@ test('relation metadata is the shared source for labels, direction, and graph co
   }
 })
 
+test('impact graph keeps distinct declared relations between the same objects', () => {
+  const related = (id, kind) => ({
+    id,
+    cluster: 'org/edge-a',
+    object: { kind, apiVersion: 'v1', metadata: { name: id } },
+  })
+  const built = graphModule.buildElements({
+    id: 'pod-1',
+    cluster: 'org/edge-a',
+    object: { kind: 'Pod', apiVersion: 'v1', metadata: { name: 'api' } },
+    relations: {
+      owners: [related('controller-1', 'Deployment')],
+      references: [related('controller-1', 'Deployment')],
+    },
+  })
+  const relationEdges = built.elements.filter(element => element.data.source)
+
+  assert.equal(relationEdges.length, 2)
+  assert.deepEqual(relationEdges.map(element => element.data.rel), ['owners', 'references'])
+  assert.equal(new Set(relationEdges.map(element => element.data.id)).size, relationEdges.length, 'each legend relation needs its own graph edge')
+})
+
 test('topology and impact disclose bounded results without conflating response truncation', () => {
   const topology = readFileSync(new URL('./src/components/TopologyView.vue', import.meta.url), 'utf8')
   const impact = readFileSync(new URL('./src/components/ImpactView.vue', import.meta.url), 'utf8')

@@ -7,7 +7,7 @@ import {
   buildTopologyElements, deriveTopologyTree, graphKeyAction, IMPACT_RELATIONS, mountGraph, relationElements, themeStyle,
   type GraphHandle,
 } from '../graph'
-import { errorMessage, resourceLabel, useKueryApi } from '../kuery'
+import { createKueryRequestContext, errorMessage, resourceLabel, useKueryApi } from '../kuery'
 import FormSelect from '../portalkit/FormSelect.vue'
 
 const props = defineProps<{ context: FarosContext | null; edges: string[]; active: boolean }>()
@@ -44,6 +44,7 @@ let graphController: AbortController | null = null
 let expansionGeneration = 0
 const expansionRequests = new Map<string, number>()
 let fullscreenGeneration = 0
+const requestContext = computed(() => createKueryRequestContext(context.value))
 
 const tree = computed(() => deriveTopologyTree(rows.value, { kind: kind.value, namespace: namespace.value }))
 const facets = computed(() => {
@@ -74,19 +75,25 @@ async function load(): Promise<void> {
   loadController?.abort()
   const controller = new AbortController()
   const requestGeneration = ++loadGeneration
+  const request = requestContext.value
+  const requestIdentity = request.identity
   loadController = controller
   loading.value = true; error.value = ''
+  const isCurrent = (): boolean => {
+    if (loadController !== controller || loadGeneration !== requestGeneration) return false
+    return requestContext.value.identity === requestIdentity
+  }
   try {
     const result = await query(topologySpec(), controller.signal)
-    if (loadController !== controller || loadGeneration !== requestGeneration) return
+    if (!isCurrent()) return
     rows.value = result.objects ?? []; incomplete.value = !!result.incomplete; loaded.value = true
     responseWarnings.value = result.warnings ?? []
   } catch (reason) {
-    if (loadController !== controller || loadGeneration !== requestGeneration) return
+    if (!isCurrent()) return
     const message = errorMessage(reason, 'Retry the topology query or select one edge.')
     if (message) error.value = message
   } finally {
-    if (loadController === controller && loadGeneration === requestGeneration) loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -256,7 +263,9 @@ watch([rows, kind, namespace, representation], () => nextTick(() => void mount()
 watch(layout, () => graph ? graph.relayout(layoutConfig()) : nextTick(() => void mount()))
 watch(() => context.value?.theme, () => { if (graph && graphHost.value) graph.restyle(themeStyle(graphHost.value)) })
 watch(() => props.active, active => { if (active) requestAnimationFrame(() => graph?.fit()) })
-watch(api, (ready, wasReady) => { if (ready && !wasReady) void load() })
+watch([api, requestContext], ([ready, current], [wasReady, previous]) => {
+  if (ready && (!wasReady || current.identity !== previous.identity)) void load()
+})
 onMounted(() => { document.addEventListener('fullscreenchange', fullscreenChanged); void load() })
 onBeforeUnmount(() => { loadGeneration += 1; fullscreenGeneration += 1; loadController?.abort(); destroyGraph(); document.removeEventListener('fullscreenchange', fullscreenChanged) })
 </script>

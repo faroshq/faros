@@ -7,7 +7,7 @@ import {
   buildElements, IMPACT_RELATIONS, mountGraph, RELATION_DIR, RELATION_LABELS, RELATION_METADATA,
   themeStyle, type GraphHandle,
 } from '../graph'
-import { errorMessage, resourceLabel, useKueryApi } from '../kuery'
+import { createKueryRequestContext, errorMessage, resourceLabel, useKueryApi } from '../kuery'
 import ResourceBackLink from '../portalkit/ResourceBackLink.vue'
 import ResourcePage from '../portalkit/ResourcePage.vue'
 
@@ -28,6 +28,7 @@ let controller: AbortController | null = null
 let loadGeneration = 0
 let graph: GraphHandle | null = null
 let generation = 0
+const requestContext = computed(() => createKueryRequestContext(context.value))
 
 const title = computed(() => {
   const metadata = props.anchor.object?.metadata ?? {}
@@ -49,22 +50,28 @@ async function load(): Promise<void> {
   controller?.abort()
   const current = new AbortController()
   const requestGeneration = ++loadGeneration
+  const request = requestContext.value
+  const requestIdentity = request.identity
   controller = current
   loading.value = true; error.value = ''
+  const isCurrent = (): boolean => {
+    if (controller !== current || loadGeneration !== requestGeneration) return false
+    return requestContext.value.identity === requestIdentity
+  }
   try {
     const status = await query(spec(), current.signal)
-    if (controller !== current || loadGeneration !== requestGeneration) return
+    if (!isCurrent()) return
     result.value = status.objects?.[0] ?? null
     if (!result.value) throw new Error('The object was not found; synchronization may still be catching up')
     responseTruncated.value = !!status.incomplete
     responseWarnings.value = status.warnings ?? []
     loaded.value = true
   } catch (reason) {
-    if (controller !== current || loadGeneration !== requestGeneration) return
+    if (!isCurrent()) return
     const message = errorMessage(reason, 'Retry impact analysis or return to inventory.')
     if (message) error.value = message
   } finally {
-    if (controller === current && loadGeneration === requestGeneration) loading.value = false
+    if (isCurrent()) loading.value = false
   }
 }
 
@@ -83,7 +90,9 @@ async function mount(): Promise<void> {
 }
 
 watch(() => props.anchor, () => { result.value = null; loaded.value = false; void load() }, { immediate: true })
-watch(api, (ready, wasReady) => { if (ready && !wasReady) void load() })
+watch([api, requestContext], ([ready, current], [wasReady, previous]) => {
+  if (ready && (!wasReady || current.identity !== previous.identity)) void load()
+})
 watch([result, representation], () => nextTick(() => void mount()))
 watch(() => props.context?.theme, () => { if (graph && graphHost.value) graph.restyle(themeStyle(graphHost.value)) })
 onBeforeUnmount(() => { loadGeneration += 1; controller?.abort(); destroyGraph() })

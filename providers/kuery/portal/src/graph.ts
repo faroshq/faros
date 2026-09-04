@@ -112,6 +112,10 @@ function orientEdge(anchorId: string, relatedId: string, rel: string): [string, 
   return (RELATION_DIR[rel] ?? 'down') === 'up' ? [relatedId, anchorId] : [anchorId, relatedId]
 }
 
+function relationEdgeId(source: string, target: string, rel: string): string {
+  return `${source}>${target}:${rel}`
+}
+
 export interface BuildResult {
   elements: cytoscape.ElementDefinition[]
   // nodeId → the source ObjectResult, so a node tap can re-anchor the graph
@@ -132,6 +136,7 @@ export function buildElements(anchor: ObjectResult): BuildResult {
   const elements: cytoscape.ElementDefinition[] = []
   const nodeIndex: Record<string, ObjectResult> = {}
   const seen = new Set<string>()
+  const relationEdges = new Set<string>()
 
   const anchorId = anchor.id || 'anchor'
   pushNode(elements, nodeIndex, seen, anchorId, anchor, true)
@@ -142,7 +147,10 @@ export function buildElements(anchor: ObjectResult): BuildResult {
       const id = it.id || `${rel}:${i}`
       pushNode(elements, nodeIndex, seen, id, it, false)
       const [source, target] = orientEdge(anchorId, id, rel)
-      elements.push({ data: { id: `${source}>${target}`, source, target, rel } })
+      const edgeId = relationEdgeId(source, target, rel)
+      if (relationEdges.has(edgeId)) return
+      relationEdges.add(edgeId)
+      elements.push({ data: { id: edgeId, source, target, rel } })
     })
   }
   return { elements, nodeIndex }
@@ -286,11 +294,11 @@ export function buildTopologyElements(
     nodes.add(id)
     elements.push({ data: { id, ...data } })
   }
-  const addEdge = (source: string, target: string) => {
-    const id = `${source}>${target}`
+  const addEdge = (source: string, target: string, rel = 'namespace') => {
+    const id = relationEdgeId(source, target, rel)
     if (edges.has(id)) return
     edges.add(id)
-    elements.push({ data: { id, source, target, rel: 'namespace' } })
+    elements.push({ data: { id, source, target, rel } })
   }
 
   for (const edgeGroup of deriveTopologyTree(clusters, opts).edges) {
@@ -479,6 +487,7 @@ export function graphOwnsFocus(graph: Element | null, activeElement: Element | n
 export function relationElements(anchorId: string, anchor: ObjectResult): BuildResult {
   const elements: cytoscape.ElementDefinition[] = []
   const nodeIndex: Record<string, ObjectResult> = {}
+  const relationEdges = new Set<string>()
   const rels = anchor.relations ?? {}
   for (const [rel, items] of Object.entries(rels)) {
     ;(items ?? []).forEach((it, i) => {
@@ -490,11 +499,14 @@ export function relationElements(anchorId: string, anchor: ObjectResult): BuildR
       })
       nodeIndex[id] = it
       // Orient by impact direction: upstream relations point INTO the anchor
-      // (related → anchor), downstream out of it. Endpoint-based edge id so a
-      // pair reached twice (e.g. the namespace already linked in the base tree)
-      // dedupes to one edge.
+      // (related → anchor), downstream out of it. Relation-qualified edge ids
+      // dedupe repeated copies of one relation while keeping parallel
+      // relations between the same pair visible.
       const [source, target] = orientEdge(anchorId, id, rel)
-      elements.push({ data: { id: `${source}>${target}`, source, target, rel } })
+      const edgeId = relationEdgeId(source, target, rel)
+      if (relationEdges.has(edgeId)) return
+      relationEdges.add(edgeId)
+      elements.push({ data: { id: edgeId, source, target, rel } })
     })
   }
   return { elements, nodeIndex }
