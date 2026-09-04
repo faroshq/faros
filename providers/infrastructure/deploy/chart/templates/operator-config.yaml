@@ -90,6 +90,12 @@ spec:
     port: {{ .Values.operator.provider.port }}
   codingSandbox:
     enabled: {{ (.Values.codingSandbox).enabled | default false }}
+  {{- with (.Values.sandbox).runtimeClassName }}
+  # Hardened RuntimeClass (gVisor, Kata) for every synthesized development pod
+  # (serve container's FAROS_SANDBOX_RUNTIME_CLASS_NAME).
+  sandbox:
+    runtimeClassName: {{ . | quote }}
+  {{- end }}
   {{- if or .Values.development.agentImage .Values.development.images }}
   development:
     {{- with .Values.development.agentImage }}
