@@ -10,6 +10,7 @@ const tile = readFileSync(new URL('./src/dashboard-tile.ts', import.meta.url), '
 const inventory = readFileSync(new URL('./src/components/InventoryView.vue', import.meta.url), 'utf8')
 const playground = readFileSync(new URL('./src/components/PlaygroundView.vue', import.meta.url), 'utf8')
 const impact = readFileSync(new URL('./src/components/ImpactView.vue', import.meta.url), 'utf8')
+const styles = readFileSync(new URL('./src/style.css', import.meta.url), 'utf8')
 
 test('the provider contract is a thin reactive light-DOM Vue mount', () => {
   assert.match(element, /createApp\(App, \{ state: this\.state \}\)/u)
@@ -68,6 +69,17 @@ test('secondary views mount lazily and stay mounted after first visit', () => {
   assert.match(app, /<PlaygroundView v-if="visited\.playground" v-show="active === 'playground'"/u)
   assert.doesNotMatch(app, /<InventoryView v-show="active === 'inventory'"/u)
   assert.doesNotMatch(app, /<PlaygroundView v-show="active === 'playground'"/u)
+})
+
+test('labeled toolbar controls do not stretch adjacent action buttons', () => {
+  assert.match(styles, /\.kuery-toolbar\s*\{[^}]*align-items:\s*flex-end;/u)
+})
+
+test('playground editor and results fill the same split-row height', () => {
+  assert.match(styles, /\.pg-split\s*>\s*section\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/u)
+  assert.match(styles, /\.pg-editor\s*\{[^}]*flex:\s*1 1 360px;/u)
+  assert.match(styles, /\.pg-result\s*\{[^}]*flex:\s*1 1 360px;/u)
+  assert.doesNotMatch(styles, /\.pg-result\s*\{[^}]*max-height:/u)
 })
 
 test('Kuery requests share one context-derived transport contract', () => {
