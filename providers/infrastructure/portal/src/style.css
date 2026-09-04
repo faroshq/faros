@@ -22,7 +22,7 @@ faros-provider-infrastructure .page {
 
 /* Separate provider navigation from the routed page using the same major
  * rhythm as the page's own content groups. */
-faros-provider-infrastructure .app > .k-tabs {
+faros-provider-infrastructure .infra-tabs {
   margin-bottom: 16px;
 }
 

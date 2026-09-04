@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const styles = readFileSync(new URL('./style.css', import.meta.url), 'utf8')
+const app = readFileSync(new URL('./App.vue', import.meta.url), 'utf8')
 const provision = readFileSync(new URL('./views/ProvisionPage.vue', import.meta.url), 'utf8')
 const dynamicForm = readFileSync(new URL('./components/DynamicForm.vue', import.meta.url), 'utf8')
 const viewValue = readFileSync(new URL('./components/ViewValue.vue', import.meta.url), 'utf8')
@@ -9,7 +10,8 @@ const templateCard = readFileSync(new URL('./components/TemplateCard.vue', impor
 
 describe('Infrastructure composition contracts', () => {
   it('separates provider tabs from routed page content', () => {
-    expect(styles).toMatch(/\.app > \.k-tabs \{[\s\S]*margin-bottom: 16px;/)
+    expect(app).toContain('class="infra-tabs"')
+    expect(styles).toMatch(/\.infra-tabs \{[\s\S]*margin-bottom: 16px;/)
   })
 
   it('adds deliberate columns for wide template catalogs', () => {
