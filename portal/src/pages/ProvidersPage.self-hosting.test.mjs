@@ -27,12 +27,18 @@ test('self-hosting Edges prerequisite uses catalog-owned availability states', (
 test('only a ready Edges portal receives the provider deep link', () => {
   assert.match(
     source,
-    /<router-link\s+v-if="edgesSelfHostState === 'ready'"\s+to="\/providers\/edges"/,
+    /<router-link\s+v-else-if="edgesSelfHostState === 'ready'"\s+to="\/providers\/edges"/,
   )
   assert.match(source, /v-else-if="edgesSelfHostState === 'unready'"/)
   assert.match(source, /v-else-if="edgesSelfHostState === 'absent'"/)
   assert.match(source, /View Edges in catalog/)
   assert.match(source, /Edges is not installed in this catalog\./)
+})
+
+test('a failed install-target check is visible and retryable', () => {
+  assert.match(source, /v-if="orgProviders\.installTargetsError"/)
+  assert.match(source, /@click="orgProviders\.loadInstallTargets"/)
+  assert.match(source, /Retry check/)
 })
 
 test('unready Edges returns to a filtered catalog instead of navigating to a dead route', () => {

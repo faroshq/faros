@@ -417,8 +417,18 @@ function dependencyNotice(p: ProviderDTO): string {
           <AlertTriangle class="h-4 w-4 flex-shrink-0 mt-0.5" :stroke-width="1.75" />
           <div class="min-w-0">
             <p>{{ orgProviders.installTargetsReason || 'no connected cluster to install into' }}</p>
+            <button
+              v-if="orgProviders.installTargetsError"
+              type="button"
+              class="mt-1 inline-flex items-center gap-1 font-medium underline disabled:cursor-wait disabled:opacity-60"
+              :disabled="orgProviders.installTargetsLoading"
+              @click="orgProviders.loadInstallTargets"
+            >
+              <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': orgProviders.installTargetsLoading }" :stroke-width="2" />
+              Retry check
+            </button>
             <router-link
-              v-if="edgesSelfHostState === 'ready'"
+              v-else-if="edgesSelfHostState === 'ready'"
               to="/providers/edges"
               class="mt-1 inline-flex items-center gap-1 text-[11px] font-medium underline"
             >
