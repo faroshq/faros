@@ -46,6 +46,37 @@ func (b *resolverConfigBuilder) ChildWorkspaceConfig(orgUUID, wsUUID string) *re
 
 type workloadResolverRoundTripper struct {
 	token, serviceAccount, tenantPath string
+	// delegatedUser, when set, makes the ServiceAccount a delegated user
+	// identity standing in for that user instead of a workload identity.
+	delegatedUser string
+}
+
+func (rt workloadResolverRoundTripper) serviceAccountObject() map[string]any {
+	labels := map[string]string{serviceaccounts.LabelWorkloadIdentity: "true"}
+	annotations := map[string]string{serviceaccounts.AnnotationWorkloadIdentityTenantPath: rt.tenantPath}
+	if rt.delegatedUser != "" {
+		labels[serviceaccounts.LabelDelegatedUser] = "true"
+		rest := strings.TrimPrefix(rt.tenantPath, workspacePathRoot+":")
+		org, ws, _ := strings.Cut(rest, ":")
+		annotations[serviceaccounts.AnnotationDelegatedUser] = rt.delegatedUser
+		annotations[serviceaccounts.AnnotationDelegatedOrg] = org
+		annotations[serviceaccounts.AnnotationDelegatedWorkspace] = ws
+		annotations[serviceaccounts.AnnotationDelegatedProvider] = "infrastructure"
+	} else {
+		annotations[serviceaccounts.AnnotationWorkloadIdentityScope] = strings.Repeat("0", 64)
+		annotations[serviceaccounts.AnnotationWorkloadIdentityProject] = "project"
+		annotations[serviceaccounts.AnnotationWorkloadIdentityProjectUID] = "project-uid"
+		annotations[serviceaccounts.AnnotationWorkloadIdentityEnvironment] = "development"
+		annotations[serviceaccounts.AnnotationWorkloadIdentityInstance] = "project-dev"
+	}
+	return map[string]any{
+		"apiVersion": "v1", "kind": "ServiceAccount",
+		"metadata": map[string]any{
+			"name": rt.serviceAccount, "namespace": serviceaccounts.Namespace,
+			"labels":      labels,
+			"annotations": annotations,
+		},
+	}
 }
 
 func (rt workloadResolverRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -79,21 +110,7 @@ func (rt workloadResolverRoundTripper) RoundTrip(r *http.Request) (*http.Respons
 			},
 		})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/default/serviceaccounts/"+rt.serviceAccount:
-		return response(http.StatusOK, map[string]any{
-			"apiVersion": "v1", "kind": "ServiceAccount",
-			"metadata": map[string]any{
-				"name": rt.serviceAccount, "namespace": serviceaccounts.Namespace,
-				"labels": map[string]string{serviceaccounts.LabelWorkloadIdentity: "true"},
-				"annotations": map[string]string{
-					serviceaccounts.AnnotationWorkloadIdentityTenantPath:  rt.tenantPath,
-					serviceaccounts.AnnotationWorkloadIdentityScope:       strings.Repeat("0", 64),
-					serviceaccounts.AnnotationWorkloadIdentityProject:     "project",
-					serviceaccounts.AnnotationWorkloadIdentityProjectUID:  "project-uid",
-					serviceaccounts.AnnotationWorkloadIdentityEnvironment: "development",
-					serviceaccounts.AnnotationWorkloadIdentityInstance:    "project-dev",
-				},
-			},
-		})
+		return response(http.StatusOK, rt.serviceAccountObject())
 	default:
 		return response(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -139,6 +156,54 @@ func TestKCPTenantResolverRoutesServiceAccountIdentityThroughWorkloadVerificatio
 				t.Fatalf("workspace config selected %q/%q", builder.gotOrg, builder.gotWS)
 			}
 		})
+	}
+}
+
+// A delegated user token — what the backend proxy hands an org-owned provider
+// in place of the caller's bearer — resolves to the HUMAN it stands in for,
+// so a provider calling back into the hub with it gets X-Faros-User=alice, not
+// the faros-du-* account name, and the same tenant binding every workload
+// token is held to.
+func TestKCPTenantResolverResolvesDelegatedUserTokenToTheHumanUser(t *testing.T) {
+	const token = "delegated-token"
+	const serviceAccount = "faros-du-test"
+	const tenantPath = "root:faros:tenants:org:workspace"
+	builder := &resolverConfigBuilder{cfg: &rest.Config{
+		Host: "https://workload.test",
+		Transport: workloadResolverRoundTripper{
+			token: token, serviceAccount: serviceAccount, tenantPath: tenantPath, delegatedUser: "alice",
+		},
+	}}
+	r := &kcpTenantResolver{
+		workloadConfig: builder,
+		identifyUser: func(*http.Request) (string, error) {
+			return "system:serviceaccount:default:" + serviceAccount, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/services/providers/infrastructure/x", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(headerFarosOrg, "org")
+	req.Header.Set(headerFarosWorkspace, "workspace")
+	user, gotPath, err := r.resolve(req)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if user != "alice" || gotPath != tenantPath {
+		t.Fatalf("resolved identity = %q/%q, want alice/%s", user, gotPath, tenantPath)
+	}
+	if builder.gotOrg != "org" || builder.gotWS != "workspace" {
+		t.Fatalf("workspace config selected %q/%q", builder.gotOrg, builder.gotWS)
+	}
+
+	// The token is bound to the workspace it was minted in; another
+	// selection is refused exactly as it is for a workload token.
+	other := httptest.NewRequest(http.MethodGet, "/services/providers/infrastructure/x", nil)
+	other.Header.Set("Authorization", "Bearer "+token)
+	other.Header.Set(headerFarosOrg, "org")
+	other.Header.Set(headerFarosWorkspace, "other-workspace")
+	if _, _, err := r.resolve(other); err == nil {
+		t.Fatal("delegated token accepted for a workspace it was not minted in")
 	}
 }
 

@@ -229,9 +229,21 @@ func (r *kcpTenantResolver) resolveWorkloadServiceAccount(req *http.Request) (st
 	}
 	tenantPath := workspacePathRoot + ":" + orgUUID + ":" + wsUUID
 	cfg := r.workloadConfig.ChildWorkspaceConfig(orgUUID, wsUUID)
-	username, err := serviceaccounts.VerifyWorkloadServiceAccount(req.Context(), cfg, token, tenantPath)
+	username, sa, err := serviceaccounts.VerifyWorkloadServiceAccountDetails(req.Context(), cfg, token, tenantPath)
 	if err != nil {
 		return "", "", err
+	}
+	// A delegated user token (the credential the backend proxy hands an
+	// org-owned provider in place of the caller's bearer) stands in for a
+	// person. Surface the person as X-Faros-User, so a provider calling back
+	// into the hub with it attributes the work to the user, not to the
+	// faros-du-* account. The tenant binding was verified above.
+	if serviceaccounts.IsDelegatedUserServiceAccount(sa) {
+		identity, err := serviceaccounts.DelegatedUserFromServiceAccount(sa)
+		if err != nil {
+			return "", "", err
+		}
+		return identity.User, tenantPath, nil
 	}
 	return username, tenantPath, nil
 }

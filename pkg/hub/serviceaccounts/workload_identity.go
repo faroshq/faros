@@ -338,6 +338,14 @@ func verifyWorkloadServiceAccountAnnotations(sa *corev1.ServiceAccount, expected
 	if sa == nil || sa.Labels[LabelWorkloadIdentity] != "true" || sa.Annotations[AnnotationWorkloadIdentityTenantPath] != expectedTenantPath {
 		return fmt.Errorf("workload ServiceAccount is not bound to selected tenant")
 	}
+	// A delegated user identity is hub-managed and tenant-bound like a
+	// workload identity, but carries a human user instead of a Project tuple.
+	// It never has a scope marker, so an action-grant check comparing markers
+	// fails closed on it — which is right: delegation reaches a provider's
+	// data plane as the user, not the action runtime.
+	if IsDelegatedUserServiceAccount(sa) {
+		return verifyDelegatedUserAnnotations(sa)
+	}
 	for _, key := range []string{
 		AnnotationWorkloadIdentityScope,
 		AnnotationWorkloadIdentityProject,
@@ -449,29 +457,35 @@ func ensureWorkloadRBAC(ctx context.Context, cs kubernetes.Interface, serviceAcc
 		}
 	}
 
+	return ensureWorkloadClusterRoleBinding(ctx, cs, roleName, roleName, serviceAccount)
+}
+
+// ensureWorkloadClusterRoleBinding reconciles the hub-managed
+// ClusterRoleBinding bindingName so that exactly the default-namespace
+// ServiceAccount serviceAccount is bound to the ClusterRole roleName. Shared by
+// the workload identity (which binds its own narrow ClusterRole) and the
+// delegated user identity (which binds the role the workspace already grants
+// its members).
+func ensureWorkloadClusterRoleBinding(ctx context.Context, cs kubernetes.Interface, bindingName, roleName, serviceAccount string) error {
 	bindings := cs.RbacV1().ClusterRoleBindings()
 	wantSubjects := []rbacv1.Subject{{Kind: "ServiceAccount", Name: serviceAccount, Namespace: Namespace}}
-	binding, err := bindings.Get(ctx, roleName, metav1.GetOptions{})
+	wantRoleRef := rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: roleName}
+	binding, err := bindings.Get(ctx, bindingName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		binding, err = bindings.Create(ctx, &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{
-			Name:   roleName,
+			Name:   bindingName,
 			Labels: map[string]string{LabelWorkloadIdentity: "true"},
-		}, Subjects: wantSubjects, RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     roleName,
-		}}, metav1.CreateOptions{})
+		}, Subjects: wantSubjects, RoleRef: wantRoleRef}, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("creating workload ClusterRoleBinding: %w", err)
 		}
 		if err != nil {
-			binding, err = bindings.Get(ctx, roleName, metav1.GetOptions{})
+			binding, err = bindings.Get(ctx, bindingName, metav1.GetOptions{})
 		}
 	}
 	if err != nil {
 		return fmt.Errorf("getting workload ClusterRoleBinding: %w", err)
 	}
-	wantRoleRef := rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: roleName}
 	if !reflect.DeepEqual(binding.Subjects, wantSubjects) || !reflect.DeepEqual(binding.RoleRef, wantRoleRef) || binding.Labels[LabelWorkloadIdentity] != "true" {
 		updated := binding.DeepCopy()
 		updated.Subjects = wantSubjects
@@ -479,11 +493,11 @@ func ensureWorkloadRBAC(ctx context.Context, cs kubernetes.Interface, serviceAcc
 		// existing binding points at something else; normal reconciliation uses
 		// a metadata/subject update.
 		if !reflect.DeepEqual(updated.RoleRef, wantRoleRef) {
-			if err := bindings.Delete(ctx, roleName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			if err := bindings.Delete(ctx, bindingName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("deleting stale workload ClusterRoleBinding: %w", err)
 			}
 			_, err := bindings.Create(ctx, &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{
-				Name: roleName, Labels: map[string]string{LabelWorkloadIdentity: "true"},
+				Name: bindingName, Labels: map[string]string{LabelWorkloadIdentity: "true"},
 			}, Subjects: wantSubjects, RoleRef: wantRoleRef}, metav1.CreateOptions{})
 			if err != nil && !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("recreating workload ClusterRoleBinding: %w", err)

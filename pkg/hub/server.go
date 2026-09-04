@@ -729,6 +729,11 @@ func (s *Server) Run(ctx context.Context) error {
 			// ID) so providers can address per-workspace surfaces that key on
 			// the ID — notably the GraphQL gateway at /graphql/clusters/{id}.
 			backendProxy.SetClusterResolver(newClusterIDResolver(kcpConfig))
+			// Org-owned providers never see the caller's hub bearer: the
+			// proxy swaps it for a short-lived ServiceAccount token minted in
+			// the caller's workspace (pkg/hub/serviceaccounts
+			// delegated_user_token.go). Without this the org path refuses.
+			backendProxy.SetDelegatedTokenIssuer(serviceaccounts.NewManager(bootstrapper))
 
 			// Step 10: Org / Workspace / Membership / User REST
 			apiMgr := restapi.NewManager(userClient, bootstrapper)

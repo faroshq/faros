@@ -127,6 +127,9 @@ type WorkspaceConfigBuilder interface {
 // clientset targeting the requested (orgUUID, wsUUID).
 type Manager struct {
 	cfg WorkspaceConfigBuilder
+	// delegatedCache backs IssueDelegatedUserToken; see
+	// delegated_user_token.go.
+	delegatedCache
 }
 
 // NewManager constructs a Manager backed by the given workspace
