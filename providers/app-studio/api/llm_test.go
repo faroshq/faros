@@ -179,17 +179,20 @@ func TestProjectLLMSettingsUseCodexStreamRecoveryDefaults(t *testing.T) {
 
 func TestProjectAssistantDeepIterationsConfiguration(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
+	if projectAssistantDefaultMaxIterations != 200 {
+		t.Fatalf("default model-call ceiling = %d, want the finite 200 per run", projectAssistantDefaultMaxIterations)
+	}
 	tests := []struct {
 		value string
 		want  int
 	}{
-		{value: "", want: projectAssistantFiniteIterationCeiling},
+		{value: "", want: 200},
 		{value: "48", want: 48},
 		{value: " unlimited ", want: maxInt},
 		{value: "UNLIMITED", want: maxInt},
-		{value: "0", want: projectAssistantFiniteIterationCeiling},
-		{value: "-1", want: projectAssistantFiniteIterationCeiling},
-		{value: "invalid", want: projectAssistantFiniteIterationCeiling},
+		{value: "0", want: maxInt},
+		{value: "-1", want: 200},
+		{value: "invalid", want: 200},
 	}
 	for _, tt := range tests {
 		t.Run(tt.value, func(t *testing.T) {
@@ -201,17 +204,20 @@ func TestProjectAssistantDeepIterationsConfiguration(t *testing.T) {
 }
 
 func TestProjectAssistantRolloutBudgetConfiguration(t *testing.T) {
+	if projectAssistantDefaultRolloutBudgetTokens != 2_000_000 {
+		t.Fatalf("default rollout budget = %d, want the finite 2,000,000 weighted tokens per run", projectAssistantDefaultRolloutBudgetTokens)
+	}
 	tests := []struct {
 		value string
 		want  int64
 	}{
-		{value: "", want: projectAssistantDefaultRolloutBudgetTokens},
+		{value: "", want: 2_000_000},
 		{value: "48000", want: 48000},
 		{value: " unlimited ", want: 0},
 		{value: "UNLIMITED", want: 0},
-		{value: "0", want: projectAssistantDefaultRolloutBudgetTokens},
-		{value: "-1", want: projectAssistantDefaultRolloutBudgetTokens},
-		{value: "invalid", want: projectAssistantDefaultRolloutBudgetTokens},
+		{value: "0", want: 0},
+		{value: "-1", want: 2_000_000},
+		{value: "invalid", want: 2_000_000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.value, func(t *testing.T) {
