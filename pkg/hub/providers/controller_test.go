@@ -43,6 +43,12 @@ type httpDoerFunc func(*http.Request) (*http.Response, error)
 
 func (f httpDoerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
 
+type edgeRouteResolverFunc func(context.Context, string, string, string) (*EdgeRoute, error)
+
+func (f edgeRouteResolverFunc) ResolveProviderEdgeRoute(ctx context.Context, orgUUID, providerName, backendURL string) (*EdgeRoute, error) {
+	return f(ctx, orgUUID, providerName, backendURL)
+}
+
 func healthyHTTPDoer() httpDoer {
 	return httpDoerFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -389,6 +395,9 @@ func TestCatalogReconcilerDoesNotDirectlyProbeOrgOwnedBackend(t *testing.T) {
 	r := &CatalogReconciler{
 		mgr: testfakes.NewManager(c), reg: reg, prov: &Provisioner{},
 		clusterPaths: map[string]string{"cluster": kcppaths.OrgProviderPath("org-1", "database")},
+		edgeRoutes: edgeRouteResolverFunc(func(context.Context, string, string, string) (*EdgeRoute, error) {
+			return &EdgeRoute{Cluster: "tenant-cluster", ServiceName: "provider-database"}, nil
+		}),
 		healthClient: httpDoerFunc(func(*http.Request) (*http.Response, error) {
 			probes++
 			return nil, fmt.Errorf("org-owned backend must not be dialled")
@@ -403,6 +412,60 @@ func TestCatalogReconcilerDoesNotDirectlyProbeOrgOwnedBackend(t *testing.T) {
 	got, ok := reg.GetForOrg("org-1", "database")
 	if !ok || got.BackendHealthRequired || !got.Ready() {
 		t.Fatalf("org-owned registry provider = %+v, found=%v", got, ok)
+	}
+}
+
+func TestCatalogReconcilerRetriesOrgOwnedEdgeRouteAndRecovers(t *testing.T) {
+	reg := NewRegistry()
+	scheme := newProviderTestScheme(t)
+	entry := &providersv1alpha1.CatalogEntry{
+		ObjectMeta: metav1.ObjectMeta{Name: "database"},
+		Spec: providersv1alpha1.CatalogEntrySpec{
+			Backend: &providersv1alpha1.ProviderBackend{URL: "http://database.tenant.svc", HealthPath: "/readyz"},
+		},
+	}
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&providersv1alpha1.CatalogEntry{}).
+		WithObjects(entry).
+		Build()
+	routeReady := false
+	r := &CatalogReconciler{
+		mgr: testfakes.NewManager(c), reg: reg, prov: &Provisioner{},
+		clusterPaths: map[string]string{"cluster": kcppaths.OrgProviderPath("org-1", "database")},
+		edgeRoutes: edgeRouteResolverFunc(func(context.Context, string, string, string) (*EdgeRoute, error) {
+			if !routeReady {
+				return nil, fmt.Errorf("temporary route lookup failure")
+			}
+			return &EdgeRoute{Cluster: "tenant-cluster", ServiceName: "provider-database"}, nil
+		}),
+	}
+	req := testfakes.NewRequest("cluster", "", "database")
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile unroutable: %v", err)
+	}
+	if result.RequeueAfter != SweepInterval {
+		t.Fatalf("unroutable requeueAfter = %v, want %v", result.RequeueAfter, SweepInterval)
+	}
+	if got, ok := reg.GetForOrg("org-1", "database"); !ok || got.Ready() {
+		t.Fatalf("unroutable registry provider = %+v, found=%v", got, ok)
+	}
+	var updated providersv1alpha1.CatalogEntry
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "database"}, &updated); err != nil {
+		t.Fatalf("get unroutable entry: %v", err)
+	}
+	readyCondition := conditionByType(updated.Status.Conditions, "Ready")
+	if readyCondition == nil || readyCondition.Status != metav1.ConditionFalse || readyCondition.Reason != "BackendUnroutable" {
+		t.Fatalf("unroutable conditions = %#v", updated.Status.Conditions)
+	}
+
+	routeReady = true
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile recovered route: %v", err)
+	}
+	if got, ok := reg.GetForOrg("org-1", "database"); !ok || !got.Ready() || !got.EdgeRoute.Usable() {
+		t.Fatalf("recovered registry provider = %+v, found=%v", got, ok)
 	}
 }
 

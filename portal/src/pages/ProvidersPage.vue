@@ -812,8 +812,9 @@ function dependencyNotice(p: ProviderDTO): string {
               <ExternalLink class="h-3 w-3" :stroke-width="2" />
             </router-link>
 
-            <!-- Enable / Disable: only when provider declares an APIExport -->
-            <template v-if="p.apiExportName && p.ready">
+            <!-- Readiness gates new bindings, but never removal of an existing
+                 binding: an outage is exactly when Disable may be needed. -->
+            <template v-if="p.apiExportName">
               <!-- Mid-deletion: neither Enable (name still taken) nor Disable
                    (already deleting) is actionable, so say what's happening. -->
               <span
@@ -824,7 +825,7 @@ function dependencyNotice(p: ProviderDTO): string {
                 Disabling&hellip;
               </span>
               <button
-                v-else-if="!providers.isEnabled(p.name)"
+                v-else-if="!providers.isEnabled(p.name) && p.ready"
                 type="button"
                 class="k-btn k-btn--ghost inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-success transition-colors hover:border-success/40 hover:bg-success-subtle disabled:cursor-not-allowed disabled:opacity-60"
                 :disabled="!!busy[p.name] || providers.hasMissingDependencies(p)"

@@ -206,6 +206,13 @@ func (p Provider) Readiness() (ready bool, reason, message string) {
 	if !p.EndpointsValid {
 		return false, "InvalidEndpoint", "Provider endpoint configuration is invalid."
 	}
+	// Org-owned backend URLs name services inside tenant clusters. The proxy
+	// deliberately refuses to dial them directly, so a usable hub-owned edge
+	// route is part of aggregate readiness even though routed health probing is
+	// deferred. This checks route admission only; it never contacts the URL.
+	if p.OrgUUID != "" && p.BackendURL != nil && !p.EdgeRoute.Usable() {
+		return false, "BackendUnroutable", "Provider backend route is unavailable."
+	}
 	if p.BackendHealthRequired && !p.BackendHealthy {
 		return false, "BackendUnhealthy", "Provider backend is unavailable."
 	}

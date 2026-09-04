@@ -326,11 +326,17 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	// through kcp) is unaffected. It just has no reachable backend, which the
 	// proxy reports as 503 rather than dialling an address inside someone
 	// else's cluster.
-	if orgUUID != "" && r.edgeRoutes != nil && entry.Spec.Backend != nil {
-		route, err := r.edgeRoutes.ResolveProviderEdgeRoute(ctx, orgUUID, entry.Name, entry.Spec.Backend.URL)
-		if err != nil {
+	var edgeRouteErr error
+	if orgUUID != "" && entry.Spec.Backend != nil {
+		if r.edgeRoutes == nil {
+			edgeRouteErr = fmt.Errorf("edge route resolver is unavailable")
+		} else if route, err := r.edgeRoutes.ResolveProviderEdgeRoute(ctx, orgUUID, entry.Name, entry.Spec.Backend.URL); err != nil {
+			edgeRouteErr = err
 			logger.Info("Could not resolve edge route for org-owned provider; its backend stays unroutable",
 				"provider", entry.Name, "error", err.Error())
+		} else if !route.Usable() {
+			edgeRouteErr = fmt.Errorf("edge route is not yet usable")
+			logger.Info("Edge route for org-owned provider is not yet usable", "provider", entry.Name)
 		} else {
 			prov.EdgeRoute = route
 		}
@@ -605,6 +611,10 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "InvalidEndpoint"
 		cond.Message = fmt.Sprintf("Endpoint parse errors: %v", parseErrs)
+	case edgeRouteErr != nil:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = "BackendUnroutable"
+		cond.Message = "Provider backend route is unavailable."
 	case prov.BackendHealthRequired && !prov.BackendHealthy:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = "BackendUnhealthy"
@@ -629,7 +639,7 @@ func (r *CatalogReconciler) Reconcile(ctx context.Context, req mcreconcile.Reque
 	} else if requeue {
 		return ctrl.Result{Requeue: true}, nil
 	}
-	if prov.BackendHealthRequired || prov.HeartbeatRequired {
+	if prov.BackendHealthRequired || prov.HeartbeatRequired || edgeRouteErr != nil {
 		return ctrl.Result{RequeueAfter: SweepInterval}, nil
 	}
 	return ctrl.Result{}, nil

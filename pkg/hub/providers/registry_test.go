@@ -10,6 +10,7 @@ package providers
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,23 @@ func TestProviderReadinessAggregatesBackendAndHeartbeat(t *testing.T) {
 	ready, reason, message = p.Readiness()
 	if !ready || reason != "" || message != "" {
 		t.Fatalf("healthy readiness = (%v, %q, %q)", ready, reason, message)
+	}
+}
+
+func TestProviderReadinessRequiresOrgOwnedBackendRoute(t *testing.T) {
+	p := Provider{
+		Name:           "database",
+		OrgUUID:        "org-1",
+		BackendURL:     &url.URL{Scheme: "http", Host: "database.tenant.svc"},
+		EndpointsValid: true,
+	}
+	ready, reason, message := p.Readiness()
+	if ready || reason != "BackendUnroutable" || message != "Provider backend route is unavailable." {
+		t.Fatalf("unroutable readiness = (%v, %q, %q)", ready, reason, message)
+	}
+	p.EdgeRoute = &EdgeRoute{Cluster: "tenant-cluster", ServiceName: "provider-database"}
+	if ready, reason, message = p.Readiness(); !ready || reason != "" || message != "" {
+		t.Fatalf("routable readiness = (%v, %q, %q)", ready, reason, message)
 	}
 }
 
