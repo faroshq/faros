@@ -1,10 +1,27 @@
 import { describe, expect, it, vi } from 'vitest'
+import { resolveConfirm } from '../portalkit/confirm'
 import type { Connection, Toolset } from '../types'
-import type { Connections } from '../views/connections'
-import type { Toolsets } from '../views/toolsets'
-import '../views/connections'
-import '../views/toolsets'
-import { agentFixture, makeStore, mount, settle, stubApi, text } from './helpers'
+import ConnectionsView from '../views/Connections.vue'
+import ToolsetsView from '../views/Toolsets.vue'
+import { agentFixture, makeStore, stubApi } from './helpers'
+import { mountVue, settleVue, text } from './vue-helper'
+
+async function mount<T = HTMLElement>(_tag: string, props: Record<string, unknown>): Promise<T> {
+  const mounted = await mountVue(_tag.includes('toolsets') ? ToolsetsView : ConnectionsView, props)
+  await settleVue(1, 120)
+  return mounted.element as unknown as T
+}
+type Connections = HTMLElement
+type Toolsets = HTMLElement
+async function settle(_element: Element, passes = 4): Promise<void> { await settleVue(passes, 120) }
+async function chooseFilter(shell: HTMLElement, index: number, label: string): Promise<void> {
+  shell.querySelectorAll<HTMLButtonElement>('.k-table__filter-trigger')[index]!.click()
+  await settleVue()
+  const option = [...document.querySelectorAll<HTMLElement>('.k-table__filter-option')].find(item => text(item) === label)
+  expect(option).toBeTruthy()
+  option!.click()
+  await settleVue(4, 120)
+}
 
 function connection(name: string, type = 'github'): Connection {
   return {
@@ -74,6 +91,12 @@ describe('Connections resource tables', () => {
 
     expect(text(el)).toContain(expected)
     expect(Boolean(el.querySelector('form'))).toBe(hasForm)
+    expect(el.querySelector('.k-resource-page')).not.toBeNull()
+    expect(el.querySelector<HTMLAnchorElement>('.k-back-action')?.getAttribute('href')).toBe('#/connections')
+    if (hasForm) {
+      expect(el.querySelector('[data-k-resource-section-card] form')).not.toBeNull()
+      expect(el.querySelector('form.k-create-surface')).toBeNull()
+    }
   })
 
   it.each([
@@ -122,7 +145,10 @@ describe('Connections resource tables', () => {
     const form = el.querySelector<HTMLFormElement>('form')!
     for (const [name, value] of Object.entries(values)) {
       const input = form.querySelector<HTMLInputElement>(`input[name="${name}"]`)
-      if (input) input.value = value
+      if (input) {
+        input.value = value
+        input.dispatchEvent(new InputEvent('input', { bubbles: true }))
+      }
     }
     form.dispatchEvent(new Event('submit', { cancelable: true }))
     await settle(el, 6)
@@ -148,14 +174,40 @@ describe('Connections resource tables', () => {
     const form = el.querySelector<HTMLFormElement>('form')!
     const displayName = form.querySelector<HTMLInputElement>('input[name="displayName"]')!
     displayName.value = 'Draft name'
-    displayName.dispatchEvent(new Event('input'))
+    displayName.dispatchEvent(new InputEvent('input', { bubbles: true }))
     form.dispatchEvent(new Event('submit', { cancelable: true }))
     form.dispatchEvent(new Event('submit', { cancelable: true }))
     await settle(el, 6)
 
     expect(patchConnection).toHaveBeenCalledTimes(1)
     expect(el.querySelector<HTMLInputElement>('input[name="displayName"]')!.value).toBe('Draft name')
-    expect(el.querySelector('h1')?.textContent).toBe('Edit connection')
+    expect(el.querySelector('h1')?.textContent).toBe('Connection test')
+  })
+
+  it('preserves a routed toolset draft across store refreshes', async () => {
+    const api = stubApi()
+    const store = makeStore(api)
+    store.toolsets.data = [toolset('research', ['search'])]
+    store.toolsets.loaded = store.toolsets.hasSnapshot = true
+    store.connections.data = [connection('search', 'websearch')]
+    store.connections.loaded = store.connections.hasSnapshot = true
+    const el = await mount<Toolsets>('agents-toolsets', {
+      store,
+      api,
+      routeOwned: true,
+      editRoute: true,
+      editName: 'research',
+    })
+    const displayName = el.querySelector<HTMLInputElement>('input')!
+    displayName.value = 'Unfinished research tools'
+    displayName.dispatchEvent(new InputEvent('input', { bubbles: true }))
+    await settle(el)
+
+    store.toolsets.data = [toolset('research', ['search'])]
+    store.dispatchEvent(new Event('change'))
+    await settle(el)
+
+    expect(el.querySelector<HTMLInputElement>('input')!.value).toBe('Unfinished research tools')
   })
 
   it('uses PortalKit query, facets, pagination, and resource actions for connections', async () => {
@@ -179,6 +231,8 @@ describe('Connections resource tables', () => {
     expect(shell.querySelector('.k-table__controls[role="search"]')).not.toBeNull()
     expect(shell.querySelectorAll('.k-table__filter')).toHaveLength(2)
     expect(shell.querySelectorAll('tbody .k-table__row')).toHaveLength(10)
+    expect(shell.querySelector('tbody .k-table__row')?.hasAttribute('tabindex')).toBe(false)
+    expect(shell.querySelector('tbody .k-table__row')?.classList.contains('k-table__row--interactive')).toBe(false)
     expect(shell.querySelector('.k-table__range')?.textContent).toContain('1–10')
     expect([...table.querySelectorAll('th')].map((heading) => text(heading))).not.toContain('Actions')
     expect(shell.querySelector('.k-table-action--edit[aria-label="Edit connection conn-01"]')).not.toBeNull()
@@ -200,9 +254,7 @@ describe('Connections resource tables', () => {
     search.value = ''
     search.dispatchEvent(new InputEvent('input', { bubbles: true }))
     await settle(el)
-    const kind = shell.querySelector('faros-resource-table-filter')!
-    kind.dispatchEvent(new CustomEvent('change', { detail: 'channel', bubbles: true }))
-    await settle(el)
+    await chooseFilter(shell, 0, 'Channel')
     expect(shell.querySelectorAll('tbody .k-table__row')).toHaveLength(4)
     expect(shell.querySelector('.k-table-action--accent[aria-label^="Send a test message"]')).not.toBeNull()
   })
@@ -222,14 +274,14 @@ describe('Connections resource tables', () => {
     const shell = table.closest<HTMLElement>('.k-table--resource')!
 
     expect(shell.querySelectorAll('tbody .k-table__row')).toHaveLength(10)
+    expect(shell.querySelector('tbody .k-table__row')?.hasAttribute('tabindex')).toBe(false)
+    expect(shell.querySelector('tbody .k-table__row')?.classList.contains('k-table__row--interactive')).toBe(false)
     expect(shell.querySelector('input[aria-label="Search Toolsets"]')).not.toBeNull()
-    expect(shell.querySelector('faros-resource-table-filter')).not.toBeNull()
+    expect(shell.querySelector('.k-table__filter')).not.toBeNull()
     expect(shell.querySelector('.k-table-action--edit[aria-label="Edit toolset set-01"]')).not.toBeNull()
     expect(shell.querySelector('.k-table-action--delete[aria-label="Delete toolset set-01"]')).not.toBeNull()
 
-    const usage = shell.querySelector('faros-resource-table-filter')!
-    usage.dispatchEvent(new CustomEvent('change', { detail: 'used', bubbles: true }))
-    await settle(el)
+    await chooseFilter(shell, 0, 'In use')
     expect(shell.querySelectorAll('tbody .k-table__row')).toHaveLength(1)
     expect(text(shell.querySelector('tbody'))).toContain('Toolset set-01')
     expect(text(shell.querySelector('tbody'))).toContain('1 agent')
@@ -293,18 +345,17 @@ describe('Connections resource tables', () => {
     store.agents.hasSnapshot = false
 
     const el = await mount<Toolsets>('agents-toolsets', { store, api, routeOwned: true })
-    let usage = el.querySelector('faros-resource-table-filter')!
-    usage.dispatchEvent(new CustomEvent('change', { detail: 'unknown', bubbles: true }))
-    await settle(el)
-    expect(usage.value).toBe('unknown')
+    let usage = el.querySelector<HTMLElement>('.k-table__filter')!
+    await chooseFilter(el, 0, 'Unknown')
+    expect(usage.classList.contains('is-active')).toBe(true)
 
     store.agents.data = []
     store.agents.loaded = true
     store.agents.hasSnapshot = true
     store.dispatchEvent(new Event('change'))
     await settle(el)
-    usage = el.querySelector('faros-resource-table-filter')!
-    expect(usage.value).toBe('')
+    usage = el.querySelector<HTMLElement>('.k-table__filter')!
+    expect(usage.classList.contains('is-active')).toBe(false)
     expect(el.querySelectorAll('table[aria-label="Toolsets"] tbody .k-table__row')).toHaveLength(2)
   })
 
@@ -329,5 +380,114 @@ describe('Connections resource tables', () => {
     const toolsets = await mount<Toolsets>('agents-toolsets', { store, api, routeOwned: true })
     expect(text(toolsets.querySelector('table[aria-label="Toolsets"] tbody'))).toContain('Unknown')
     expect(text(toolsets.querySelector('table[aria-label="Toolsets"] tbody'))).not.toContain('0 agents')
+  })
+
+  it('keeps refresh errors recoverable beside empty-state guidance', async () => {
+    const api = stubApi()
+    const store = makeStore(api)
+    Object.assign(store.connections, { loaded: true, hasSnapshot: true, error: 'connection refresh failed' })
+    Object.assign(store.toolsets, { loaded: true, hasSnapshot: true, error: 'toolset refresh failed' })
+
+    const connections = await mount<Connections>('agents-connections', { store, api, routeOwned: true })
+    expect(connections.querySelector('.k-first-run')).not.toBeNull()
+    expect(text(connections.querySelector('.agents-stale'))).toContain('connection refresh failed')
+    expect(connections.querySelector('.agents-stale button')).not.toBeNull()
+
+    const toolsets = await mount<Toolsets>('agents-toolsets', { store, api, routeOwned: true })
+    expect(toolsets.querySelector('.k-first-run')).not.toBeNull()
+    expect(text(toolsets.querySelector('.agents-stale'))).toContain('toolset refresh failed')
+    expect(toolsets.querySelector('.agents-stale button')).not.toBeNull()
+  })
+
+  it('uses h2 category headings in the connection type picker', async () => {
+    const api = stubApi()
+    const store = makeStore(api)
+    const el = await mount<Connections>('agents-connections', { store, api, routeOwned: true, createRoute: true })
+
+    expect(el.querySelectorAll('.agents-conn-group > h2.agents-conn-grouphead')).toHaveLength(3)
+    expect(el.querySelector('.agents-conn-group > h5')).toBeNull()
+  })
+
+  it.each([
+    {
+      label: 'test message',
+      method: 'testConnection',
+      idleLabel: 'Send a test message via telegram',
+      busyLabel: 'Sending a test message via telegram…',
+      result: undefined,
+      opensTab: false,
+    },
+    {
+      label: 'inbound enablement',
+      method: 'enableInbound',
+      idleLabel: 'Enable inbound chat for telegram',
+      busyLabel: 'Enabling inbound chat for telegram…',
+      result: { registered: true, note: 'Inbound enabled.', webhookURL: 'https://faros.example.test/webhook' },
+      opensTab: false,
+    },
+    {
+      label: 'OAuth authorization',
+      method: 'oauthAuthorize',
+      idleLabel: 'Connect OAuth for telegram',
+      busyLabel: 'Connecting OAuth for telegram…',
+      result: { authorizeURL: 'https://provider.example.test/authorize' },
+      opensTab: true,
+    },
+  ])('keeps $label single-flight and locks sibling row actions', async ({ method, idleLabel, busyLabel, result, opensTab }) => {
+    let finish!: (value: unknown) => void
+    const pending = new Promise<unknown>(resolve => { finish = resolve })
+    const request = vi.fn().mockImplementation(() => pending)
+    const item = connection('telegram', 'telegram')
+    item.spec.auth = 'oauth'
+    const api = stubApi({ [method]: request, listConnections: () => Promise.resolve([item]) })
+    const store = makeStore(api)
+    store.connections.data = [item]
+    Object.assign(store.connections, { loaded: true, hasSnapshot: true })
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const el = await mount<Connections>('agents-connections', { store, api, routeOwned: true })
+
+    const action = el.querySelector<HTMLButtonElement>(`[aria-label="${idleLabel}"]`)!
+    action.click()
+    action.click()
+    await settle(el)
+
+    expect(request).toHaveBeenCalledTimes(1)
+    const busy = el.querySelector<HTMLButtonElement>(`[aria-label="${busyLabel}"]`)!
+    expect(busy.disabled).toBe(true)
+    expect(busy.getAttribute('aria-busy')).toBe('true')
+    for (const sibling of el.querySelectorAll<HTMLButtonElement>('table[aria-label="Connections"] .k-table-action')) {
+      expect(sibling.disabled).toBe(true)
+    }
+
+    finish(result)
+    await settle(el, 6)
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(open).toHaveBeenCalledTimes(opensTab ? 1 : 0)
+    open.mockRestore()
+  })
+
+  it('locks connection row actions while deletion is in flight', async () => {
+    let finishDelete!: () => void
+    const deletion = new Promise<void>(resolve => { finishDelete = resolve })
+    const deleteConnection = vi.fn().mockImplementation(() => deletion)
+    const api = stubApi({ deleteConnection })
+    const store = makeStore(api)
+    store.connections.data = [connection('delete-me')]
+    Object.assign(store.connections, { loaded: true, hasSnapshot: true })
+    const el = await mount<Connections>('agents-connections', { store, api, routeOwned: true })
+
+    el.querySelector<HTMLButtonElement>('[aria-label="Delete connection delete-me"]')!.click()
+    resolveConfirm(true)
+    await settle(el)
+
+    const deleting = el.querySelector<HTMLButtonElement>('[aria-label="Deleting connection delete-me…"]')!
+    expect(deleting.disabled).toBe(true)
+    expect(deleting.getAttribute('aria-busy')).toBe('true')
+    expect(el.querySelector<HTMLButtonElement>('[aria-label="Edit connection delete-me"]')!.disabled).toBe(true)
+    expect(deleteConnection).toHaveBeenCalledTimes(1)
+
+    finishDelete()
+    await settle(el)
   })
 })

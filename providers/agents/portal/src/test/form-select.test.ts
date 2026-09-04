@@ -1,27 +1,30 @@
-import { describe, expect, it, vi } from 'vitest'
-import type { FormSelectElement } from '../portalkit/form-select'
-import '../portalkit/form-select'
+import { defineComponent, h, ref } from 'vue'
+import { describe, expect, it } from 'vitest'
+import FormSelect from '../portalkit/FormSelect.vue'
+import { mountVue, settleVue } from './vue-helper'
 
-function mountSelect(): FormSelectElement {
+async function mountSelect() {
   const label = document.createElement('span')
   label.id = 'model-label'
   label.textContent = 'Model credential'
-  const select = document.createElement('faros-form-select')
-  select.labelledby = label.id
-  select.options = [
+  const options = [
     { value: '', label: '— no model —' },
     { value: 'main', label: 'main (gpt-5)' },
     { value: 'disabled', label: 'disabled', disabled: true },
     { value: 'backup', label: 'backup (claude)' },
   ]
-  select.value = 'main'
-  document.body.append(label, select)
-  return select
+  const value = ref('main')
+  const Harness = defineComponent({ setup: () => () => h(FormSelect, {
+    modelValue: value.value, options, labelledby: label.id,
+    'onUpdate:modelValue': (next: string) => { value.value = next },
+  }) })
+  document.body.append(label)
+  return { ...(await mountVue(Harness, {})), value }
 }
 
-describe('PortalKit form select web component', () => {
-  it('matches the canonical combobox/listbox and portalled menu contract', () => {
-    const select = mountSelect()
+describe('PortalKit Vue form select', () => {
+  it('matches the canonical combobox/listbox and portalled menu contract', async () => {
+    const { element: select } = await mountSelect()
     const trigger = select.querySelector<HTMLButtonElement>('[role="combobox"]')!
     expect(trigger.classList.contains('k-input')).toBe(true)
     expect(trigger.classList.contains('k-form-select__trigger')).toBe(true)
@@ -29,6 +32,7 @@ describe('PortalKit form select web component', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
 
     trigger.click()
+    await settleVue()
     const panel = document.body.querySelector<HTMLElement>('.k-form-select__portal')!
     expect(panel).not.toBeNull()
     expect(select.contains(panel)).toBe(false)
@@ -37,29 +41,29 @@ describe('PortalKit form select web component', () => {
     expect(trigger.getAttribute('aria-activedescendant')).toContain('option-1')
   })
 
-  it('wraps keyboard navigation, skips disabled options, and emits the value', () => {
-    const select = mountSelect()
-    const changed = vi.fn()
-    select.addEventListener('change', changed)
+  it('wraps keyboard navigation, skips disabled options, and updates the value', async () => {
+    const { element: select, value } = await mountSelect()
     const trigger = select.querySelector<HTMLButtonElement>('[role="combobox"]')!
 
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await settleVue()
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await settleVue()
     expect(trigger.getAttribute('aria-activedescendant')).toContain('option-3')
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settleVue()
 
-    expect(select.value).toBe('backup')
-    expect(changed).toHaveBeenCalledOnce()
-    expect((changed.mock.calls[0][0] as CustomEvent<string>).detail).toBe('backup')
+    expect(value.value).toBe('backup')
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
   })
 
   it('closes on Escape and restores focus to the trigger', async () => {
-    const select = mountSelect()
+    const { element: select } = await mountSelect()
     const trigger = select.querySelector<HTMLButtonElement>('[role="combobox"]')!
     trigger.click()
+    await settleVue()
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
-    await Promise.resolve()
+    await settleVue()
 
     expect(document.body.querySelector('.k-form-select__portal')).toBeNull()
     expect(document.activeElement).toBe(trigger)

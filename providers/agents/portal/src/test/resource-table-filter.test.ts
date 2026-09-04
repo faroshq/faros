@@ -1,22 +1,24 @@
-import { describe, expect, it, vi } from 'vitest'
-import type { ResourceTableFilterElement } from '../portalkit/resource-table-filter'
-import '../portalkit/resource-table-filter'
+import { defineComponent, h, ref } from 'vue'
+import { describe, expect, it } from 'vitest'
+import ResourceTableFilter from '../portalkit/ResourceTableFilter.vue'
+import { mountVue, settleVue } from './vue-helper'
 
-function mountFilter(): ResourceTableFilterElement {
-  const filter = document.createElement('faros-resource-table-filter')
-  filter.label = 'Kind'
-  filter.allLabel = 'All kinds'
-  filter.options = [
+async function mountFilter() {
+  const options = [
     { value: 'connection', label: 'Connection' },
     { value: 'channel', label: 'Channel' },
   ]
-  document.body.append(filter)
-  return filter
+  const value = ref('')
+  const Harness = defineComponent({ setup: () => () => h(ResourceTableFilter, {
+    definition: { key: 'kind', label: 'Kind', allLabel: 'All kinds' }, options, modelValue: value.value,
+    'onUpdate:modelValue': (next: string) => { value.value = next },
+  }) })
+  return { ...(await mountVue(Harness, {})), value }
 }
 
-describe('PortalKit resource table filter web component', () => {
-  it('uses the standard visible-label combobox and portalled listbox', () => {
-    const filter = mountFilter()
+describe('PortalKit Vue resource table filter', () => {
+  it('uses the standard visible-label combobox and portalled listbox', async () => {
+    const { element: filter } = await mountFilter()
     const root = filter.querySelector('.k-table__filter')!
     const trigger = filter.querySelector<HTMLButtonElement>('.k-table__filter-trigger')!
     expect(root.textContent).toContain('Kind')
@@ -26,6 +28,7 @@ describe('PortalKit resource table filter web component', () => {
     expect(trigger.textContent).toContain('All')
 
     trigger.click()
+    await settleVue()
     const panel = document.body.querySelector('.k-table__filter-panel')!
     expect(panel).not.toBeNull()
     expect(filter.contains(panel)).toBe(false)
@@ -33,22 +36,20 @@ describe('PortalKit resource table filter web component', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('true')
   })
 
-  it('commits one keyboard selection and closes on disconnect', () => {
-    const filter = mountFilter()
-    const changed = vi.fn()
-    filter.addEventListener('change', changed)
+  it('commits one keyboard selection and closes on unmount', async () => {
+    const { element: filter, value, unmount } = await mountFilter()
     const trigger = filter.querySelector<HTMLButtonElement>('.k-table__filter-trigger')!
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    await settleVue()
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
     trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settleVue()
 
-    expect(filter.value).toBe('connection')
-    expect(changed).toHaveBeenCalledOnce()
-    expect((changed.mock.calls[0][0] as CustomEvent<string>).detail).toBe('connection')
+    expect(value.value).toBe('connection')
     expect(document.body.querySelector('.k-table__filter-panel')).toBeNull()
 
     trigger.click()
-    filter.remove()
+    unmount()
     expect(document.body.querySelector('.k-table__filter-panel')).toBeNull()
   })
 })

@@ -40,6 +40,13 @@ describe('edit routes', () => {
     expect(activeMenu(route)).toBe('connections')
   })
 
+  it('parses, formats, and highlights a toolset edit route', () => {
+    const route: Route = { kind: 'edit', resource: 'toolset', name: 'research tools' }
+    expect(hashFor(route)).toBe('#/toolsets/research%20tools/edit')
+    expect(parseHash('#/toolsets/research%20tools/edit')).toEqual(route)
+    expect(activeMenu(route)).toBe('connections')
+  })
+
   it('rejects extra path segments after a connection edit route', () => {
     expect(parseHash('#/connections/test/edit/extra')).toEqual({ kind: 'menu', menu: 'connections' })
   })

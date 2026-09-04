@@ -10,6 +10,7 @@
 //   #/activity/<runID>                run trace
 //   #/connections #/models
 //   #/connections/<name>/edit         connection edit
+//   #/toolsets/<name>/edit            toolset edit
 //   #/create/agent
 //   #/create/connection[/<type>]
 //   #/create/toolset #/create/model
@@ -25,7 +26,7 @@ export type Route =
   | { kind: 'menu'; menu: MenuKey }
   | { kind: 'agent'; name: string; tab: AgentTab }
   | { kind: 'run'; id: string }
-  | { kind: 'edit'; resource: 'connection'; name: string }
+  | { kind: 'edit'; resource: 'connection' | 'toolset'; name: string }
   | { kind: 'create'; resource: CreateResource; type?: string }
 
 // Create surfaces send this event after their API write succeeds. Keeping the
@@ -36,15 +37,24 @@ export interface CreateSuccessDetail {
   name?: string
   item?: unknown
   destination?: Route
+  store?: unknown
+  authorityEpoch?: number
+  createSession?: number
 }
 
 export interface EditSuccessDetail {
-  resource: 'connection'
+  resource: 'connection' | 'toolset'
   name: string
   item?: unknown
+  store?: unknown
+  authorityEpoch?: number
+  createSession?: number
 }
 
-export type EditCancelDetail = Pick<EditSuccessDetail, 'resource' | 'name'>
+export type EditCancelDetail = Pick<
+  EditSuccessDetail,
+  'resource' | 'name' | 'store' | 'authorityEpoch' | 'createSession'
+>
 
 export const DEFAULT_ROUTE: Route = { kind: 'menu', menu: 'agents' }
 
@@ -66,6 +76,9 @@ export function parseHash(hash = location.hash): Route {
   if (head === 'connections' && second && third === 'edit' && parts.length === 3) {
     return { kind: 'edit', resource: 'connection', name: decodePart(second) }
   }
+  if (head === 'toolsets' && second && third === 'edit' && parts.length === 3) {
+    return { kind: 'edit', resource: 'toolset', name: decodePart(second) }
+  }
   if (head === 'activity' && second) return { kind: 'run', id: decodePart(second) }
   if (head === 'runs' && second) return { kind: 'run', id: decodePart(second) }
   if ((MENUS as string[]).includes(head)) return { kind: 'menu', menu: head as MenuKey }
@@ -83,7 +96,7 @@ export function hashFor(route: Route): string {
     case 'run':
       return `#/activity/${encodeURIComponent(route.id)}`
     case 'edit':
-      return `#/connections/${encodeURIComponent(route.name)}/edit`
+      return `#/${route.resource === 'connection' ? 'connections' : 'toolsets'}/${encodeURIComponent(route.name)}/edit`
     case 'create':
       return `#/create/${route.resource}${route.type ? `/${encodeURIComponent(route.type)}` : ''}`
     default:

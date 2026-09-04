@@ -90,9 +90,9 @@ faros-provider-agents .agents-resource-body { display: flex; min-width: 0; flex-
 faros-provider-agents .agents-subnav { display: flex; gap: 4px; }
 
 /* config | chat split. The chat pane sticks while the (long) config scrolls. */
-faros-provider-agents .agents-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 460px); gap: 20px; align-items: start; }
+faros-provider-agents .agents-split { display: grid; grid-template-columns: minmax(0, 42rem) minmax(0, 460px); gap: 20px; align-items: start; }
 faros-provider-agents .agents-split-config { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
-faros-provider-agents .agents-split-config agents-agent-config { display: flex; flex-direction: column; gap: 18px; }
+faros-provider-agents .agents-split-config > * { display: flex; flex-direction: column; gap: 18px; }
 faros-provider-agents .agents-split-chat { position: sticky; top: 8px; min-width: 0; }
 faros-provider-agents .agents-config-sec { scroll-margin-top: 12px; }
 
@@ -451,6 +451,7 @@ faros-provider-agents .agents-conn-tile .muted { font-size: 12px; }
 faros-provider-agents .agents-conn-group { display: flex; flex-direction: column; gap: 8px; }
 faros-provider-agents .agents-conn-grouphead { margin: 4px 0 0; font-size: 13px; font-weight: 600; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
 faros-provider-agents .agents-conn-grouphead .muted { font-size: 12px; font-weight: 400; }
+faros-provider-agents .agents-connections-copy svg { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; }
 faros-provider-agents .agents-conn-form { display: flex; flex-direction: column; gap: 12px; }
 faros-provider-agents .agents-conn-formhead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 faros-provider-agents .agents-conn-formhead h4 { margin: 0; font-size: 15px; text-transform: none; letter-spacing: 0; color: inherit; display: inline-flex; align-items: center; gap: 6px; }
@@ -637,7 +638,7 @@ faros-provider-agents .agents-err {
    mounted by the console on its own dashboard, outside the provider page.
 
    These values mirror portalkit/dashboardtile.ts `tileClass` one-for-one. This
-   portal is vanilla TS with no Tailwind build, so the shared vocabulary cannot
+   portal ships plain CSS with no Tailwind build, so the shared vocabulary cannot
    be applied as utility classes here — it has to be restated. Keep the two in
    step: a dashboard is a row of cards, and one card with its own row padding or
    type scale is the thing users notice. */

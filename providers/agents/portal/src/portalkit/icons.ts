@@ -7,7 +7,7 @@
 // (MIT-derived paths, hand-inlined so the bundle has no runtime dependency and
 // stays CSP-safe). Icons inherit the current text color and font size (1em),
 // so they drop into buttons, labels, chips and headings without extra styling.
-// For the string-building (vanilla-TS) portals — agents, kuery, quickstart. Vue
+// For the string-building (vanilla-TS) portals — kuery and quickstart. Vue
 // portals use lucide-vue-next instead.
 //
 // Usage: `${ic('trash')}` inside an HTML template literal. Prefer these over

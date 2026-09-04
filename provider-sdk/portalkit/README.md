@@ -2,7 +2,7 @@
 
 Canonical source for framework-neutral UI primitives shared across provider
 portals. The vanilla-TS kit is vendored into the string-building portals
-`agents`, `kuery`, and `quickstart`; Vue portals consume the shared plain assets
+`kuery` and `quickstart`; Vue portals consume the shared plain assets
 too, alongside the SFC kit in `provider-sdk/portalkit-vue`.
 
 - `icons.ts` — inline SVG icon set (`ic(name)` returns an `<svg class="k-icon">`
@@ -66,7 +66,7 @@ kit into the Vue portals. It also copies the canonical `faros-ui.css` into every
 vendored kit directory and verifies that no unexpected asset is present. CI can
 run `make sync-portalkit && git diff --exit-code` to guard against drift.
 
-The Vue portals (`app-studio`, `code`, `databricks`, `edges`, `infrastructure`,
+The Vue portals (`agents`, `app-studio`, `code`, `databricks`, `edges`, `infrastructure`,
 and the root `faros-portal`) use `lucide-vue-next` for icons and the
 `confirm.ts` + `ConfirmDialog.vue` pattern for modals. Agents, App Studio,
 Code, Databricks, Edges, and Kuery use the provider-level tab bar;
@@ -99,6 +99,6 @@ actions.
 
 The canonical `toast.ts` bus auto-dismisses `ok` after 4s, `info` after 6s, and
 `error` after 9s; hover pauses and re-arms the full duration on leave, and every
-card has an explicit dismiss button. Agents keeps its subscription-facing
-adapter for existing Lit callers, but delegates DOM rendering, timers, actions,
-and visible-item eviction to this bus and reconciles renderer removals.
+card has an explicit dismiss button. Agents keeps a provider-local subscription
+adapter, but delegates DOM rendering, timers, actions, and visible-item eviction
+to this bus and reconciles renderer removals.
