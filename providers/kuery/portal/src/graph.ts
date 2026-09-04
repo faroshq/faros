@@ -20,34 +20,6 @@ declare global {
   }
 }
 
-// Relation type → edge color. These double as the legend swatches in
-// element.ts, so the graph and its legend can never drift. Keys match the
-// IMPACT_RELATIONS set the impact query requests.
-export const RELATION_COLORS: Record<string, string> = {
-  owners: '#e0b34f',
-  'descendants+': '#4f9be0',
-  references: '#9b6de0',
-  selects: '#4fe0a8',
-  'selected-by': '#e07a4f',
-  'linked+': '#e0519b',
-  grouped: '#8a93a8',
-  namespace: '#5fae7a',
-  namespaced: '#5fae7a',
-}
-
-// Short legend labels (the impact list uses longer titles).
-export const RELATION_LABELS: Record<string, string> = {
-  owners: 'owners',
-  'descendants+': 'descendants',
-  references: 'references',
-  selects: 'selects',
-  'selected-by': 'selected-by',
-  'linked+': 'linked',
-  grouped: 'grouped',
-  namespace: 'namespace',
-  namespaced: 'contains',
-}
-
 // Impact direction per relation, from the anchor's point of view. An edge is
 // always drawn so the arrow means "deleting source impacts target":
 //   - 'up'   : the related object is UPSTREAM — deleting it impacts the anchor
@@ -63,18 +35,75 @@ export const RELATION_LABELS: Record<string, string> = {
 // Mirror of kuery's engine.RelationDirections (pkg/engine/relations.go) — the
 // authority. Keep in lockstep: up = engine "upstream", down = "downstream".
 export type RelDir = 'up' | 'down' | 'lateral'
+
+/**
+ * The one relation vocabulary shared by graph styling, list labels, and the
+ * impact legend. Keeping color, direction, and explanatory text together
+ * prevents a graph edge from acquiring a meaning the legend does not explain.
+ */
+export interface RelationMetadata {
+  name: string
+  label: string
+  legendLabel: string
+  color: string
+  direction: RelDir
+  description: string
+}
+
+export const RELATION_METADATA: readonly RelationMetadata[] = [
+  {
+    name: 'owners', label: 'owners', legendLabel: 'Owners', color: '#e0b34f', direction: 'up',
+    description: 'Upstream - deleting the related object impacts this object.',
+  },
+  {
+    name: 'descendants+', label: 'descendants', legendLabel: 'Descendants', color: '#4f9be0', direction: 'down',
+    description: 'Downstream - deleting this object impacts the related object.',
+  },
+  {
+    name: 'references', label: 'references', legendLabel: 'References', color: '#9b6de0', direction: 'up',
+    description: 'Upstream - deleting the related object impacts this object.',
+  },
+  {
+    name: 'selects', label: 'selects', legendLabel: 'Selects', color: '#4fe0a8', direction: 'up',
+    description: 'Upstream - deleting the related object impacts this object.',
+  },
+  {
+    name: 'selected-by', label: 'selected-by', legendLabel: 'Selected by', color: '#e07a4f', direction: 'down',
+    description: 'Downstream - deleting this object impacts the related object.',
+  },
+  {
+    name: 'linked+', label: 'linked', legendLabel: 'Linked', color: '#e0519b', direction: 'lateral',
+    description: 'Lateral - no deletion direction is implied.',
+  },
+  {
+    name: 'grouped', label: 'grouped', legendLabel: 'Grouped', color: '#8a93a8', direction: 'lateral',
+    description: 'Lateral - no deletion direction is implied.',
+  },
+  {
+    name: 'namespace', label: 'namespace', legendLabel: 'Namespace', color: '#5fae7a', direction: 'up',
+    description: 'Upstream - deleting the related object impacts this object.',
+  },
+  {
+    name: 'namespaced', label: 'contains', legendLabel: 'Contains', color: '#5fae7a', direction: 'down',
+    description: 'Downstream - deleting this object impacts the related object.',
+  },
+]
+
+// These derived maps remain exported for callers that need O(1) lookup, while
+// RELATION_METADATA is the source of truth for the graph and the legend.
+export const IMPACT_RELATIONS: readonly string[] = RELATION_METADATA.map(({ name }) => name)
+export const RELATION_COLORS: Record<string, string> = Object.fromEntries(
+  RELATION_METADATA.map(({ name, color }) => [name, color]),
+)
+export const RELATION_LABELS: Record<string, string> = Object.fromEntries(
+  RELATION_METADATA.map(({ name, label }) => [name, label]),
+)
 export const RELATION_DIR: Record<string, RelDir> = {
-  owners: 'up',
-  references: 'up',
-  selects: 'up',
-  namespace: 'up',
+  ...Object.fromEntries(RELATION_METADATA.map(({ name, direction }) => [name, direction])),
+  // The non-transitive spellings are accepted by the engine and remain useful
+  // when rendering a custom QuerySpec outside the built-in impact query.
   descendants: 'down',
-  'descendants+': 'down',
-  'selected-by': 'down',
-  namespaced: 'down',
   linked: 'lateral',
-  'linked+': 'lateral',
-  grouped: 'lateral',
 }
 
 // orientEdge returns [source, target] for an edge between the anchor and a
@@ -390,8 +419,8 @@ export function themeStyle(host: Element): cytoscape.StylesheetStyle[] {
       },
     },
   ]
-  for (const [rel, color] of Object.entries(RELATION_COLORS)) {
-    style.push({ selector: `edge[rel = "${rel}"]`, style: { 'line-color': color, 'target-arrow-color': color } })
+  for (const { name, color } of RELATION_METADATA) {
+    style.push({ selector: `edge[rel = "${name}"]`, style: { 'line-color': color, 'target-arrow-color': color } })
   }
   return style
 }

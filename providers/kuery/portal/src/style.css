@@ -559,6 +559,18 @@ faros-provider-kuery .legend-item {
   color: var(--color-text-secondary, inherit);
 }
 
+faros-provider-kuery .legend-item dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+faros-provider-kuery .legend-item dd {
+  margin: 0;
+  color: var(--color-text-muted, inherit);
+}
+
 faros-provider-kuery .legend-swatch {
   width: 10px;
   height: 10px;

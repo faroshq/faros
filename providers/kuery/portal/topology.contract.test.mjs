@@ -169,3 +169,51 @@ test('graph keyboard routing is focus-scoped and fullscreen uses the shared laye
   assert.match(styleSource, /z-index: var\(--k-layer-fullscreen, 2000\)/u)
   assert.match(sharedStyleSource, /--k-layer-fullscreen: 2000/u)
 })
+
+test('relation metadata is the shared source for labels, direction, and graph colors', () => {
+  const metadata = graphModule.RELATION_METADATA
+  assert.ok(metadata.length > 0)
+  assert.deepEqual(graphModule.IMPACT_RELATIONS, metadata.map(({ name }) => name))
+  for (const relation of metadata) {
+    assert.equal(graphModule.RELATION_COLORS[relation.name], relation.color)
+    assert.equal(graphModule.RELATION_LABELS[relation.name], relation.label)
+    assert.equal(graphModule.RELATION_DIR[relation.name], relation.direction)
+    assert.ok(relation.description.length > 0)
+  }
+})
+
+test('topology and impact disclose bounded results without conflating response truncation', () => {
+  const topology = readFileSync(new URL('./src/components/TopologyView.vue', import.meta.url), 'utf8')
+  const impact = readFileSync(new URL('./src/components/ImpactView.vue', import.meta.url), 'utf8')
+
+  assert.match(topology, /const requestGeneration = \+\+loadGeneration/u)
+  assert.match(topology, /loadGeneration !== requestGeneration/u)
+  assert.match(impact, /const requestGeneration = \+\+loadGeneration/u)
+  assert.match(impact, /loadGeneration !== requestGeneration/u)
+  assert.match(topology, /up to 1,000 members per edge/u)
+  assert.match(topology, /depth 5/u)
+  assert.match(topology, /200 objects for Namespace membership/u)
+  assert.match(topology, /4,000 nodes or 30 rounds/u)
+  assert.match(impact, /depth 5/u)
+  assert.match(impact, /at most 200 related objects/u)
+  assert.match(topology, /does not identify relation-level bounds/u)
+  assert.match(impact, /does not identify relation-level bounds/u)
+  assert.doesNotMatch(topology, /Select one edge for a complete view/u)
+  assert.match(impact, /not a complete relation traversal/u)
+})
+
+test('CSS fullscreen fallback has a deterministic exit after rejected native requests', () => {
+  const source = readFileSync(new URL('./src/components/TopologyView.vue', import.meta.url), 'utf8')
+  assert.match(source, /if \(!document\.fullscreenElement && full\.value\) full\.value = false/u)
+  assert.match(source, /catch \{ if \([^}]*!document\.fullscreenElement\) full\.value = true \}/u)
+})
+
+test('impact view exposes a semantic relation legend from shared metadata', () => {
+  const source = readFileSync(new URL('./src/components/ImpactView.vue', import.meta.url), 'utf8')
+  assert.match(source, /RELATION_METADATA/u)
+  assert.match(source, /<aside[^>]+aria-labelledby="impact-legend-title"/u)
+  assert.match(source, /<dl class="legend">/u)
+  assert.match(source, /v-for="relation in legendRelations"/u)
+  assert.match(source, /class="legend-swatch"[^>]+backgroundColor: relation\.color/u)
+  assert.doesNotMatch(source, /kuery-impact-legend kuery-panel k-card/u)
+})

@@ -2,9 +2,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import type { FarosContext } from '../element'
-import type { ObjectResult, QuerySpec } from '../api'
+import type { ObjectResult, QuerySpec, QueryStatus } from '../api'
 import {
-  buildTopologyElements, deriveTopologyTree, graphKeyAction, mountGraph, relationElements, themeStyle,
+  buildTopologyElements, deriveTopologyTree, graphKeyAction, IMPACT_RELATIONS, mountGraph, relationElements, themeStyle,
   type GraphHandle,
 } from '../graph'
 import { errorMessage, resourceLabel, useKueryApi } from '../kuery'
@@ -30,11 +30,20 @@ const graphError = ref('')
 const expansionFailure = ref<{ id: string | null; message: string } | null>(null)
 const full = ref(false)
 const expandingAll = ref(false)
+const responseWarnings = ref<string[]>([])
+const relationResponseTruncated = ref(false)
+const relationLimitReached = ref(false)
+const expansionBound = ref<'nodes' | 'rounds' | null>(null)
+const memberLimitReached = computed(() => rows.value.some(cluster => (cluster.relations?.members?.length ?? 0) >= 1000))
 let loadController: AbortController | null = null
+let loadGeneration = 0
 let graph: GraphHandle | null = null
 let graphGeneration = 0
 let graphObjects = new Map<string, ObjectResult>()
 let graphController: AbortController | null = null
+let expansionGeneration = 0
+const expansionRequests = new Map<string, number>()
+let fullscreenGeneration = 0
 
 const tree = computed(() => deriveTopologyTree(rows.value, { kind: kind.value, namespace: namespace.value }))
 const facets = computed(() => {
@@ -62,15 +71,23 @@ function topologySpec(): QuerySpec {
 
 async function load(): Promise<void> {
   if (!api.value) return
-  loadController?.abort(); const controller = new AbortController(); loadController = controller
+  loadController?.abort()
+  const controller = new AbortController()
+  const requestGeneration = ++loadGeneration
+  loadController = controller
   loading.value = true; error.value = ''
   try {
     const result = await query(topologySpec(), controller.signal)
+    if (loadController !== controller || loadGeneration !== requestGeneration) return
     rows.value = result.objects ?? []; incomplete.value = !!result.incomplete; loaded.value = true
+    responseWarnings.value = result.warnings ?? []
   } catch (reason) {
+    if (loadController !== controller || loadGeneration !== requestGeneration) return
     const message = errorMessage(reason, 'Retry the topology query or select one edge.')
     if (message) error.value = message
-  } finally { if (loadController === controller) loading.value = false }
+  } finally {
+    if (loadController === controller && loadGeneration === requestGeneration) loading.value = false
+  }
 }
 
 function layoutConfig(): Record<string, unknown> {
@@ -80,7 +97,19 @@ function layoutConfig(): Record<string, unknown> {
   return { name: 'breadthfirst', directed: true, spacingFactor: 1, padding: 20 }
 }
 
-function destroyGraph(): void { graphGeneration += 1; graphController?.abort(); graphController = null; graph?.destroy(); graph = null; graphObjects.clear() }
+function destroyGraph(): void {
+  graphGeneration += 1
+  graphController?.abort()
+  graphController = null
+  graph?.destroy()
+  graph = null
+  graphObjects.clear()
+  expansionRequests.clear()
+  relationResponseTruncated.value = false
+  relationLimitReached.value = false
+  expansionBound.value = null
+  expandingAll.value = false
+}
 
 async function mount(): Promise<void> {
   destroyGraph(); graphError.value = ''; expansionFailure.value = null
@@ -90,53 +119,88 @@ async function mount(): Promise<void> {
   const built = buildTopologyElements(rows.value, { kind: kind.value, namespace: namespace.value })
   graphObjects = new Map(Object.entries(built.nodeIndex))
   try {
-    const handle = await mountGraph(graphHost.value, built.elements, themeStyle(graphHost.value), id => void expand(id), `${(context.value?.basePath || '').replace(/\/?$/, '/')}cytoscape.min.js`, layoutConfig())
+    const handle = await mountGraph(graphHost.value, built.elements, themeStyle(graphHost.value), id => { if (generation === graphGeneration) void expand(id) }, `${(context.value?.basePath || '').replace(/\/?$/, '/')}cytoscape.min.js`, layoutConfig())
     if (generation !== graphGeneration) return handle.destroy()
     graph = handle
-    requestAnimationFrame(() => handle.fit())
-  } catch (reason) { graphError.value = errorMessage(reason, 'Retry the graph or use the List representation.') }
+    requestAnimationFrame(() => { if (generation === graphGeneration && graph === handle) handle.fit() })
+  } catch (reason) {
+    if (generation === graphGeneration) graphError.value = errorMessage(reason, 'Retry the graph or use the List representation.')
+  }
 }
 
-const impactRelations = (): Record<string, { limit?: number }> => Object.fromEntries(['descendants+', 'references', 'selects', 'selected-by', 'owners', 'linked+', 'grouped', 'namespace', 'namespaced'].map(name => [name, name === 'namespaced' ? { limit: 200 } : {}]))
-async function relationQuery(row: ObjectResult, signal?: AbortSignal): Promise<ObjectResult | null> {
+const impactRelations = (): Record<string, { limit?: number }> => Object.fromEntries(IMPACT_RELATIONS.map(name => [name, name === 'namespaced' ? { limit: 200 } : {}]))
+interface RelationQueryResult {
+  object: ObjectResult | null
+  incomplete: boolean
+  warnings: string[]
+}
+
+async function relationQuery(row: ObjectResult, signal?: AbortSignal): Promise<RelationQueryResult> {
   const metadata = row.object?.metadata ?? {}; const apiVersion = row.object?.apiVersion || ''; const apiGroup = apiVersion.includes('/') ? apiVersion.split('/')[0] : ''
   const filter = { name: metadata.name, ...(row.object?.kind ? { groupKind: { apiGroup, kind: row.object.kind } } : {}), ...(metadata.namespace ? { namespace: metadata.namespace } : {}) }
   const status = await query({ maxDepth: 5, cluster: row.cluster ? { name: row.cluster } : undefined, filter: { objects: [filter] }, objects: { id: true, cluster: true, relations: impactRelations() } }, signal)
-  return status.objects?.[0] ?? null
+  return { object: status.objects?.[0] ?? null, incomplete: !!status.incomplete, warnings: status.warnings ?? [] }
 }
+
+function recordRelationResult(result: RelationQueryResult): void {
+  relationResponseTruncated.value ||= result.incomplete
+  if (result.warnings.length) responseWarnings.value = [...new Set([...responseWarnings.value, ...result.warnings])]
+  if (result.object && (result.object.relations?.namespaced?.length ?? 0) >= 200) relationLimitReached.value = true
+}
+
+function recordRelationStatus(status: QueryStatus): void {
+  relationResponseTruncated.value ||= !!status.incomplete
+  if (status.warnings?.length) responseWarnings.value = [...new Set([...responseWarnings.value, ...status.warnings])]
+  if (status.objects?.some(object => (object.relations?.namespaced?.length ?? 0) >= 200)) relationLimitReached.value = true
+}
+
 async function expand(id: string): Promise<void> {
-  const handle = graph; const row = graphObjects.get(id)
+  const handle = graph; const controller = graphController; const currentGraphGeneration = graphGeneration; const row = graphObjects.get(id)
   if (!handle || !row) return
-  if (handle.isExpanded(id)) { handle.collapseFrom(id); return }
+  if (handle.isExpanded(id)) {
+    expansionRequests.set(id, ++expansionGeneration)
+    handle.collapseFrom(id)
+    return
+  }
+  const requestGeneration = ++expansionGeneration
+  expansionRequests.set(id, requestGeneration)
+  const isCurrent = () => graph === handle && graphGeneration === currentGraphGeneration && graphController === controller && expansionRequests.get(id) === requestGeneration
   expansionFailure.value = null
   handle.markExpanded(id, true)
   try {
-    const result = await relationQuery(row, graphController?.signal)
-    if (graph !== handle) return
-    if (!result) {
+    const result = await relationQuery(row, controller?.signal)
+    if (!isCurrent()) return
+    recordRelationResult(result)
+    if (!result.object) {
       handle.markExpanded(id, false)
       expansionFailure.value = { id, message: `No relationship result was returned for ${resourceLabel(row)}. Retry expansion; the current graph is unchanged.` }
       return
     }
-    const built = relationElements(id, result); handle.add(built.elements)
+    const built = relationElements(id, result.object); handle.add(built.elements)
     for (const [key, object] of Object.entries(built.nodeIndex)) graphObjects.set(key, object)
     handle.relayout(layoutConfig())
   } catch (reason) {
+    if (!isCurrent()) return
     handle.markExpanded(id, false)
     if (reason instanceof DOMException && reason.name === 'AbortError') return
     expansionFailure.value = { id, message: errorMessage(reason, 'Retry this node expansion; the current graph is unchanged.') }
   }
 }
+
 async function expandAll(): Promise<void> {
-  const handle = graph; if (!handle || expandingAll.value) return
+  const handle = graph; const controller = graphController; const currentGraphGeneration = graphGeneration
+  if (!handle || expandingAll.value) return
+  const isCurrent = () => graph === handle && graphGeneration === currentGraphGeneration && graphController === controller
   expandingAll.value = true
+  let rounds = 0
   try {
-    for (let round = 0; round < 30 && graph === handle && handle.nodeCount() < 4000; round += 1) {
+    for (; rounds < 30 && isCurrent() && handle.nodeCount() < 4000; rounds += 1) {
       const ids = [...graphObjects.keys()].filter(id => handle.hasNode(id) && !handle.isExpanded(id)).slice(0, 300)
       if (!ids.length) break
-      const status = await query({ maxDepth: 5, limit: ids.length, filter: { objects: ids.map(id => ({ id })) }, objects: { id: true, cluster: true, relations: impactRelations() } }, graphController?.signal)
+      const status = await query({ maxDepth: 5, limit: ids.length, filter: { objects: ids.map(id => ({ id })) }, objects: { id: true, cluster: true, relations: impactRelations() } }, controller?.signal)
       let added = 0
-      if (graph !== handle) break
+      if (!isCurrent()) break
+      recordRelationStatus(status)
       for (const object of status.objects ?? []) {
         if (!object.id) continue
         const built = relationElements(object.id, object); added += handle.add(built.elements).length
@@ -145,11 +209,16 @@ async function expandAll(): Promise<void> {
       ids.forEach(id => handle.markExpanded(id, true)); handle.relayout(layoutConfig())
       if (added === 0) break
     }
+    if (isCurrent()) {
+      if (handle.nodeCount() >= 4000) expansionBound.value = 'nodes'
+      else if (rounds >= 30) expansionBound.value = 'rounds'
+    }
   } catch (reason) {
+    if (!isCurrent()) return
     if (reason instanceof DOMException && reason.name === 'AbortError') return
     const message = errorMessage(reason, 'Retry Expand all; the graph remains usable.')
     if (message) expansionFailure.value = { id: null, message }
-  } finally { expandingAll.value = false }
+  } finally { if (isCurrent()) expandingAll.value = false }
 }
 function retryExpansion(): void {
   const failure = expansionFailure.value
@@ -160,9 +229,15 @@ function retryExpansion(): void {
 function resetGraph(): void { void mount() }
 async function toggleFullscreen(): Promise<void> {
   const target = panel.value; if (!target) return
-  if (document.fullscreenElement) await document.exitFullscreen()
-  else if (target.requestFullscreen) await target.requestFullscreen().catch(() => { full.value = !full.value })
-  else full.value = !full.value
+  const requestGeneration = ++fullscreenGeneration
+  // A rejected request enters the CSS fallback. Once there, do not retry the
+  // rejected native request: the next activation must deterministically exit
+  // the fallback, even when the browser rejects every requestFullscreen call.
+  if (!document.fullscreenElement && full.value) full.value = false
+  else if (document.fullscreenElement) await document.exitFullscreen()
+  else if (target.requestFullscreen) {
+    try { await target.requestFullscreen() } catch { if (requestGeneration === fullscreenGeneration && !document.fullscreenElement) full.value = true }
+  } else full.value = true
   requestAnimationFrame(() => graph?.fit())
 }
 function fullscreenChanged(): void { full.value = document.fullscreenElement === panel.value; requestAnimationFrame(() => graph?.fit()) }
@@ -183,12 +258,13 @@ watch(() => context.value?.theme, () => { if (graph && graphHost.value) graph.re
 watch(() => props.active, active => { if (active) requestAnimationFrame(() => graph?.fit()) })
 watch(api, (ready, wasReady) => { if (ready && !wasReady) void load() })
 onMounted(() => { document.addEventListener('fullscreenchange', fullscreenChanged); void load() })
-onBeforeUnmount(() => { loadController?.abort(); destroyGraph(); document.removeEventListener('fullscreenchange', fullscreenChanged) })
+onBeforeUnmount(() => { loadGeneration += 1; fullscreenGeneration += 1; loadController?.abort(); destroyGraph(); document.removeEventListener('fullscreenchange', fullscreenChanged) })
 </script>
 
 <template>
   <section ref="panel" class="kuery-panel k-card" :class="{ 'kuery-full': full }" aria-labelledby="topology-title">
     <div class="kuery-panel-head"><div><h2 id="topology-title" class="kuery-panel-title">Fleet topology</h2><p class="meta">Activate a graph node to expand it, then activate it again to collapse. A→B means deleting A impacts B.</p></div><div class="kuery-view-switch" role="group" aria-label="Topology representation"><button v-for="value in ['graph','list']" :key="value" type="button" class="k-btn k-btn--ghost kuery-view-btn" :aria-pressed="representation === value" @click="representation = value as 'graph' | 'list'">{{ value === 'graph' ? 'Graph' : 'List' }}</button></div></div>
+    <p id="topology-bounds" class="meta">View bounds: up to 1,000 members per edge; relation expansion stops at depth 5 and returns at most 200 objects for Namespace membership. Expand all stops at 4,000 nodes or 30 rounds. The displayed topology may be partial at these bounds.</p>
     <p v-if="representation === 'graph'" id="topology-help" class="meta">Focus the graph to pan with Arrow keys or W/A/S/D, zoom with +/−, enter full screen with F, and exit with Escape.</p>
     <div class="kuery-toolbar kuery-topology-controls">
       <label><span id="topology-layout-label">Layout</span><FormSelect v-model="layout" :options="layoutOptions" labelledby="topology-layout-label" /></label>
@@ -211,8 +287,14 @@ onBeforeUnmount(() => { loadController?.abort(); destroyGraph(); document.remove
           <template v-if="edgeGroup.resources.length"><h4>Cluster-scoped</h4><button v-for="row in edgeGroup.resources" :key="row.key" type="button" class="kuery-topology-resource" @click="emit('inspect', row.object)">{{ resourceLabel(row.object) }}</button></template>
         </section>
       </div>
-      <div v-else><div v-if="graphError" class="kuery-inline-error" role="alert">{{ graphError }} <button type="button" class="k-btn k-btn--ghost" @click="mount">Retry graph</button></div><div v-if="expansionFailure" class="kuery-inline-error" role="alert"><span>{{ expansionFailure.message }}</span><button type="button" class="k-btn k-btn--ghost" @click="retryExpansion">Retry expansion</button></div><div ref="graphHost" class="kuery-graph" role="region" aria-label="Fleet topology graph" aria-describedby="topology-help" tabindex="0" @keydown="graphKeydown" /></div>
+      <div v-else><div v-if="graphError" class="kuery-inline-error" role="alert">{{ graphError }} <button type="button" class="k-btn k-btn--ghost" @click="mount">Retry graph</button></div><div v-if="expansionFailure" class="kuery-inline-error" role="alert"><span>{{ expansionFailure.message }}</span><button type="button" class="k-btn k-btn--ghost" @click="retryExpansion">Retry expansion</button></div><div ref="graphHost" class="kuery-graph" role="region" aria-label="Fleet topology graph" aria-describedby="topology-help topology-bounds" tabindex="0" @keydown="graphKeydown" /></div>
     </div>
-    <p v-if="incomplete" class="kuery-warning" role="status">Topology members were truncated. Select one edge for a complete view.</p>
+    <p v-if="incomplete" class="kuery-warning" role="status">Kuery reported response-level truncation for this query. That status does not identify relation-level bounds; the view limits above still apply.<span v-if="responseWarnings.length"> {{ responseWarnings.join(' ') }}</span></p>
+    <p v-else-if="responseWarnings.length" class="kuery-warning" role="status">Kuery reported: {{ responseWarnings.join(' ') }} Relation-level bounds are listed above separately.</p>
+    <p v-if="memberLimitReached" class="kuery-warning" role="status">At least one edge returned 1,000 members, its configured relation bound. Additional members may be omitted.</p>
+    <p v-if="relationResponseTruncated" class="kuery-warning" role="status">Kuery reported response-level truncation during relation expansion. This does not identify which relation was bounded.</p>
+    <p v-if="relationLimitReached" class="kuery-warning" role="status">Namespace membership reached its 200-object relation bound. Additional members may be omitted.</p>
+    <p v-if="expansionBound === 'nodes'" class="kuery-warning" role="status">Expand all stopped at 4,000 graph nodes. The graph remains usable; expand individual nodes to inspect a narrower branch.</p>
+    <p v-else-if="expansionBound === 'rounds'" class="kuery-warning" role="status">Expand all stopped after 30 rounds. The graph remains usable; expand individual nodes to inspect a narrower branch.</p>
   </section>
 </template>
