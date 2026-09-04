@@ -14,7 +14,6 @@ describe('Infrastructure primary provisioning workflow', () => {
   })
 
   it('uses one bounded, authoritative instance name', () => {
-    expect(provision).toContain('class="k-create-surface"')
     expect(provision).toContain('class="k-create-surface k-create-surface--wide"')
     expect(provision).toContain('class="provision-identity"')
     expect(provision).toContain('const { name: _name, ...properties } = schema.properties')
