@@ -104,3 +104,48 @@ test('KueryApi forwards auth headers, JSON body, and AbortSignal', async () => {
   assert.equal(new Headers(capturedInit.headers).get('Content-Type'), 'application/json')
   assert.deepEqual(JSON.parse(capturedInit.body), spec)
 })
+
+test('KueryApi surfaces HTTP failures with status and bounded response detail', async () => {
+  const client = api.createKueryApi({
+    basePath: '/services/providers/kuery',
+    fetch: async () => new Response('missing tenant identity', { status: 401, statusText: 'Unauthorized' }),
+  })
+
+  await assert.rejects(
+    client.query({}),
+    error => error instanceof api.KueryApiError
+      && error.status === 401
+      && error.body === 'missing tenant identity'
+      && error.message === 'kuery request failed (401): missing tenant identity',
+  )
+})
+
+test('KueryApi rejects malformed JSON and invalid QueryStatus shapes', async () => {
+  const bodies = [
+    'not-json',
+    JSON.stringify({ objects: {} }),
+    JSON.stringify({ cursor: [] }),
+    JSON.stringify({ count: 1.5 }),
+    JSON.stringify({ incomplete: 'yes' }),
+    JSON.stringify({ warnings: ['ok', 7] }),
+    JSON.stringify({ cursor: { next: 42 } }),
+  ]
+
+  for (const body of bodies) {
+    const client = api.createKueryApi({
+      basePath: '/services/providers/kuery',
+      fetch: async () => new Response(body, { status: 200 }),
+    })
+    await assert.rejects(client.query({}), /invalid (?:JSON|QueryStatus)/u, `body should be rejected: ${body}`)
+  }
+})
+
+test('buildInventoryQuery rejects page sizes outside the API contract', () => {
+  for (const pageSize of [0, -1, 1.5, api.MAX_INVENTORY_PAGE_SIZE + 1]) {
+    assert.throws(
+      () => api.buildInventoryQuery({ pageSize }),
+      error => error instanceof RangeError,
+      `page size ${pageSize} should be rejected`,
+    )
+  }
+})
