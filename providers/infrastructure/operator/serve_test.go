@@ -61,6 +61,65 @@ func TestEnsureProviderServePropagatesPlatformPreviewBridgeJWKS(t *testing.T) {
 	t.Error("managed provider Deployment lacks FAROS_PREVIEW_BRIDGE_VERIFICATION_JWKS")
 }
 
+func TestEnsureProviderServeBindsServeRoleFromEnv(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	provider := &v1alpha1.InfrastructureProvider{
+		ObjectMeta: metav1.ObjectMeta{Name: "infrastructure"},
+		Spec: v1alpha1.InfrastructureProviderSpec{
+			Provider: v1alpha1.ProviderServeSpec{
+				Image: v1alpha1.ImageSpec{Repository: "example.test/infrastructure", Tag: "test"},
+			},
+		},
+	}
+	crbName := "faros-infrastructure-serve-" + provider.Name
+	roleOf := func(t *testing.T) string {
+		t.Helper()
+		crb, err := client.RbacV1().ClusterRoleBindings().Get(context.Background(), crbName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get serve ClusterRoleBinding: %v", err)
+		}
+		if len(crb.Subjects) != 1 || crb.Subjects[0].Name != provider.Name || crb.Subjects[0].Namespace != ServeNamespace {
+			t.Fatalf("serve ClusterRoleBinding subjects = %+v, want the serve ServiceAccount", crb.Subjects)
+		}
+		return crb.RoleRef.Name
+	}
+
+	// Unset: the pre-chart-role behaviour, cluster-admin.
+	t.Setenv(serveClusterRoleEnv, "")
+	if err := EnsureProviderServe(context.Background(), client, provider, []byte("provider-kubeconfig"), nil, nil); err != nil {
+		t.Fatalf("EnsureProviderServe: %v", err)
+	}
+	if got := roleOf(t); got != "cluster-admin" {
+		t.Fatalf("roleRef with env unset = %q, want cluster-admin", got)
+	}
+
+	// Set (what the chart does with operator.clusterAdmin=false): the existing
+	// binding is replaced because roleRef is immutable.
+	t.Setenv(serveClusterRoleEnv, "infrastructure-serve")
+	if err := EnsureProviderServe(context.Background(), client, provider, []byte("provider-kubeconfig"), nil, nil); err != nil {
+		t.Fatalf("EnsureProviderServe: %v", err)
+	}
+	if got := roleOf(t); got != "infrastructure-serve" {
+		t.Fatalf("roleRef with env set = %q, want infrastructure-serve", got)
+	}
+
+	// Unchanged: idempotent, the binding is left alone.
+	if err := EnsureProviderServe(context.Background(), client, provider, []byte("provider-kubeconfig"), nil, nil); err != nil {
+		t.Fatalf("EnsureProviderServe: %v", err)
+	}
+	if got := roleOf(t); got != "infrastructure-serve" {
+		t.Fatalf("roleRef after repeat = %q, want infrastructure-serve", got)
+	}
+
+	// An explicit runtime kubeconfig never creates in-cluster RBAC.
+	if err := EnsureProviderServe(context.Background(), client, provider, []byte("provider-kubeconfig"), []byte("runtime-kubeconfig"), nil); err != nil {
+		t.Fatalf("EnsureProviderServe: %v", err)
+	}
+	if got := roleOf(t); got != "infrastructure-serve" {
+		t.Fatalf("roleRef with explicit runtime = %q, want untouched infrastructure-serve", got)
+	}
+}
+
 func TestEnsureProviderServePropagatesPlatformPublishingConfig(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	provider := &v1alpha1.InfrastructureProvider{
