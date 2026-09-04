@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+
+	"github.com/faroshq/provider-sdk/hubclient"
 )
 
 const (
@@ -30,7 +32,10 @@ const (
 // FAROS_HUB_INSECURE.
 func runHeartbeat(ctx context.Context, log logr.Logger) {
 	hub := os.Getenv("FAROS_HUB_URL")
-	token := os.Getenv("FAROS_HUB_TOKEN")
+	token, err := hubclient.ResolveHubToken()
+	if err != nil {
+		log.Error(err, "resolving heartbeat token; beats will be unauthenticated")
+	}
 	name := os.Getenv("FAROS_PROVIDER_NAME")
 	if name == "" {
 		name = "edges"

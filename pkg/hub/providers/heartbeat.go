@@ -19,6 +19,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -54,16 +55,28 @@ type HeartbeatRecorder func(ctx context.Context, name, version string, at time.T
 const heartbeatPersistThreshold = HeartbeatTTL / 6
 
 // NewHeartbeatHandler returns an http.Handler serving
-// POST /api/providers/{name}/heartbeat. Auth is enforced by the faros auth
-// middleware mounted upstream of this handler — any bearer token faros
-// accepts will be accepted as a valid heartbeat sender in Phase 1C. Phase
-// 1D will tighten this to "must be the provider's own SA token" once SA
-// minting is in place.
+// POST /api/providers/{name}/heartbeat.
+//
+// The handler is mounted on the root router with no auth middleware in front
+// of it, so it authenticates the beat itself: authenticate must accept the
+// request as coming from provider {name}'s own service account (the one the
+// hub minted its kubeconfig for) before the beat counts. Without that check
+// anyone able to reach the hub could keep a dead provider Ready and forge its
+// reportedVersion. In HeartbeatAuthWarn mode a failed check is logged and the
+// beat is still recorded; in HeartbeatAuthEnforce it is rejected with 401
+// (no or unrecognised token), 403 (some other identity) or 503 (could not
+// verify). A nil authenticate means the hub cannot verify anything (no kcp)
+// and behaves like a check that always fails with ErrHeartbeatAuthUnavailable.
 //
 // record may be nil (no kcp configured), in which case liveness stays local to
 // this process and the hub must not be scaled beyond one replica.
-func NewHeartbeatHandler(reg *Registry, record HeartbeatRecorder, log logr.Logger) http.Handler {
+func NewHeartbeatHandler(reg *Registry, record HeartbeatRecorder, authenticate HeartbeatAuthenticator, mode HeartbeatAuthMode, log logr.Logger) http.Handler {
 	logger := log.WithName("heartbeat")
+	if authenticate == nil {
+		authenticate = func(context.Context, *http.Request, string) error {
+			return fmt.Errorf("%w: no kcp configured", ErrHeartbeatAuthUnavailable)
+		}
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -73,6 +86,15 @@ func NewHeartbeatHandler(reg *Registry, record HeartbeatRecorder, log logr.Logge
 		if !ok {
 			http.NotFound(w, r)
 			return
+		}
+		if err := authenticate(r.Context(), r, name); err != nil {
+			if mode == HeartbeatAuthEnforce {
+				logger.V(1).Info("heartbeat rejected", "provider", name, "reason", err.Error())
+				http.Error(w, "heartbeat not authenticated: "+err.Error(), heartbeatAuthStatus(err))
+				return
+			}
+			logger.Info("heartbeat failed authentication; accepting because --provider-heartbeat-auth=warn (enforce becomes the default next release)",
+				"provider", name, "reason", err.Error())
 		}
 		var body heartbeatRequest
 		if r.ContentLength > 0 {

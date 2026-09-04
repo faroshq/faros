@@ -37,6 +37,8 @@ import (
 	"github.com/faroshq/provider-databricks/queryapi"
 	databricksscheme "github.com/faroshq/provider-databricks/scheme"
 	"github.com/faroshq/provider-databricks/tenant"
+
+	"github.com/faroshq/provider-sdk/hubclient"
 )
 
 type statusResponse struct {
@@ -381,7 +383,10 @@ func heartbeatCanSend(health *controllerHealth) bool {
 
 func runHeartbeat(ctx context.Context, healthStates ...*controllerHealth) {
 	hub := os.Getenv("FAROS_HUB_URL")
-	token := os.Getenv("FAROS_HUB_TOKEN")
+	token, err := hubclient.ResolveHubToken()
+	if err != nil {
+		log.Printf("heartbeat token: %v (beats will be unauthenticated)", err)
+	}
 	name := envOr("FAROS_PROVIDER_NAME", "databricks")
 	if hub == "" {
 		log.Printf("heartbeat disabled (set FAROS_HUB_URL to enable)")

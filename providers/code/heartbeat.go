@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/faroshq/provider-sdk/hubclient"
 )
 
 const (
@@ -30,12 +32,16 @@ const (
 // Env:
 //
 //	FAROS_HUB_URL        - hub base URL (https://localhost:9443 in dev)
-//	FAROS_HUB_TOKEN      - bearer token for the heartbeat request
+//	FAROS_HUB_TOKEN      - bearer token for the heartbeat request (default: the
+//	                       provider SA token in FAROS_PROVIDER_KUBECONFIG)
 //	FAROS_PROVIDER_NAME  - this provider's CatalogEntry name (default: code)
 //	FAROS_HUB_INSECURE   - "true" → skip TLS verification (dev with self-signed certs)
 func runHeartbeat(ctx context.Context) {
 	hub := os.Getenv("FAROS_HUB_URL")
-	token := os.Getenv("FAROS_HUB_TOKEN")
+	token, err := hubclient.ResolveHubToken()
+	if err != nil {
+		log.Printf("heartbeat token: %v (beats will be unauthenticated)", err)
+	}
 	name := os.Getenv("FAROS_PROVIDER_NAME")
 	if name == "" {
 		name = "code"

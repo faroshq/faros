@@ -33,6 +33,10 @@ func heartbeatRequestFor(name string) *http.Request {
 	return httptest.NewRequest(http.MethodPost, PathProviderHeartbeat+"/"+name+"/heartbeat", nil)
 }
 
+// allowAllHeartbeats stands in for the TokenReview authenticator in tests that
+// exercise recording rather than authentication.
+func allowAllHeartbeats(context.Context, *http.Request, string) error { return nil }
+
 // A heartbeat reaches one replica but must become visible to all of them, which
 // is what persisting it to CatalogEntry status buys.
 func TestHeartbeatIsPersistedForOtherReplicas(t *testing.T) {
@@ -43,7 +47,7 @@ func TestHeartbeatIsPersistedForOtherReplicas(t *testing.T) {
 	handler := NewHeartbeatHandler(reg, func(_ context.Context, name, version string, _ time.Time) error {
 		recorded = append(recorded, name+"@"+version)
 		return nil
-	}, logr.Discard())
+	}, allowAllHeartbeats, HeartbeatAuthEnforce, logr.Discard())
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost,
@@ -71,7 +75,7 @@ func TestHeartbeatPersistIsThrottled(t *testing.T) {
 	handler := NewHeartbeatHandler(reg, func(context.Context, string, string, time.Time) error {
 		writes++
 		return nil
-	}, logr.Discard())
+	}, allowAllHeartbeats, HeartbeatAuthEnforce, logr.Discard())
 
 	for range 5 {
 		rec := httptest.NewRecorder()
@@ -93,7 +97,7 @@ func TestHeartbeatFailsWhenPersistFails(t *testing.T) {
 
 	handler := NewHeartbeatHandler(reg, func(context.Context, string, string, time.Time) error {
 		return fmt.Errorf("kcp unavailable")
-	}, logr.Discard())
+	}, allowAllHeartbeats, HeartbeatAuthEnforce, logr.Discard())
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, heartbeatRequestFor("cost"))
@@ -108,7 +112,7 @@ func TestHeartbeatUnknownProviderIsNotPersisted(t *testing.T) {
 	handler := NewHeartbeatHandler(reg, func(context.Context, string, string, time.Time) error {
 		persisted = true
 		return nil
-	}, logr.Discard())
+	}, allowAllHeartbeats, HeartbeatAuthEnforce, logr.Discard())
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, heartbeatRequestFor("nope"))
@@ -124,7 +128,7 @@ func TestHeartbeatUnknownProviderIsNotPersisted(t *testing.T) {
 func TestHeartbeatWithoutRecorder(t *testing.T) {
 	reg := NewRegistry()
 	reg.Upsert(Provider{Name: "cost", EndpointsValid: true})
-	handler := NewHeartbeatHandler(reg, nil, logr.Discard())
+	handler := NewHeartbeatHandler(reg, nil, allowAllHeartbeats, HeartbeatAuthEnforce, logr.Discard())
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, heartbeatRequestFor("cost"))

@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/faroshq/provider-sdk/hubclient"
 )
 
 const (
@@ -31,7 +33,10 @@ const (
 // nil/omitted health dependency remains compatible with REST-only callers.
 func runHeartbeat(ctx context.Context, healthStates ...*controllerHealth) {
 	hub := os.Getenv("FAROS_HUB_URL")
-	token := os.Getenv("FAROS_HUB_TOKEN")
+	token, err := hubclient.ResolveHubToken()
+	if err != nil {
+		log.Printf("heartbeat token: %v (beats will be unauthenticated)", err)
+	}
 	name := os.Getenv("FAROS_PROVIDER_NAME")
 	if name == "" {
 		name = "app-studio"

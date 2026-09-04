@@ -505,8 +505,19 @@ Content-Type: application/json
 { "version": "1.2.0", "buildTime": "...", "status": "healthy" }
 ```
 
-- Authenticates the bearer token against the SA in
-  `root:faros:providers:{name}`. Rejects any other identity.
+- Authenticates the bearer token as the provider's own service account
+  (`system:serviceaccount:default:provider`) by TokenReview in the provider's
+  workspace `root:faros:providers:{name}` — the same SA and token the hub
+  minted into the provider kubeconfig. Any other identity is rejected with
+  403, a missing or unrecognised token with 401. The endpoint has no auth
+  middleware in front of it; this check is the whole of its authentication.
+  `--provider-heartbeat-auth=warn` (this release's default) logs failures
+  and still records the beat so providers on older charts keep reporting
+  alive while they are rolled forward; `enforce` (next release's default)
+  rejects them, and such a provider goes stale after the TTL.
+- Provider side: the bearer is `FAROS_HUB_TOKEN` if set, otherwise the token
+  in `FAROS_PROVIDER_KUBECONFIG` (`provider-sdk/hubclient.ResolveHubToken`).
+  Charts need no change.
 - Updates `CatalogEntry.status.lastHeartbeat` and
   `reportedVersion`.
 - TTL: 90 seconds. Catalog controller flips `Ready=false` if no heartbeat
@@ -939,8 +950,10 @@ Secret* differ.
 
 A provider's backend (if it declares one) MUST:
 
-- Heartbeat: `POST /api/providers/{name}/heartbeat` to the hub every 30s
-  (helper in the SDK).
+- Heartbeat: `POST /api/providers/{name}/heartbeat` to the hub every 30s,
+  authenticated as the provider's own service account (token from
+  `provider-sdk/hubclient.ResolveHubToken`: `FAROS_HUB_TOKEN`, else the
+  provider kubeconfig's bearer).
 - `GET /healthz` → 200 when ready (used by hub for `BackendHealthy`).
 
 A provider's controller (the kcp-talking part) MUST:
@@ -986,8 +999,13 @@ A provider's UI MUST:
   platform-owned frame sources, such as App Studio preview hosts.
 - **Internal-only services**: providers should be `ClusterIP`. Hub is the
   only public ingress. Network policies recommended.
-- **Heartbeat token**: provider SA token is short-lived (24h); rotation
-  handled by the catalog controller.
+- **Heartbeat token**: the heartbeat is authenticated as the provider's own
+  service account, verified by TokenReview in the provider's workspace. The
+  token is the provider kubeconfig's long-lived legacy SA token (a
+  `kubernetes.io/service-account-token` Secret); it stays valid until the
+  Secret or SA is deleted, and the hub caches a successful verification for
+  less than the heartbeat TTL so revocation takes effect within one liveness
+  window.
 
 ---
 
