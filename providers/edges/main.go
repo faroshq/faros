@@ -115,6 +115,21 @@ func runServe() error {
 	kcpConfig := loadKCPConfig(log)
 	hubExternalURL := os.Getenv("FAROS_HUB_EXTERNAL_URL")
 
+	// FAROS_STATIC_TOKENS used to let listed bearers skip TokenReview/SAR on
+	// every data-plane path. The bypass is gone: kcp validates every token, and
+	// hub static-token users are ordinary kcp identities that pass that check.
+	// A set value with a kcp credential present is a misconfiguration that
+	// would silently expect the old behaviour, so refuse to start rather than
+	// run with a different security posture than the operator assumed.
+	if v := os.Getenv("FAROS_STATIC_TOKENS"); v != "" {
+		if kcpConfig != nil {
+			err := errors.New("FAROS_STATIC_TOKENS is set but the static-token authorization bypass has been removed; every token is validated by kcp — unset the variable")
+			log.Error(err, "refusing to start")
+			return err
+		}
+		log.Info("WARNING: FAROS_STATIC_TOKENS is set but ignored: the static-token authorization bypass has been removed")
+	}
+
 	// Tunnel plane. The provider owns the ConnManager and terminates agent
 	// reverse tunnels in-process; with replica routing enabled below, peer
 	// replicas relay to whichever replica holds a tunnel. Both prefixes sit
@@ -127,7 +142,6 @@ func runServe() error {
 		AgentPickupPath:     agentPickupPath,
 		EdgeProxyPublicPath: edgeProxyPublicPath,
 		KCPConfig:           kcpConfig,
-		StaticTokens:        splitEnv(os.Getenv("FAROS_STATIC_TOKENS")),
 		HubExternalURL:      hubExternalURL,
 		HubInternalURL:      os.Getenv("FAROS_HUB_INTERNAL_URL"),
 		Logger:              log,
@@ -318,21 +332,6 @@ func hubCAData(log logr.Logger) []byte {
 		return []byte(d)
 	}
 	return nil
-}
-
-// splitEnv splits a comma-separated env value into a trimmed, non-empty slice.
-func splitEnv(v string) []string {
-	if v == "" {
-		return nil
-	}
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // envOrHostname returns the named env var (the chart sets POD_NAME via the

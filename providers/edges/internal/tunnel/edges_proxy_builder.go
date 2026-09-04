@@ -78,11 +78,10 @@ func (p *Server) buildEdgesProxyHandler() http.Handler {
 			return
 		}
 
-		// 3. Delegated authorization via kcp (if configured).
-		// Static tokens bypass authorizeFn entirely — they are pre-authenticated
-		// server-side credentials that do not go through kcp SubjectAccessReview.
-		_, isStaticToken := p.staticTokens[token]
-		if !isStaticToken && p.kcpConfig != nil {
+		// 3. Delegated authorization via kcp (if configured). Every bearer goes
+		// through authorizeFn — hub static-token users are ordinary kcp identities
+		// (faros:static:<hash>) and pass TokenReview + SAR like any other caller.
+		if p.kcpConfig != nil {
 			tenantCfg, err := p.tenantConfigFor(r.Context(), cluster)
 			if err != nil {
 				p.logger.Error(err, "edges proxy authorization: resolving tenant config failed",

@@ -97,7 +97,13 @@ type Server struct {
 	// TenantConfigGetter.
 	tenantConfig TenantConfigGetter
 
-	// staticTokens bypass the SA/join-token requirement (dev / static-auth hubs).
+	// staticTokens is a TEST-ONLY set of bearer tokens the agent-ingress handler
+	// accepts in place of an agent credential when there is no kcp config to
+	// validate one against. It is only populated through
+	// Config.AllowStaticTokenBypass, which main.go never sets; consumer-egress
+	// authorization (edgeproxy / services) never consults it. Every caller of the
+	// data plane goes through authorizeFn (TokenReview + SubjectAccessReview),
+	// including hub static-token users, whose identity kcp resolves natively.
 	staticTokens map[string]struct{}
 
 	// hubExternalURL is embedded into agent kubeconfigs. hubInternalURL is used
@@ -186,10 +192,16 @@ type Config struct {
 	// no URL to externalize).
 	EdgeProxyPublicPath string
 	KCPConfig           *rest.Config
-	StaticTokens        []string
-	HubExternalURL      string
-	HubInternalURL      string
-	Logger              klog.Logger
+	// StaticTokens are TEST-ONLY bearer tokens accepted as an agent credential
+	// on the agent-ingress path when KCPConfig is nil. They are rejected unless
+	// AllowStaticTokenBypass is set, and never combine with a KCPConfig: with a
+	// kcp credential present every token is validated by kcp. main.go never sets
+	// either field.
+	StaticTokens           []string
+	AllowStaticTokenBypass bool
+	HubExternalURL         string
+	HubInternalURL         string
+	Logger                 klog.Logger
 }
 
 // New constructs the tunnel Server for one or more connectable kinds.
@@ -208,9 +220,17 @@ func New(cfg Config) (*Server, error) {
 		}
 		kinds[k.GVR.Resource] = k
 	}
+	if len(cfg.StaticTokens) > 0 && !cfg.AllowStaticTokenBypass {
+		return nil, fmt.Errorf("tunnel: StaticTokens are test-only and require AllowStaticTokenBypass")
+	}
+	if cfg.AllowStaticTokenBypass && cfg.KCPConfig != nil {
+		return nil, fmt.Errorf("tunnel: AllowStaticTokenBypass is only valid without a KCPConfig (kcp validates every token)")
+	}
 	tokenSet := make(map[string]struct{}, len(cfg.StaticTokens))
-	for _, t := range cfg.StaticTokens {
-		tokenSet[t] = struct{}{}
+	if cfg.AllowStaticTokenBypass {
+		for _, t := range cfg.StaticTokens {
+			tokenSet[t] = struct{}{}
+		}
 	}
 	return &Server{
 		kinds:               kinds,

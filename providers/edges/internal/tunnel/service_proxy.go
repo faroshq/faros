@@ -185,9 +185,8 @@ func (p *Server) serveService(w http.ResponseWriter, r *http.Request, token, clu
 	ctx := r.Context()
 	logger := klog.FromContext(ctx).WithName("edgeservice-proxy")
 
-	// Delegated authorization (static tokens bypass, as in buildEdgesProxyHandler).
-	_, isStaticToken := p.staticTokens[token]
-	if !isStaticToken && p.kcpConfig != nil {
+	// Delegated authorization for every bearer, as in buildEdgesProxyHandler.
+	if p.kcpConfig != nil {
 		tenantCfg, err := p.tenantConfigFor(ctx, cluster)
 		if err != nil {
 			logger.Error(err, "edgeservice authorization: resolving tenant config failed", "cluster", cluster, "name", name)
