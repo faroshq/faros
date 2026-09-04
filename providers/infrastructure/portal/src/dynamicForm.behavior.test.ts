@@ -94,9 +94,15 @@ describe('DynamicForm collection editors', () => {
 
     const remove = rows[1].querySelector<HTMLButtonElement>('button')!
     expect(remove.getAttribute('aria-label')).toContain('Remove limits key memory')
-    remove.click()
-    await nextTick()
-    expect(values.value.limits).toEqual({ cpu: 2 })
+	remove.click()
+	await nextTick()
+	expect(values.value.limits).toEqual({ cpu: 2 })
+	expect(document.activeElement).toBe(group.querySelector<HTMLInputElement>('.dynform-map-row input'))
+
+	const remainingRemove = group.querySelector<HTMLButtonElement>('.dynform-map-remove')!
+	remainingRemove.click()
+	await nextTick()
+	expect(document.activeElement).toBe(add)
   })
 
   it('omits read-only values from the create form', () => {

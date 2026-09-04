@@ -330,8 +330,19 @@ function updateMapRow(field: Field, row: MapRow, part: 'key' | 'value', value: s
 }
 
 function removeMapRow(field: Field, row: MapRow) {
-  mapDrafts.value = { ...mapDrafts.value, [field.name]: mapRows(field).filter(candidate => candidate.id !== row.id) }
-  commitMap(field)
+	const current = mapRows(field)
+	const removedIndex = current.findIndex(candidate => candidate.id === row.id)
+	const remaining = current.filter(candidate => candidate.id !== row.id)
+	mapDrafts.value = { ...mapDrafts.value, [field.name]: remaining }
+	commitMap(field)
+	void nextTick(() => {
+		const successor = remaining[Math.min(Math.max(removedIndex, 0), remaining.length - 1)]
+		if (successor) {
+			rootElement.value?.querySelector<HTMLInputElement>(`[id="${mapKeyID(field, successor)}"]`)?.focus()
+			return
+		}
+		rootElement.value?.querySelector<HTMLButtonElement>(`[data-map-add="${fieldID(field.name)}"]`)?.focus()
+	})
 }
 </script>
 
@@ -363,7 +374,7 @@ function removeMapRow(field: Field, row: MapRow) {
             <input v-else :id="mapValueID(field, row)" :data-map-field="fieldID(field.name)" class="k-input" :type="inputType(mapValueSchema(field)?.type)" :value="row.rawValue" placeholder="Value" :min="mapValueSchema(field)?.minimum" :max="mapValueSchema(field)?.maximum" :minlength="mapValueSchema(field)?.minLength" :maxlength="mapValueSchema(field)?.maxLength" :pattern="mapValueSchema(field)?.pattern" :aria-invalid="fieldErrors[field.name] ? 'true' : undefined" @input="updateMapRow(field, row, 'value', ($event.target as HTMLInputElement).value)" />
             <button class="k-btn k-btn--ghost dynform-map-remove" type="button" :aria-label="`Remove ${field.name} key ${row.key || 'new entry'}`" @click="removeMapRow(field, row)"><X :size="14" :stroke-width="1.75" aria-hidden="true" /></button>
           </div>
-          <button class="k-btn k-btn--ghost dynform-map-add" type="button" @click="addMapRow(field)"><Plus :size="14" :stroke-width="1.75" aria-hidden="true" /> Add entry</button>
+		  <button class="k-btn k-btn--ghost dynform-map-add" type="button" :data-map-add="fieldID(field.name)" @click="addMapRow(field)"><Plus :size="14" :stroke-width="1.75" aria-hidden="true" /> Add entry</button>
         </div>
         <span v-if="fieldErrors[field.name]" :id="errorID(field.name)" class="dynform-error" role="alert">{{ fieldErrors[field.name] }}</span>
       </div>

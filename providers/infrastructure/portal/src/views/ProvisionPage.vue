@@ -3,6 +3,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { ArrowLeft } from 'lucide-vue-next'
 import DynamicForm from '../components/DynamicForm.vue'
 import { api, isContextChangedError } from '../api'
+import { createWritableValues } from '../createValues'
 import type { Template, ErrorResponse } from '../types'
 import { useDelayedLoading } from '../portalkit/useDelayedLoading'
 import { REASON_CLOUD_CREDENTIALS_MISSING, REASON_API_BINDING_MISSING, REASON_TENANT_MISSING } from '../types'
@@ -92,11 +93,15 @@ async function submit() {
   mutationError.value = null
   submitting.value = true
   try {
+    const writableValues = createWritableValues(currentTemplate.inputsSchema, values.value)
+    if (schemaUsesName.value && !currentTemplate.inputsSchema?.properties?.name?.readOnly) {
+      writableValues.name = instanceName.value.trim()
+    }
     const inst = await api.createInstance({
       templateName: currentTemplate.name,
       templateVersion: currentTemplate.version,
       name: instanceName.value.trim(),
-      values: schemaUsesName.value ? { ...values.value, name: instanceName.value.trim() } : values.value,
+      values: writableValues,
     })
     if (active) emit('provisioned', inst.name)
   } catch (e: unknown) {
