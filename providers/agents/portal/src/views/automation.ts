@@ -217,38 +217,47 @@ export class AutomationSection extends StoreElement {
   render(): TemplateResult {
     const rows = this.rows
     const slice = this.slice
-    return html`<section class="agents-panel k-card agents-config-sec">
-      <div class="agents-panel-head">
-        <h3>${icon(this.meta.glyph)} ${this.meta.title}</h3>
+    const headingID = `agent-${this.kind}-heading`
+    return html`<section class="k-resource-section-card agents-config-sec" aria-labelledby=${headingID} data-k-resource-section-card>
+      <header class="k-resource-section-card__header">
+        <div class="k-resource-section-card__heading">
+          <h2 id=${headingID} class="k-resource-section-card__title">${icon(this.meta.glyph)} ${this.meta.title}</h2>
+          <p class="k-resource-section-card__description">${this.meta.blurb}</p>
+        </div>
         ${this.editing === null
-          ? html`<button class="k-btn k-btn--ghost secondary" @click=${() => this.openCreate()}>${icon('plus')} New ${this.meta.one}</button>`
+          ? html`<div class="k-resource-section-card__actions">
+              <button class="k-btn k-btn--ghost secondary" type="button" @click=${() => this.openCreate()}>
+                ${icon('plus')} New ${this.meta.one}
+              </button>
+            </div>`
           : nothing}
+      </header>
+      <div class="k-resource-section-card__body">
+        ${slice.error
+          ? errorState(slice.error, () => void this.store.load(this.kind === 'schedule' ? 'schedules' : 'triggers'))
+          : rows.length === 0
+            ? html`<p class="agents-hint">${icon(this.meta.glyph)} ${this.meta.empty}</p>`
+            : html`<div class="agents-tablewrap k-table">
+                <table class="agents-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>${this.meta.whenHeader}</th>
+                      <th>Status</th>
+                      <th class="agents-th-actions">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${repeat(
+                      rows,
+                      (r) => r.metadata.name,
+                      (r) => this.row(r),
+                    )}
+                  </tbody>
+                </table>
+              </div>`}
+        ${this.editing !== null ? this.form() : nothing}
       </div>
-      <p class="muted">${this.meta.blurb}</p>
-      ${slice.error
-        ? errorState(slice.error, () => void this.store.load(this.kind === 'schedule' ? 'schedules' : 'triggers'))
-        : rows.length === 0
-          ? html`<p class="agents-hint">${icon(this.meta.glyph)} ${this.meta.empty}</p>`
-          : html`<div class="agents-tablewrap k-table">
-              <table class="agents-table">
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th>${this.meta.whenHeader}</th>
-                    <th>Status</th>
-                    <th class="agents-th-actions">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${repeat(
-                    rows,
-                    (r) => r.metadata.name,
-                    (r) => this.row(r),
-                  )}
-                </tbody>
-              </table>
-            </div>`}
-      ${this.editing !== null ? this.form() : nothing}
     </section>`
   }
 
@@ -282,12 +291,13 @@ export class AutomationSection extends StoreElement {
           : nothing}
       </td>
       <td class="agents-row-actions">
-        <button class="k-btn k-btn--ghost agents-iconbtn" aria-label="Run ${name} now" title="Run now" @click=${() => void this.runNow(name)}>
+        <button class="k-icon-action" type="button" aria-label="Run ${name} now" title="Run now" @click=${() => void this.runNow(name)}>
           ${icon('play')}
         </button>
-        <button class="k-btn k-btn--ghost agents-iconbtn" aria-label="Edit ${name}" title="Edit" @click=${() => this.openEdit(r)}>${icon('pencil')}</button>
+        <button class="k-icon-action" type="button" aria-label="Edit ${name}" title="Edit" @click=${() => this.openEdit(r)}>${icon('pencil')}</button>
         <button
-          class="k-btn k-btn--ghost agents-iconbtn"
+          class="k-icon-action"
+          type="button"
           aria-label=${s.suspend ? `Resume ${name}` : `Pause ${name}`}
           title=${s.suspend ? 'Resume' : 'Pause'}
           @click=${() => void this.toggleSuspend(r)}
@@ -295,7 +305,8 @@ export class AutomationSection extends StoreElement {
           ${s.suspend ? icon('play') : icon('pause')}
         </button>
         <button
-          class="k-btn k-btn--ghost agents-iconbtn agents-iconbtn-danger"
+          class="k-icon-action agents-iconbtn-danger"
+          type="button"
           aria-label="Delete ${name}"
           title="Delete"
           @click=${() => void this.del(name)}

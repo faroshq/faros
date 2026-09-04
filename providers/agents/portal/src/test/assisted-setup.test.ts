@@ -20,6 +20,7 @@ async function mountConnections(caps: Capabilities, agents = [agentFixture('scou
   const store = makeStore(api)
   store.agents.data = agents
   store.agents.loaded = true
+  store.agents.hasSnapshot = true
   store.capabilities.data = caps
   store.capabilities.loaded = true
   // The assist card waits for connections before deciding whether to show, so
@@ -292,14 +293,14 @@ describe('unwired tool connections', () => {
     const { el } = await mountConnections({ providers: [] }, [bare], { listConnections: () => Promise.resolve([conn]) })
     await el.store.load('connections')
     await settle(el, 4)
-    expect(text(el.querySelector('.agents-table'))).toContain('not wired to an agent')
+    expect(text(el.querySelector('table[aria-label="Connections"]'))).toContain('not wired to an agent')
 
     const wired = agentFixture('scout')
     wired.spec.tools = { interactive: { connections: ['search'] } }
     const second = await mountConnections({ providers: [] }, [wired], { listConnections: () => Promise.resolve([conn]) })
     await second.el.store.load('connections')
     await settle(second.el, 4)
-    expect(text(second.el.querySelector('.agents-table'))).not.toContain('not wired to an agent')
+    expect(text(second.el.querySelector('table[aria-label="Connections"]'))).not.toContain('not wired to an agent')
   })
 
   it('does not flag channels — only tools need a grant', async () => {
@@ -309,7 +310,7 @@ describe('unwired tool connections', () => {
     })
     await el.store.load('connections')
     await settle(el, 4)
-    expect(text(el.querySelector('.agents-table'))).not.toContain('not wired to an agent')
+    expect(text(el.querySelector('table[aria-label="Connections"]'))).not.toContain('not wired to an agent')
   })
 })
 

@@ -48,6 +48,9 @@ export type IconName =
   | 'swap'
   | 'maximize'
   | 'arrow-left'
+  | 'arrow-up'
+  | 'square'
+  | 'chevron-down'
   | 'chevron-right'
   | 'corner-down-right'
   | 'circle'
@@ -95,6 +98,9 @@ const PATHS: Record<IconName, string> = {
   swap: '<path d="M8 3 4 7l4 4M4 7h13M16 21l4-4-4-4M20 17H7"/>',
   maximize: '<path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3"/>',
   'arrow-left': '<path d="M19 12H5M12 19l-7-7 7-7"/>',
+  'arrow-up': '<path d="m5 12 7-7 7 7M12 19V5"/>',
+  square: '<rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor"/>',
+  'chevron-down': '<path d="m6 9 6 6 6-6"/>',
   'chevron-right': '<path d="m9 6 6 6-6 6"/>',
   'corner-down-right': '<path d="M15 10l5 5-5 5M4 4v7a4 4 0 0 0 4 4h12"/>',
   circle: '<circle cx="12" cy="12" r="6" fill="currentColor" stroke="none"/>',

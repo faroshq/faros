@@ -19,7 +19,7 @@ TS_PORTALS=(
   "providers/agents/portal"
   "providers/quickstart/portal"
 )
-TS_FILES=(dashboardtile.ts faros-ui.css icons.ts modal.ts styles.ts tabs.ts tenant.ts toast.ts)
+TS_FILES=(dashboardtile.ts faros-ui.css form-select.ts icons.ts modal.ts resource-table-filter.ts styles.ts tabs.ts tenant.ts toast.ts)
 
 # Vue SFC portals + files.
 VUE_SRC="$ROOT/provider-sdk/portalkit-vue"

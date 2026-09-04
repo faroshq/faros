@@ -12,8 +12,10 @@ import { mutate } from '../mutate'
 import { toast } from '../ui/toast'
 import { channelInbound } from '../conn-defs'
 import type { Agent, AgentChannel, AgentPatch, Autonomy } from '../types'
+import type { FormSelectOption } from '../portalkit/form-select'
 
 import './automation'
+import '../portalkit/form-select'
 
 // Autonomy is enforced server-side now, so the copy states the consequence
 // rather than naming the mode.
@@ -105,9 +107,14 @@ export class AgentConfig extends StoreElement {
   // ---- persona -------------------------------------------------------------
 
   private personaSection(): TemplateResult {
-    return html`<section class="agents-panel k-card agents-config-sec">
-      <h3>${icon('sparkles')} Persona</h3>
-      <p class="muted">Who this agent is and how it should behave on every run.</p>
+    return html`<section class="k-resource-section-card agents-config-sec" aria-labelledby="agent-persona-heading" data-k-resource-section-card>
+      <header class="k-resource-section-card__header">
+        <div class="k-resource-section-card__heading">
+          <h2 id="agent-persona-heading" class="k-resource-section-card__title">${icon('sparkles')} Persona</h2>
+          <p class="k-resource-section-card__description">Who this agent is and how it should behave on every run.</p>
+        </div>
+      </header>
+      <div class="k-resource-section-card__body">
       <label>
         Display name
         <input class="k-input" .value=${this.displayName} @input=${(e: Event) => (this.displayName = (e.target as HTMLInputElement).value)} />
@@ -145,6 +152,7 @@ export class AgentConfig extends StoreElement {
           ${icon('check')} Save persona
         </button>
       </div>
+      </div>
     </section>`
   }
 
@@ -153,15 +161,33 @@ export class AgentConfig extends StoreElement {
   private modelSection(a: Agent): TemplateResult {
     const creds = this.store.credentials.data
     const available = creds.filter((c) => c.name !== this.modelCredential && !this.fallbacks.includes(c.name))
-    return html`<section class="agents-panel k-card agents-config-sec">
-      <h3>${icon('brain')} Model</h3>
-      <p class="muted">Which credential this agent reasons with. Fallbacks are tried in order when the primary fails.</p>
+    const credentialOptions: FormSelectOption[] = [
+      { value: '', label: '— no model —' },
+      ...creds.map((credential) => ({
+        value: credential.name,
+        label: `${credential.name}${credential.model ? ` (${credential.model})` : ''}`,
+      })),
+    ]
+    const fallbackOptions: FormSelectOption[] = [
+      { value: '', label: '+ add fallback…' },
+      ...available.map((credential) => ({ value: credential.name, label: credential.name })),
+    ]
+    return html`<section class="k-resource-section-card agents-config-sec" aria-labelledby="agent-model-heading" data-k-resource-section-card>
+      <header class="k-resource-section-card__header">
+        <div class="k-resource-section-card__heading">
+          <h2 id="agent-model-heading" class="k-resource-section-card__title">${icon('brain')} Model</h2>
+          <p class="k-resource-section-card__description">Which credential this agent reasons with. Fallbacks are tried in order when the primary fails.</p>
+        </div>
+      </header>
+      <div class="k-resource-section-card__body">
       <label>
-        Model credential
-        <select class="k-input" @change=${(e: Event) => (this.modelCredential = (e.target as HTMLSelectElement).value)}>
-          <option value="">— no model —</option>
-          ${creds.map((c) => html`<option value=${c.name} ?selected=${c.name === this.modelCredential}>${c.name}${c.model ? ` (${c.model})` : ''}</option>`)}
-        </select>
+        <span id="agent-model-credential-label">Model credential</span>
+        <faros-form-select
+          .value=${this.modelCredential}
+          .options=${credentialOptions}
+          .labelledby=${'agent-model-credential-label'}
+          @change=${(event: CustomEvent<string>) => (this.modelCredential = event.detail)}
+        ></faros-form-select>
         ${creds.length === 0
           ? html`<span class="agents-hint"
               >No models yet —
@@ -172,7 +198,7 @@ export class AgentConfig extends StoreElement {
           : nothing}
       </label>
       <div class="agents-fieldset">
-        <span class="agents-fieldset-legend">Fallbacks</span>
+        <span id="agent-fallbacks-label" class="agents-fieldset-legend">Fallbacks</span>
         ${this.fallbacks.length
           ? html`<div class="agents-chiprow">
               ${this.fallbacks.map(
@@ -191,16 +217,15 @@ export class AgentConfig extends StoreElement {
             </div>`
           : html`<span class="agents-hint">None — a model failure fails the run.</span>`}
         ${available.length
-          ? html`<select class="k-input agents-addselect"
-              @change=${(e: Event) => {
-                const sel = e.target as HTMLSelectElement
-                if (sel.value) this.fallbacks = [...this.fallbacks, sel.value]
-                sel.value = ''
+          ? html`<faros-form-select
+              class="agents-addselect"
+              .value=${''}
+              .options=${fallbackOptions}
+              .labelledby=${'agent-fallbacks-label'}
+              @change=${(event: CustomEvent<string>) => {
+                if (event.detail) this.fallbacks = [...this.fallbacks, event.detail]
               }}
-            >
-              <option value="">+ add fallback…</option>
-              ${available.map((c) => html`<option value=${c.name}>${c.name}</option>`)}
-            </select>`
+            ></faros-form-select>`
           : nothing}
       </div>
       <div class="agents-form-actions">
@@ -219,18 +244,24 @@ export class AgentConfig extends StoreElement {
         </button>
         ${a.spec?.models?.chat !== this.modelCredential ? html`<span class="agents-hint">unsaved change</span>` : nothing}
       </div>
+      </div>
     </section>`
   }
 
   // ---- autonomy + budget ---------------------------------------------------
 
   private policySection(): TemplateResult {
-    return html`<section class="agents-panel k-card agents-config-sec">
-      <h3>${icon('gauge')} Autonomy &amp; budget</h3>
-      <p class="muted">
-        Autonomy decides which tool calls stop and wait for you. It is enforced on every run — a paused run shows up in
-        <strong>Activity</strong> as <em>PendingApproval</em>.
-      </p>
+    return html`<section class="k-resource-section-card agents-config-sec" aria-labelledby="agent-policy-heading" data-k-resource-section-card>
+      <header class="k-resource-section-card__header">
+        <div class="k-resource-section-card__heading">
+          <h2 id="agent-policy-heading" class="k-resource-section-card__title">${icon('gauge')} Autonomy &amp; budget</h2>
+          <p class="k-resource-section-card__description">
+            Autonomy decides which tool calls stop and wait for you. It is enforced on every run — a paused run shows up in
+            <strong>Activity</strong> as <em>PendingApproval</em>.
+          </p>
+        </div>
+      </header>
+      <div class="k-resource-section-card__body">
       <div class="agents-radiocards">
         ${AUTONOMY_MODES.map(
           (m) => html`<label class="agents-radiocard ${m.id === this.autonomy ? 'sel' : ''}">
@@ -314,6 +345,7 @@ export class AgentConfig extends StoreElement {
           ${icon('check')} Save policy
         </button>
       </div>
+      </div>
     </section>`
   }
 
@@ -335,12 +367,17 @@ export class AgentConfig extends StoreElement {
     // web_fetch alone does not need one.
     const hasSearchTool = (interactive?.connections || []).some((n) => this.store.connectionType(n) === 'websearch')
 
-    return html`<section class="agents-panel k-card agents-config-sec">
-      <h3>${icon('wrench')} Tools &amp; toolsets</h3>
-      <p class="muted">
-        What this agent can call. Chat always gets a granted tool; tick <strong>background</strong> to also allow it on schedules,
-        triggers and heartbeats — those run with nobody watching, so they get a deliberately smaller surface.
-      </p>
+    return html`<section class="k-resource-section-card agents-config-sec" aria-labelledby="agent-tools-heading" data-k-resource-section-card>
+      <header class="k-resource-section-card__header">
+        <div class="k-resource-section-card__heading">
+          <h2 id="agent-tools-heading" class="k-resource-section-card__title">${icon('wrench')} Tools &amp; toolsets</h2>
+          <p class="k-resource-section-card__description">
+            What this agent can call. Chat always gets a granted tool; tick <strong>background</strong> to also allow it on schedules,
+            triggers and heartbeats — those run with nobody watching, so they get a deliberately smaller surface.
+          </p>
+        </div>
+      </header>
+      <div class="k-resource-section-card__body">
       <fieldset class="agents-wire-fs">
         <legend>${icon('puzzle')} Toolsets</legend>
         ${this.store.toolsets.data.length
@@ -414,6 +451,7 @@ export class AgentConfig extends StoreElement {
               >.
             </p>`}
       </fieldset>
+      </div>
     </section>`
   }
 
@@ -534,12 +572,17 @@ export class AgentConfig extends StoreElement {
 
   private channelsSection(a: Agent): TemplateResult {
     const conns = this.store.channelConnections()
-    return html`<section class="agents-panel k-card agents-config-sec">
-      <h3>${icon('megaphone')} Channels</h3>
-      <p class="muted">
-        Where this agent messages you — and, for chat channels, where you message it. Bind a <strong>primary</strong> channel plus any
-        secondaries (a dedicated incidents or news channel, say); schedules and triggers can route to any of them by name.
-      </p>
+    return html`<section class="k-resource-section-card agents-config-sec" aria-labelledby="agent-channels-heading" data-k-resource-section-card>
+      <header class="k-resource-section-card__header">
+        <div class="k-resource-section-card__heading">
+          <h2 id="agent-channels-heading" class="k-resource-section-card__title">${icon('megaphone')} Channels</h2>
+          <p class="k-resource-section-card__description">
+            Where this agent messages you — and, for chat channels, where you message it. Bind a <strong>primary</strong> channel plus any
+            secondaries (a dedicated incidents or news channel, say); schedules and triggers can route to any of them by name.
+          </p>
+        </div>
+      </header>
+      <div class="k-resource-section-card__body">
       ${conns.length === 0
         ? html`<p class="agents-hint">
             No channels yet — add a Telegram / Slack / Discord / email connection under
@@ -580,7 +623,8 @@ export class AgentConfig extends StoreElement {
               primary
             </label>
             <button
-              class="k-btn k-btn--ghost agents-iconbtn agents-iconbtn-danger"
+              class="k-icon-action agents-iconbtn-danger"
+              type="button"
               aria-label="Remove channel ${r.name || ''}"
               title="Remove channel"
               @click=${() => (this.channels = this.channels.filter((x) => x.key !== r.key))}
@@ -606,6 +650,7 @@ export class AgentConfig extends StoreElement {
         <button class="k-btn k-btn--primary" @click=${() => void this.saveChannels()}>${icon('check')} Save channels</button>
       </div>
       ${this.inboundLines(a)}
+      </div>
     </section>`
   }
 
@@ -709,9 +754,14 @@ export class AgentConfig extends StoreElement {
     const others = this.store.agents.data.filter((x) => x.metadata.name !== this.name)
     if (!others.length) return nothing
     const current = new Set(a.spec?.delegates || [])
-    return html`<section class="agents-panel k-card agents-config-sec">
-      <h3>${icon('corner-down-right')} Delegates</h3>
-      <p class="muted">Agents this one may hand work to. A delegated run bills against this agent's budget.</p>
+    return html`<section class="k-resource-section-card agents-config-sec" aria-labelledby="agent-delegates-heading" data-k-resource-section-card>
+      <header class="k-resource-section-card__header">
+        <div class="k-resource-section-card__heading">
+          <h2 id="agent-delegates-heading" class="k-resource-section-card__title">${icon('corner-down-right')} Delegates</h2>
+          <p class="k-resource-section-card__description">Agents this one may hand work to. A delegated run bills against this agent's budget.</p>
+        </div>
+      </header>
+      <div class="k-resource-section-card__body">
       <div class="agents-checkrow">
         ${others.map(
           (o) => html`<label class="agents-check">
@@ -729,6 +779,7 @@ export class AgentConfig extends StoreElement {
             ${o.spec?.displayName || o.metadata.name}
           </label>`,
         )}
+      </div>
       </div>
     </section>`
   }

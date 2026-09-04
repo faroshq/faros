@@ -37,6 +37,34 @@ async function send(el: AgentChat, message: string): Promise<void> {
 }
 
 describe('chat streaming', () => {
+  it('uses the App Studio composer geometry and accessible compact action', async () => {
+    const chatStream = vi.fn(scripted([]))
+    const { el } = await mountChat(chatStream)
+    const surface = el.querySelector('.agents-composer-surface')
+    const textarea = el.querySelector<HTMLTextAreaElement>('.agents-composer-input')!
+    const submit = el.querySelector<HTMLButtonElement>('button[type="submit"]')!
+
+    expect(surface).not.toBeNull()
+    expect(textarea.rows).toBe(3)
+    expect(textarea.getAttribute('aria-label')).toBe('Message scout')
+    expect(submit.classList.contains('agents-composer-primary')).toBe(true)
+    expect(submit.getAttribute('aria-label')).toBe('Send')
+    expect(submit.title).toBe('Send')
+    expect(submit.textContent?.trim()).toBe('')
+    expect(submit.disabled).toBe(true)
+
+    textarea.value = 'hello'
+    textarea.dispatchEvent(new Event('input'))
+    await settle(el)
+    expect(el.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(false)
+
+    const composing = new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })
+    textarea.dispatchEvent(composing)
+    await settle(el)
+    expect(composing.defaultPrevented).toBe(false)
+    expect(chatStream).not.toHaveBeenCalled()
+  })
+
   it('renders the user turn and streams assistant deltas as markdown', async () => {
     const { el } = await mountChat(
       scripted([

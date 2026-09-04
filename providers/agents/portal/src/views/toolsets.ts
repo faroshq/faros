@@ -4,9 +4,14 @@
 
 import { html, nothing, type TemplateResult } from 'lit'
 import { property, state } from 'lit/decorators.js'
-import { repeat } from 'lit/directives/repeat.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
+import {
+  createResourceTableState,
+  resourceTable,
+  resourceTableAction,
+  type ResourceTableState,
+} from '../ui/resource-table'
 import { errorState, loadingState, sliceView, staleState } from '../ui/states'
 import { createGuidance, firstRunGuide } from '../ui/create-flow'
 import { confirmModal } from '../portalkit/modal'
@@ -23,6 +28,7 @@ export class Toolsets extends StoreElement {
   @state() private draftDisplay = ''
   @state() private draftConns: string[] = []
   @state() private createBusy = false
+  @state() private toolsetTable = createResourceTableState()
 
   private openCreate(): void {
     if (this.routeOwned) {
@@ -103,10 +109,82 @@ export class Toolsets extends StoreElement {
     })
   }
 
-  private usedBy(name: string): number {
+  private usedBy(name: string): number | null {
+    if (!this.store.agents.hasSnapshot || this.store.agents.error) return null
     return this.store.agents.data.filter((a) =>
       [...(a.spec?.tools?.interactive?.toolsets || []), ...(a.spec?.tools?.background?.toolsets || [])].includes(name),
     ).length
+  }
+
+  private table(rows: Toolset[]): TemplateResult {
+    return resourceTable({
+      ariaLabel: 'Toolsets',
+      rows,
+      rowKey: (toolset) => toolset.metadata.name,
+      state: this.toolsetTable,
+      onStateChange: (next: ResourceTableState) => (this.toolsetTable = next),
+      searchPlaceholder: 'Search toolsets…',
+      searchText: (toolset) => [
+        toolset.metadata.name,
+        toolset.spec.displayName,
+        ...(toolset.spec.connections || []),
+      ].filter(Boolean).join(' '),
+      filters: [
+        {
+          key: 'usage',
+          label: 'Usage',
+          allLabel: 'All usage',
+          value: (toolset) => {
+            const used = this.usedBy(toolset.metadata.name)
+            return used === null ? 'unknown' : used > 0 ? 'used' : 'unused'
+          },
+          labelFor: (value) => ({ used: 'In use', unused: 'Unused', unknown: 'Unknown' })[value] || value,
+        },
+      ],
+      columns: [
+        {
+          key: 'name',
+          label: 'Name',
+          primary: true,
+          render: (toolset) => html`<span class="agents-resource-name" title=${toolset.metadata.name}>${toolset.spec.displayName || toolset.metadata.name}</span>
+            ${toolset.spec.displayName ? html`<code class="agents-resource-id">${toolset.metadata.name}</code>` : nothing}`,
+        },
+        {
+          key: 'tools',
+          label: 'Tools',
+          render: (toolset) => {
+            const connections = toolset.spec.connections || []
+            return connections.length
+              ? html`<span class="agents-resource-tags">${connections.map((connection) => html`<span class="k-badge agents-badge">${connection}</span>`)}</span>`
+              : html`<span class="muted">—</span>`
+          },
+        },
+        {
+          key: 'usedBy',
+          label: 'Used by',
+          render: (toolset) => {
+            const used = this.usedBy(toolset.metadata.name)
+            return used === null
+              ? html`<span class="muted" title="Agent assignments are unavailable">Unknown</span>`
+              : html`<span class="muted">${used} agent${used === 1 ? '' : 's'}</span>`
+          },
+        },
+      ],
+      actions: (toolset) => html`
+        ${resourceTableAction({
+          icon: 'pencil',
+          label: `Edit toolset ${toolset.metadata.name}`,
+          tone: 'edit',
+          onClick: () => this.openEdit(toolset),
+        })}
+        ${resourceTableAction({
+          icon: 'trash',
+          label: `Delete toolset ${toolset.metadata.name}`,
+          tone: 'delete',
+          onClick: () => void this.del(toolset.metadata.name),
+        })}
+      `,
+    })
   }
 
   render(): TemplateResult {
@@ -167,44 +245,7 @@ export class Toolsets extends StoreElement {
         emptyText: 'No toolsets yet.',
         empty: renderFirstRun,
         retry: () => void this.store.load('toolsets'),
-        content: (rows) => html`<div class="agents-tablewrap k-table">
-              <table class="agents-table">
-                <thead>
-                  <tr><th>Name</th><th>Tools</th><th>Used by</th><th class="agents-th-actions">Actions</th></tr>
-                </thead>
-                <tbody>
-                  ${repeat(
-                    rows,
-                    (t) => t.metadata.name,
-                    (t) => {
-                      const conns = t.spec.connections || []
-                      const used = this.usedBy(t.metadata.name)
-                      return html`<tr class=${this.editing === t.metadata.name ? 'is-editing' : ''}>
-                        <td>
-                          <strong>${t.spec.displayName || t.metadata.name}</strong>
-                          ${t.spec.displayName ? html`<span class="agents-hint"> ${t.metadata.name}</span>` : nothing}
-                        </td>
-                        <td>${conns.length ? conns.map((c) => html`<span class="k-badge agents-badge">${c}</span>`) : html`<span class="muted">—</span>`}</td>
-                        <td class="muted">${used} agent${used === 1 ? '' : 's'}</td>
-                        <td class="agents-row-actions">
-                          <button class="k-btn k-btn--ghost agents-iconbtn" aria-label="Edit ${t.metadata.name}" title="Edit" @click=${() => this.openEdit(t)}>
-                            ${icon('pencil')}
-                          </button>
-                          <button
-                            class="k-btn k-btn--ghost agents-iconbtn agents-iconbtn-danger"
-                            aria-label="Delete ${t.metadata.name}"
-                            title="Delete"
-                            @click=${() => void this.del(t.metadata.name)}
-                          >
-                            ${icon('trash')}
-                          </button>
-                        </td>
-                      </tr>`
-                    },
-                  )}
-                </tbody>
-              </table>
-            </div>`,
+        content: (rows) => this.table(rows),
       })}
       ${this.editing !== null ? this.form() : nothing}
     </div>`

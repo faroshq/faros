@@ -24,7 +24,7 @@ import { icon, type IconName } from './ui/icon'
 import { clearToasts } from './ui/toast'
 import { tabClass, tabCountClass, tabsClass } from './portalkit/tabs'
 import type { Agent, Connection, Credential, FarosContext, Toolset } from './types'
-import { DEFAULT_ROUTE, MENUS, activeMenu, hashFor, parseHash, syncHash, writeHash, type CreateSuccessDetail, type MenuKey, type Route } from './router'
+import { DEFAULT_ROUTE, MENUS, activeMenu, hashFor, parseHash, syncHash, writeHash, type CreateSuccessDetail, type EditCancelDetail, type EditSuccessDetail, type MenuKey, type Route } from './router'
 
 import './views/agents-list'
 import './views/agent-create'
@@ -58,6 +58,7 @@ export class AgentsElement extends LightElement {
   // rotated. Route-owned children receive this marker, so a success from a
   // detached/superseded form cannot be adopted by a later create session.
   private createSession = 0
+  private focusConnectionsAfterEdit = false
 
   set farosContext(v: FarosContext | null) {
     const previous = this.authority
@@ -103,6 +104,9 @@ export class AgentsElement extends LightElement {
   }
   private restoreRoute(): void {
     const next = parseHash()
+    if (this.route.kind === 'edit' && next.kind === 'menu' && next.menu === 'connections') {
+      this.focusConnectionsAfterEdit = true
+    }
     this.advanceCreateSession(this.route, next)
     this.route = next
     // Keep malformed/legacy external hashes from leaving the shell rendered on
@@ -132,6 +136,22 @@ export class AgentsElement extends LightElement {
     if (this.route.kind !== 'create') return
     this.go(this.createOwnerRoute(this.route), 'replace')
   }
+  private onEditCancel = (e: Event): void => {
+    if (!this.eventBelongsToCurrentStore(e) || this.route.kind !== 'edit') return
+    const detail = (e as CustomEvent<EditCancelDetail>).detail
+    if (!detail || detail.resource !== this.route.resource || detail.name !== this.route.name) return
+    this.focusConnectionsAfterEdit = true
+    this.go({ kind: 'menu', menu: 'connections' }, 'replace')
+  }
+  private onEditSuccess = (e: Event): void => {
+    if (!this.eventBelongsToCurrentStore(e) || this.route.kind !== 'edit') return
+    const detail = (e as CustomEvent<EditSuccessDetail>).detail
+    if (!detail || detail.resource !== this.route.resource || detail.name !== this.route.name) return
+    const item = detail.item as Connection | undefined
+    if (item?.metadata?.name) this.store.adopt('connections', item)
+    this.focusConnectionsAfterEdit = true
+    this.go({ kind: 'menu', menu: 'connections' }, 'replace')
+  }
 
   connectedCallback(): void {
     super.connectedCallback()
@@ -145,7 +165,9 @@ export class AgentsElement extends LightElement {
     window.addEventListener('popstate', this.onPopState)
     this.addEventListener('agents-navigate', this.onNavigate)
     this.addEventListener('agents-create-success', this.onCreateSuccess)
+    this.addEventListener('agents-edit-success', this.onEditSuccess)
     this.addEventListener('agents-cancel', this.onCreateCancel)
+    this.addEventListener('agents-edit-cancel', this.onEditCancel)
     this.store.addEventListener('change', this.onStoreChange)
     this.maybeLoad()
   }
@@ -155,7 +177,9 @@ export class AgentsElement extends LightElement {
     window.removeEventListener('popstate', this.onPopState)
     this.removeEventListener('agents-navigate', this.onNavigate)
     this.removeEventListener('agents-create-success', this.onCreateSuccess)
+    this.removeEventListener('agents-edit-success', this.onEditSuccess)
     this.removeEventListener('agents-cancel', this.onCreateCancel)
+    this.removeEventListener('agents-edit-cancel', this.onEditCancel)
     this.store.removeEventListener('change', this.onStoreChange)
     this.store.disconnect()
     super.disconnectedCallback()
@@ -166,6 +190,14 @@ export class AgentsElement extends LightElement {
     this.route = r
     writeHash(r, mode)
     this.requestUpdate()
+  }
+
+  protected updated(): void {
+    if (!this.focusConnectionsAfterEdit || this.route.kind !== 'menu' || this.route.menu !== 'connections') return
+    this.focusConnectionsAfterEdit = false
+    requestAnimationFrame(() => {
+      this.querySelector<HTMLElement>('[data-connections-heading]')?.focus()
+    })
   }
 
   private maybeLoad(): void {
@@ -252,7 +284,7 @@ export class AgentsElement extends LightElement {
     }
     return html`
       <div class="agents-app">
-        ${this.renderNav()}
+        ${this.route.kind === 'agent' ? nothing : this.renderNav()}
         <div class="agents-view">${keyed(this.authorityGeneration, this.renderRoute())}</div>
       </div>
     `
@@ -270,6 +302,14 @@ export class AgentsElement extends LightElement {
         ></agents-agent-detail>`
       case 'run':
         return html`<agents-run-detail .store=${bind.store} .api=${bind.api} .runID=${this.route.id}></agents-run-detail>`
+      case 'edit':
+        return html`<agents-connections
+          .store=${bind.store}
+          .api=${bind.api}
+          .routeOwned=${true}
+          .editRoute=${true}
+          .editName=${this.route.name}
+        ></agents-connections>`
       case 'create':
         return this.renderCreateRoute(this.route)
       default:

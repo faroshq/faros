@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '../api'
 import { AgentsElement } from '../element'
 import { AppStore } from '../store'
-import type { Agent, FarosContext } from '../types'
+import type { Agent, Connection, FarosContext } from '../types'
 import { settle } from './helpers'
 
 if (!customElements.get('faros-provider-agents')) customElements.define('faros-provider-agents', AgentsElement)
@@ -15,7 +15,7 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-function emptyApi(api: ApiClient, options: { agents?: Agent[]; providers?: string[] } = {}): void {
+function emptyApi(api: ApiClient, options: { agents?: Agent[]; connections?: Connection[]; providers?: string[] } = {}): void {
   const empty = () => Promise.resolve([])
   const emptyUsage = () =>
     Promise.resolve({
@@ -27,7 +27,7 @@ function emptyApi(api: ApiClient, options: { agents?: Agent[]; providers?: strin
     })
   Object.assign(api, {
     listAgents: () => Promise.resolve(options.agents || []),
-    listConnections: empty,
+    listConnections: () => Promise.resolve(options.connections || []),
     listToolsets: empty,
     listSchedules: empty,
     listTriggers: empty,
@@ -49,7 +49,7 @@ function emptyApi(api: ApiClient, options: { agents?: Agent[]; providers?: strin
 
 async function mountShell(
   hash = '#/agents',
-  options: { agents?: Agent[]; providers?: string[] } = {},
+  options: { agents?: Agent[]; connections?: Connection[]; providers?: string[] } = {},
   context: Partial<FarosContext> = {},
 ): Promise<AgentsElement> {
   history.replaceState(null, '', hash)
@@ -73,6 +73,70 @@ const waitForHistory = async (): Promise<void> => {
 }
 
 describe('AgentsElement hash-owned creation navigation', () => {
+  it('opens connection editing as a deep-linkable route and replaces it on save', async () => {
+    const original: Connection = {
+      metadata: { name: 'team/github' },
+      spec: { type: 'http', displayName: 'Team GitHub', baseURL: 'https://old.example.com' },
+    }
+    const el = await mountShell('#/connections', { connections: [original] })
+    const api = (el as unknown as { api: ApiClient }).api
+    const updated: Connection = { ...original, spec: { ...original.spec, displayName: 'Updated GitHub' } }
+    const patch = vi.fn().mockResolvedValue(updated)
+    api.patchConnection = patch as ApiClient['patchConnection']
+    const before = history.length
+
+    el.querySelector<HTMLButtonElement>('button[aria-label="Edit connection team/github"]')!.click()
+    await settle(el)
+    expect(location.hash).toBe('#/connections/team%2Fgithub/edit')
+    expect(history.length).toBe(before + 1)
+    expect(el.querySelector('h1')?.textContent).toBe('Edit connection')
+    expect(el.querySelector('table[aria-label="Connections"]')).toBeNull()
+
+    const form = el.querySelector<HTMLFormElement>('form')!
+    const displayName = form.querySelector<HTMLInputElement>('input[name="displayName"]')!
+    expect(document.activeElement).toBe(displayName)
+    displayName.value = 'Updated GitHub'
+    form.dispatchEvent(new Event('submit', { cancelable: true }))
+    await settle(el, 7)
+
+    expect(patch).toHaveBeenCalledWith('team/github', expect.objectContaining({ displayName: 'Updated GitHub' }))
+    expect(location.hash).toBe('#/connections')
+    expect(history.length).toBe(before + 1)
+    expect(el.textContent).toContain('Updated GitHub')
+    expect(document.activeElement).toBe(el.querySelector('[data-connections-heading]'))
+  })
+
+  it('replaces a connection edit route on cancel', async () => {
+    const connection: Connection = { metadata: { name: 'test' }, spec: { type: 'http', displayName: 'Test' } }
+    const el = await mountShell('#/connections/test/edit', { connections: [connection] })
+    const replace = vi.spyOn(history, 'replaceState')
+    replace.mockClear()
+    try {
+      ;[...el.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Cancel')!.click()
+      await settle(el)
+      expect(location.hash).toBe('#/connections')
+      expect(replace).toHaveBeenCalledWith(null, '', '#/connections')
+      expect(document.activeElement).toBe(el.querySelector('[data-connections-heading]'))
+    } finally {
+      replace.mockRestore()
+    }
+  })
+
+  it('returns focus to the Connections heading after browser Back leaves editing', async () => {
+    const connection: Connection = { metadata: { name: 'test' }, spec: { type: 'http', displayName: 'Test' } }
+    const el = await mountShell('#/connections', { connections: [connection] })
+    el.querySelector<HTMLButtonElement>('button[aria-label="Edit connection test"]')!.click()
+    await settle(el)
+    expect(location.hash).toBe('#/connections/test/edit')
+
+    history.replaceState(null, '', '#/connections')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await settle(el)
+
+    expect(location.hash).toBe('#/connections')
+    expect(document.activeElement).toBe(el.querySelector('[data-connections-heading]'))
+  })
+
   it('pushes create, replaces on cancel, and leaves the page form in the route', async () => {
     const el = await mountShell('#/agents', { agents: [{ metadata: { name: 'scout' }, spec: { displayName: 'Scout' } }] })
     const before = history.length
@@ -113,6 +177,8 @@ describe('AgentsElement hash-owned creation navigation', () => {
     expect(location.hash).toBe('#/agents/nova/config')
     expect(el.querySelector('agents-agent-detail')).not.toBeNull()
     expect(el.textContent).toContain('Nova')
+    expect(el.querySelector('nav[aria-label="Agents provider sections"]')).toBeNull()
+    expect(el.querySelector('nav[aria-label="Agent sections"]')).not.toBeNull()
   })
 
   it('restores external hash assignments and browser back traversal', async () => {

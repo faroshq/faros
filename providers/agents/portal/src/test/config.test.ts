@@ -11,14 +11,16 @@ import { familiesForConns } from '../conn-defs'
 import { clearToasts, subscribeToasts } from '../ui/toast'
 import { agentFixture, makeStore, mount, settle, stubApi, text } from './helpers'
 
-async function mountConfig(spec: Record<string, unknown> = {}) {
+async function mountConfig(spec: Record<string, unknown> = {}, credentials: Array<{ name: string; model?: string }> = []) {
   const patchAgent = vi.fn().mockImplementation((_n: string, body: AgentPatch) => Promise.resolve({ metadata: { name: 'scout' }, spec: body }))
   const api = stubApi({ patchAgent })
   const store = makeStore(api)
   store.agents.data = [agentFixture('scout', spec)]
   store.agents.loaded = true
+  store.credentials.data = credentials
+  store.credentials.loaded = true
   const el = await mount<AgentConfig>('agents-agent-config', { store, api, name: 'scout' })
-  return { el, patchAgent }
+  return { el, patchAgent, store }
 }
 
 function sectionButton(el: AgentConfig, label: string): HTMLButtonElement {
@@ -26,6 +28,32 @@ function sectionButton(el: AgentConfig, label: string): HTMLButtonElement {
 }
 
 describe('agent config', () => {
+  it('uses the PortalKit form selector for primary and fallback models', async () => {
+    const { el, patchAgent } = await mountConfig(
+      { models: { chat: 'main' } },
+      [{ name: 'main', model: 'gpt-5' }, { name: 'backup', model: 'claude' }],
+    )
+    const selectors = [...el.querySelectorAll('faros-form-select')]
+    expect(selectors).toHaveLength(2)
+    expect(el.querySelector('#agent-model-heading')?.closest('section')?.querySelector('select')).toBeNull()
+
+    const primary = selectors[0]
+    const trigger = primary.querySelector<HTMLButtonElement>('[role="combobox"]')!
+    expect(trigger.classList.contains('k-form-select__trigger')).toBe(true)
+    expect(trigger.getAttribute('aria-labelledby')).toContain('agent-model-credential-label')
+    expect(trigger.textContent).toContain('main (gpt-5)')
+
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }))
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    await settle(el)
+    expect(trigger.textContent).toContain('backup (claude)')
+
+    sectionButton(el, 'Save model').click()
+    await settle(el, 4)
+    expect(patchAgent).toHaveBeenCalledWith('scout', expect.objectContaining({ modelCredential: 'backup' }))
+  })
+
   it('uses the canonical square action for removing a model fallback', async () => {
     const { el } = await mountConfig({ models: { chat: 'main' }, modelFallbacks: ['backup'] })
     const remove = el.querySelector<HTMLButtonElement>('.agents-chip-x')!

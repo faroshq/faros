@@ -7,6 +7,15 @@ too, alongside the SFC kit in `provider-sdk/portalkit-vue`.
 
 - `icons.ts` — inline SVG icon set (`ic(name)` returns an `<svg class="k-icon">`
   string). Use in HTML template literals instead of emoji.
+- `form-select.ts` — framework-neutral single-select combobox for forms. Set
+  `options`, `value`, and optional `placeholder`, `labelledby`, and
+  `describedby` properties; it emits one bubbling `change` event whose `detail`
+  is the selected value. Its viewport-positioned listbox is portalled to
+  `document.body`.
+- `resource-table-filter.ts` — framework-neutral finite-select resource facet.
+  Set `label`, `allLabel`, `options`, and `value`; it emits the same bubbling
+  string-valued `change` contract. Searchable resource-reference facets remain
+  an explicit opt-in in the Vue `ResourceTableFilter.vue` counterpart.
 - `tabs.ts` — framework-neutral tab class helpers for labeled provider-level
   route/section navigation. The shared `.k-tabs` recipe (including
   icon-plus-label tabs, optional square mono counts, active/hover/focus states,

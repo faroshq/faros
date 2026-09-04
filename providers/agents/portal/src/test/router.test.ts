@@ -32,6 +32,19 @@ describe('create routes', () => {
   })
 })
 
+describe('edit routes', () => {
+  it('parses, formats, and highlights an encoded connection edit route', () => {
+    const route: Route = { kind: 'edit', resource: 'connection', name: 'team/github' }
+    expect(hashFor(route)).toBe('#/connections/team%2Fgithub/edit')
+    expect(parseHash('#/connections/team%2Fgithub/edit')).toEqual(route)
+    expect(activeMenu(route)).toBe('connections')
+  })
+
+  it('rejects extra path segments after a connection edit route', () => {
+    expect(parseHash('#/connections/test/edit/extra')).toEqual({ kind: 'menu', menu: 'connections' })
+  })
+})
+
 describe('hash history writes', () => {
   it('pushes ordinary navigation and replaces only an explicit terminal transition', () => {
     const push = vi.spyOn(history, 'pushState')

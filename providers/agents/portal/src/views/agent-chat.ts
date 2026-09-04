@@ -469,7 +469,7 @@ export class AgentChat extends StoreElement {
     if (this.sessionID && !list.some((s) => s.id === this.sessionID)) {
       list.unshift({ id: this.sessionID, preview: 'New chat', messageCount: 0, createdAt: '', lastActivity: '' })
     }
-    return html`<div class="agents-chat" @agents-approval=${(e: CustomEvent<{ inboxID: string; decision: 'approve' | 'deny' }>) => void this.resolveApproval(e.detail.inboxID, e.detail.decision)}>
+    return html`<div class="agents-chat k-card" @agents-approval=${(e: CustomEvent<{ inboxID: string; decision: 'approve' | 'deny' }>) => void this.resolveApproval(e.detail.inboxID, e.detail.decision)}>
       <div class="agents-chat-head">
         <select class="k-input agents-session-picker"
           aria-label="Chat session"
@@ -478,11 +478,12 @@ export class AgentChat extends StoreElement {
         >
           ${list.map((s) => html`<option value=${s.id} ?selected=${s.id === this.sessionID}>${sessionLabel(s)}</option>`)}
         </select>
-        <button class="k-btn k-btn--ghost agents-iconbtn" aria-label="New chat" title="New chat" ?disabled=${this.streaming} @click=${() => this.newChat()}>
+        <button class="k-icon-action" type="button" aria-label="New chat" title="New chat" ?disabled=${this.streaming} @click=${() => this.newChat()}>
           ${icon('plus')}
         </button>
         <button
-          class="k-btn k-btn--ghost agents-iconbtn agents-iconbtn-danger"
+          class="k-icon-action agents-iconbtn-danger"
+          type="button"
           aria-label="Delete this chat"
           title="Delete this chat"
           ?disabled=${this.streaming}
@@ -528,28 +529,45 @@ export class AgentChat extends StoreElement {
           void this.send()
         }}
       >
-        <textarea class="k-input"
-          rows="1"
-          placeholder=${`Message ${this.name}…  (Enter to send, Shift+Enter for a newline)`}
-          .value=${this.draft}
-          ?disabled=${!hasModel}
-          @input=${(e: Event) => {
-            const t = e.target as HTMLTextAreaElement
-            this.draft = t.value
-            // Grow with the content up to a cap; the log keeps the rest.
-            t.style.height = 'auto'
-            t.style.height = `${Math.min(t.scrollHeight, 180)}px`
-          }}
-          @keydown=${(e: KeyboardEvent) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              void this.send()
-            }
-          }}
-        ></textarea>
-        ${this.streaming
-          ? html`<button type="button" class="k-btn k-btn--ghost secondary agents-stop" @click=${() => void this.stop()}>${icon('pause')} Stop</button>`
-          : html`<button class="k-btn k-btn--primary" type="submit" ?disabled=${!hasModel || !this.draft.trim()}>${icon('send')} Send</button>`}
+        <div class="agents-composer-surface">
+          <textarea
+            class="agents-composer-input"
+            rows="3"
+            aria-label=${`Message ${this.name}`}
+            placeholder=${`Message ${this.name}…  (Enter to send, Shift+Enter for a newline)`}
+            .value=${this.draft}
+            ?disabled=${!hasModel}
+            @input=${(e: Event) => {
+              const t = e.target as HTMLTextAreaElement
+              this.draft = t.value
+              // Grow with the content up to a cap; the log keeps the rest.
+              t.style.height = 'auto'
+              t.style.height = `${Math.min(t.scrollHeight, 180)}px`
+            }}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.isComposing) return
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void this.send()
+              }
+            }}
+          ></textarea>
+          ${this.streaming
+            ? html`<button
+                type="button"
+                class="agents-composer-primary agents-stop is-stop"
+                title="Stop generating"
+                aria-label="Stop generating"
+                @click=${() => void this.stop()}
+              >${icon('square')}</button>`
+            : html`<button
+                class="agents-composer-primary"
+                type="submit"
+                title="Send"
+                aria-label="Send"
+                ?disabled=${!hasModel || !this.draft.trim()}
+              >${icon('arrow-up')}</button>`}
+        </div>
       </form>
     </div>`
   }

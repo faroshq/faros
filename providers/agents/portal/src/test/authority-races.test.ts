@@ -97,7 +97,7 @@ describe('authority-sensitive confirmations', () => {
       oldStore.dispatchEvent(new Event('change'))
       await settle(shell)
 
-      const deleteButton = shell.querySelector<HTMLButtonElement>('button[aria-label="Delete search"]')
+      const deleteButton = shell.querySelector<HTMLButtonElement>('button[aria-label="Delete connection search"]')
       expect(deleteButton).not.toBeNull()
       deleteButton!.click()
       const confirm = document.querySelector<HTMLButtonElement>('[data-k-modal-confirm]')

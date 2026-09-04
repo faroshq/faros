@@ -6,16 +6,21 @@
 
 import { html, nothing, type TemplateResult } from 'lit'
 import { property, state } from 'lit/decorators.js'
-import { repeat } from 'lit/directives/repeat.js'
 import { unsafeHTML } from 'lit/directives/unsafe-html.js'
 import { StoreElement } from '../ui/base'
 import { icon } from '../ui/icon'
-import { sliceView } from '../ui/states'
+import {
+  createResourceTableState,
+  resourceTable,
+  resourceTableAction,
+  type ResourceTableState,
+} from '../ui/resource-table'
+import { errorState, loadingState, sliceView, staleState } from '../ui/states'
 import { createGuidance, firstRunGuide } from '../ui/create-flow'
 import { toast } from '../ui/toast'
 import { confirmModal } from '../portalkit/modal'
 import { mutate } from '../mutate'
-import type { CreateSuccessDetail } from '../router'
+import type { CreateSuccessDetail, EditCancelDetail, EditSuccessDetail } from '../router'
 import {
   CATEGORY_META,
   CONN_DEFS,
@@ -25,7 +30,7 @@ import {
   type ConnField,
   type ConnTypeDef,
 } from '../conn-defs'
-import type { Agent, Connection, ConnectionWrite } from '../types'
+import type { Agent, Connection, ConnectionWrite, Toolset } from '../types'
 
 import './toolsets'
 import './assisted-search'
@@ -54,19 +59,33 @@ function instanceBacked(c: Connection): boolean {
 // exists for an agent that was wired the connection backing it, so an unwired
 // search connection means every agent still answers "I can't make web
 // requests" — a failure that is otherwise completely invisible from here.
-function unwired(c: Connection, agents: Agent[]): boolean {
-  if (connCategory(c.spec.type) !== 'tool') return false
+function wiringState(
+  c: Connection,
+  agents: Agent[],
+  toolsets: Toolset[],
+  agentsAuthoritative: boolean,
+  toolsetsAuthoritative: boolean,
+): 'wired' | 'unwired' | 'unknown' | null {
+  if (connCategory(c.spec.type) !== 'tool') return null
+  if (!agentsAuthoritative) return 'unknown'
   const name = c.metadata.name
-  return !agents.some((a) => {
+  const direct = agents.some((a) => {
     const t = a.spec?.tools
     return (
       (t?.interactive?.connections || []).includes(name) ||
-      (t?.background?.connections || []).includes(name) ||
-      // A shared Toolset can carry the grant instead of the agent listing it.
-      (t?.interactive?.toolsets || []).length > 0 ||
-      (t?.background?.toolsets || []).length > 0
+      (t?.background?.connections || []).includes(name)
     )
   })
+  if (direct) return 'wired'
+  const grantedToolsets = new Set(agents.flatMap((a) => [
+    ...(a.spec?.tools?.interactive?.toolsets || []),
+    ...(a.spec?.tools?.background?.toolsets || []),
+  ]))
+  if (grantedToolsets.size === 0) return 'unwired'
+  if (!toolsetsAuthoritative) return 'unknown'
+  return toolsets.some((toolset) => grantedToolsets.has(toolset.metadata.name) && (toolset.spec.connections || []).includes(name))
+    ? 'wired'
+    : 'unwired'
 }
 
 export class Connections extends StoreElement {
@@ -77,17 +96,47 @@ export class Connections extends StoreElement {
   @property({ type: Boolean }) routeOwned = false
   @property({ type: Boolean }) createRoute = false
   @property({ type: String }) createType = ''
+  @property({ type: Boolean }) editRoute = false
+  @property({ type: String }) editName = ''
   @state() private connType: string | null = null
   @state() private connMode = ''
   @state() private editing: string | null = null
   @state() private createBusy = false
+  @state() private editBusy = false
   @state() private createValues: Record<string, string> = {}
+  @state() private editValues: Record<string, string> = {}
+  @state() private connectionTable = createResourceTableState()
+  private editValuesFor = ''
+  private focusedEditFor = ''
 
   protected willUpdate(changed?: Map<PropertyKey, unknown>): void {
     super.willUpdate()
     if (changed?.has('createType') && changed.get('createType') !== undefined) {
       this.createValues = {}
       this.connMode = ''
+    }
+    if (this.editRoute && this.editName && this.editValuesFor !== this.editName) {
+      const connection = this.store.connections.data.find((item) => item.metadata.name === this.editName)
+      if (connection) this.hydrateEdit(connection)
+    }
+  }
+
+  protected updated(): void {
+    if (!this.editRoute) {
+      this.focusedEditFor = ''
+      return
+    }
+    const input = this.querySelector<HTMLInputElement>('.agents-conn-form input:not([disabled])')
+    if (input && this.focusedEditFor !== this.editName) {
+      this.focusedEditFor = this.editName
+      input.focus()
+      return
+    }
+    const editReadSettled = Boolean(
+      this.store.connections.error || this.store.connections.loaded || this.store.connections.hasSnapshot,
+    )
+    if (!input && editReadSettled && document.activeElement === document.body) {
+      this.querySelector<HTMLElement>('[data-edit-heading]')?.focus()
     }
   }
 
@@ -124,7 +173,14 @@ export class Connections extends StoreElement {
   }
 
   private async saveEdit(c: Connection, form: HTMLFormElement, usesChannel: boolean): Promise<void> {
+    if (this.editBusy) return
     const g = (n: string): string => (form.querySelector<HTMLInputElement>(`[name=${n}]`)?.value || '').trim()
+    this.editValues = {
+      displayName: g('displayName'),
+      endpoint: g('endpoint'),
+      instance: g('instance'),
+      secret: g('secret'),
+    }
     const patch: ConnectionWrite = { displayName: g('displayName') }
     // A self-hosted search connection is addressed by instance name, not by
     // URL — it is reached over the platform's internal data plane. config is
@@ -134,13 +190,30 @@ export class Connections extends StoreElement {
     else patch.baseURL = g('endpoint')
     const secret = g('secret')
     if (secret) patch.secret = secret
-    const res = await mutate(this.store, {
-      run: () => this.api.patchConnection(c.metadata.name, patch),
-      success: 'Connection updated.',
-      failure: 'Update failed',
-      reload: ['connections'],
-    })
-    if (res) this.editing = null
+    this.editBusy = true
+    let res: Connection | undefined
+    try {
+      res = await mutate(this.store, {
+        run: () => this.api.patchConnection(c.metadata.name, patch),
+        success: 'Connection updated.',
+        failure: 'Update failed',
+        reload: ['connections'],
+      })
+    } finally {
+      this.editBusy = false
+    }
+    if (!res) return
+    this.editValuesFor = ''
+    this.editValues = {}
+    if (this.routeOwned && this.editRoute) {
+      this.dispatchEvent(new CustomEvent<EditSuccessDetail>('agents-edit-success', {
+        detail: { resource: 'connection', name: c.metadata.name, item: res },
+        bubbles: true,
+        composed: true,
+      }))
+    } else {
+      this.editing = null
+    }
   }
 
   private async del(name: string): Promise<void> {
@@ -185,13 +258,14 @@ export class Connections extends StoreElement {
 
   render(): TemplateResult {
     if (this.createRoute) return this.createRouteSurface()
+    if (this.editRoute) return this.editRouteSurface()
     const connections = this.store.connections
     const showFirstRun = connections.loaded && connections.data.length === 0 && (!connections.error || connections.hasSnapshot)
     return html`
       <div class="agents-menu">
         <div class="agents-panel k-card agents-route-panel">
           <div class="agents-panel-head">
-            <h3>Connections</h3>
+            <h3 tabindex="-1" data-connections-heading>Connections</h3>
             ${this.routeOwned && !showFirstRun
               ? html`<button class="k-btn k-btn--primary" @click=${() => this.navigate({ kind: 'create', resource: 'connection' })}>${icon('plus')} New connection</button>`
               : nothing}
@@ -263,91 +337,121 @@ export class Connections extends StoreElement {
   }
 
   private table(rows: Connection[]): TemplateResult {
-    return html`<div class="agents-tablewrap k-table">
-      <table class="agents-table">
-        <thead>
-          <tr><th>Name</th><th>Kind</th><th>Type</th><th>Endpoint / channel</th><th class="agents-th-actions">Actions</th></tr>
-        </thead>
-        <tbody>
-          ${repeat(
-            rows,
-            (c) => c.metadata.name,
-            (c) => {
-              const cat = connCategory(c.spec.type)
-              const meta = CATEGORY_META[cat]
-              const name = c.metadata.name
-              return html`<tr class=${this.editing === name ? 'is-editing' : ''}>
-                <td>
-                  <span class="agents-cell-name">${c.spec.displayName || name}</span>
-                  ${c.status?.webhookPath ? html`<span class="agents-inbound-on" title="Inbound enabled">${icon('swap')}</span>` : nothing}
-                  ${c.status?.oauthConnected ? html`<span class="agents-inbound-on" title="OAuth connected">${icon('link')}</span>` : nothing}
-                </td>
-                <td><span class="k-badge agents-badge agents-badge-cat agents-cat-${cat}">${icon(meta.icon)} ${meta.label}</span></td>
-                <td><span class="k-badge agents-badge">${connShape(c).typeLabel}</span></td>
-                <td class="agents-cell-task muted">
-                  ${needsInstance(c)
-                    ? html`<button
-                        class="k-badge agents-badge k-badge--warning agents-badge-warn agents-badge-btn"
-                        title="Edit this connection and name the searxng instance it should search through"
-                        @click=${() => {
-                          this.editing = name
-                          this.connType = null
-                        }}
-                      >
-                        ${icon('pencil')} needs an instance
-                      </button>`
-                    : c.spec.config?.instance || c.spec.baseURL || c.spec.channel || '—'}
-                  ${unwired(c, this.store.agents.data)
-                    ? html`<span class="k-badge agents-badge k-badge--warning agents-badge-warn" title="No agent has been granted this tool — add it under an agent's Config → Tools"
-                        >not wired to an agent</span
-                      >`
-                    : nothing}
-                </td>
-                <td class="agents-row-actions">
-                  <button
-                    class="k-btn k-btn--ghost agents-iconbtn"
-                    aria-label="Edit ${name}"
-                    title="Edit"
-                    @click=${() => {
-                      this.editing = name
-                      this.connType = null
-                    }}
-                  >
-                    ${icon('pencil')}
-                  </button>
-                  ${cat === 'channel'
-                    ? html`<button class="k-btn k-btn--ghost agents-iconbtn" aria-label="Send a test message via ${name}" title="Send a test message" @click=${() => void this.test(name)}>
-                          ${icon('send')}
-                        </button>
-                        <button
-                          class="k-btn k-btn--ghost agents-iconbtn"
-                          aria-label="Enable inbound chat for ${name}"
-                          title=${c.status?.webhookPath ? 'Inbound enabled' : 'Enable inbound chat'}
-                          @click=${() => void this.enableInbound(name)}
-                        >
-                          ${icon('swap')}
-                        </button>`
-                    : nothing}
-                  ${c.spec.auth === 'oauth'
-                    ? html`<button
-                        class="k-btn k-btn--ghost agents-iconbtn"
-                        aria-label="Connect OAuth for ${name}"
-                        title=${c.status?.oauthConnected ? 'Reconnect OAuth' : 'Connect OAuth'}
-                        @click=${() => void this.oauth(name)}
-                      >
-                        ${icon('link')}
-                      </button>`
-                    : nothing}
-                  <button class="k-btn k-btn--ghost agents-iconbtn agents-iconbtn-danger" aria-label="Delete ${name}" title="Delete" @click=${() => void this.del(name)}>
-                    ${icon('trash')}
-                  </button>
-                </td>
-              </tr>`
+    const endpoint = (c: Connection): string => c.spec.config?.instance || c.spec.baseURL || c.spec.channel || ''
+    return resourceTable({
+      ariaLabel: 'Connections',
+      rows,
+      rowKey: (c) => c.metadata.name,
+      state: this.connectionTable,
+      onStateChange: (next: ResourceTableState) => (this.connectionTable = next),
+      searchPlaceholder: 'Search connections…',
+      searchText: (c) => [
+        c.metadata.name,
+        c.spec.displayName,
+        c.spec.type,
+        connShape(c).typeLabel,
+        endpoint(c),
+      ].filter(Boolean).join(' '),
+      filters: [
+        {
+          key: 'kind',
+          label: 'Kind',
+          allLabel: 'All kinds',
+          value: (c) => connCategory(c.spec.type),
+          labelFor: (value) => CATEGORY_META[value as ConnCategory]?.label || value,
+        },
+        {
+          key: 'type',
+          label: 'Type',
+          allLabel: 'All types',
+          value: (c) => connShape(c).typeLabel,
+        },
+      ],
+      columns: [
+        {
+          key: 'name',
+          label: 'Name',
+          primary: true,
+          render: (c) => html`<span class="agents-resource-name" title=${c.metadata.name}>${c.spec.displayName || c.metadata.name}</span>
+            ${c.spec.displayName ? html`<code class="agents-resource-id">${c.metadata.name}</code>` : nothing}
+            ${c.status?.webhookPath ? html`<span class="agents-inbound-on" aria-label="Inbound enabled" data-k-tip="Inbound enabled">${icon('swap')}</span>` : nothing}
+            ${c.status?.oauthConnected ? html`<span class="agents-inbound-on" aria-label="OAuth connected" data-k-tip="OAuth connected">${icon('link')}</span>` : nothing}`,
+        },
+        {
+          key: 'kind',
+          label: 'Kind',
+          render: (c) => {
+            const cat = connCategory(c.spec.type)
+            const meta = CATEGORY_META[cat]
+            return html`<span class="k-badge agents-badge agents-badge-cat agents-cat-${cat}">${icon(meta.icon)} ${meta.label}</span>`
+          },
+        },
+        {
+          key: 'type',
+          label: 'Type',
+          render: (c) => html`<span class="k-badge agents-badge">${connShape(c).typeLabel}</span>`,
+        },
+        {
+          key: 'endpoint',
+          label: 'Endpoint / channel',
+          render: (c) => {
+            const wiring = wiringState(
+              c,
+              this.store.agents.data,
+              this.store.toolsets.data,
+              this.store.agents.hasSnapshot && !this.store.agents.error,
+              this.store.toolsets.hasSnapshot && !this.store.toolsets.error,
+            )
+            return html`<span class="agents-resource-endpoint" title=${endpoint(c)}>${endpoint(c) || '—'}</span>
+              ${needsInstance(c)
+                ? html`<span class="k-badge agents-badge k-badge--warning agents-badge-warn" title="Edit this connection and name the searxng instance it should search through">needs an instance</span>`
+                : nothing}
+              ${wiring === 'unwired'
+                ? html`<span class="k-badge agents-badge k-badge--warning agents-badge-warn" title="No agent has been granted this tool — add it under an agent's Config → Tools">not wired to an agent</span>`
+                : wiring === 'unknown'
+                  ? html`<span class="k-badge agents-badge k-badge--muted" title="Agent or toolset assignments are unavailable">wiring unknown</span>`
+                  : nothing}`
+          },
+        },
+      ],
+      actions: (c) => {
+        const name = c.metadata.name
+        const cat = connCategory(c.spec.type)
+        return html`
+          ${resourceTableAction({
+            icon: 'pencil',
+            label: `Edit connection ${name}`,
+            tone: 'edit',
+            onClick: () => {
+              if (this.routeOwned) this.navigate({ kind: 'edit', resource: 'connection', name })
+              else {
+                this.hydrateEdit(c)
+                this.editing = name
+                this.connType = null
+              }
             },
-          )}
-        </tbody>
-      </table>
-    </div>`
+          })}
+          ${cat === 'channel'
+            ? html`${resourceTableAction({ icon: 'send', label: `Send a test message via ${name}`, tone: 'accent', onClick: () => void this.test(name) })}
+                ${resourceTableAction({
+                  icon: 'swap',
+                  label: c.status?.webhookPath ? `Re-enable inbound chat for ${name}` : `Enable inbound chat for ${name}`,
+                  tone: 'neutral',
+                  onClick: () => void this.enableInbound(name),
+                })}`
+            : nothing}
+          ${c.spec.auth === 'oauth'
+            ? resourceTableAction({
+                icon: 'link',
+                label: c.status?.oauthConnected ? `Reconnect OAuth for ${name}` : `Connect OAuth for ${name}`,
+                tone: 'accent',
+                onClick: () => void this.oauth(name),
+              })
+            : nothing}
+          ${resourceTableAction({ icon: 'trash', label: `Delete connection ${name}`, tone: 'delete', onClick: () => void this.del(name) })}
+        `
+      },
+    })
   }
 
   // ---- create / edit forms -------------------------------------------------
@@ -518,7 +622,57 @@ export class Connections extends StoreElement {
     this.connType = null
   }
 
-  private editForm(c: Connection): TemplateResult {
+  private editRouteSurface(): TemplateResult {
+    const slice = this.store.connections
+    const connection = slice.data.find((item) => item.metadata.name === this.editName)
+    let body: TemplateResult
+    if (slice.error && !slice.hasSnapshot) body = errorState(slice.error, () => void this.store.load('connections'))
+    else if (!slice.loaded && !slice.hasSnapshot) body = loadingState('Loading connection…')
+    else if (!connection && slice.error) body = html`${staleState(slice.error, () => void this.store.load('connections'))}${errorState(`No connection named “${this.editName}” appears in the last loaded workspace snapshot.`)}`
+    else if (!connection) body = errorState(`Connection “${this.editName}” was not found in this workspace.`, () => void this.store.load('connections'))
+    else body = html`${slice.error ? staleState(slice.error, () => void this.store.load('connections')) : nothing}${this.editForm(connection, true)}`
+
+    return html`<div class="agents-menu agents-create-page k-create-page">
+      <button type="button" class="k-btn k-btn--ghost k-back-action" ?disabled=${this.editBusy} @click=${() => this.cancelEdit()}>${icon('arrow-left')} Connections</button>
+      <header class="k-create-header">
+        <h1 class="k-create-title" tabindex="-1" data-edit-heading>Edit connection</h1>
+        <p class="k-create-description">Update <code>${this.editName}</code> without exposing its stored credential.</p>
+      </header>
+      ${body}
+    </div>`
+  }
+
+  private cancelEdit(): void {
+    if (this.editBusy) return
+    this.editValuesFor = ''
+    this.editValues = {}
+    if (this.routeOwned && this.editRoute) {
+      this.dispatchEvent(new CustomEvent<EditCancelDetail>('agents-edit-cancel', {
+        detail: { resource: 'connection', name: this.editName },
+        bubbles: true,
+        composed: true,
+      }))
+      return
+    }
+    this.editing = null
+  }
+
+  private hydrateEdit(c: Connection): void {
+    const usesChannel = connCategory(c.spec.type) === 'channel' || Boolean(c.spec.channel)
+    this.editValuesFor = c.metadata.name
+    this.editValues = {
+      displayName: c.spec.displayName || '',
+      endpoint: (usesChannel ? c.spec.channel : c.spec.baseURL) || '',
+      instance: c.spec.config?.instance || '',
+      secret: '',
+    }
+  }
+
+  private setEditValue(key: string, event: Event): void {
+    this.editValues = { ...this.editValues, [key]: (event.target as HTMLInputElement).value }
+  }
+
+  private editForm(c: Connection, routePage = false): TemplateResult {
     const cat = connCategory(c.spec.type)
     const usesChannel = cat === 'channel' || !!c.spec.channel
     const shape = connShape(c)
@@ -531,29 +685,31 @@ export class Connections extends StoreElement {
     else endpointLabel = 'Channel / chat ID'
     const isOAuth = c.spec.auth === 'oauth'
     return html`<form
-      class="agents-conn-form k-card"
+      class=${routePage ? 'agents-conn-form k-create-surface k-create-surface--wide' : 'agents-conn-form k-card'}
+      aria-busy=${this.editBusy ? 'true' : 'false'}
       @submit=${(e: Event) => {
         e.preventDefault()
         void this.saveEdit(c, e.target as HTMLFormElement, usesChannel)
       }}
     >
-      <div class="agents-conn-form k-cardhead">
-        <button type="button" class="k-btn k-btn--ghost agents-back" @click=${() => (this.editing = null)}>${icon('arrow-left')} connections</button>
+      <div class=${routePage ? 'k-create-body k-create-fields' : ''}>
+      ${routePage ? nothing : html`<div class="agents-conn-form k-cardhead">
+        <button type="button" class="k-btn k-btn--ghost agents-back" @click=${() => this.cancelEdit()}>${icon('arrow-left')} connections</button>
         <h4>
           Edit ${icon(CATEGORY_META[cat].icon)} <code>${c.metadata.name}</code>
           ${c.spec.type === 'discord' ? html`<span class="k-badge agents-badge">${shape.typeLabel}</span>` : nothing}
         </h4>
-      </div>
-      <label>Display name<input class="k-input" name="displayName" .value=${c.spec.displayName || ''} placeholder=${c.metadata.name} /></label>
+      </div>`}
+      <label>Display name<input class="k-input" name="displayName" .value=${this.editValues.displayName ?? c.spec.displayName ?? ''} placeholder=${c.metadata.name} ?disabled=${this.editBusy} @input=${(event: Event) => this.setEditValue('displayName', event)} /></label>
       ${instanceBacked(c)
         ? html`<label>
             Instance name *
-            <input class="k-input" name="instance" .value=${c.spec.config?.instance || ''} placeholder="search" required autocomplete="off" />
+            <input class="k-input" name="instance" .value=${this.editValues.instance ?? c.spec.config?.instance ?? ''} placeholder="search" required autocomplete="off" ?disabled=${this.editBusy} @input=${(event: Event) => this.setEditValue('instance', event)} />
             <span class="agents-hint">
               The instance under Infrastructure. Agents reach it over the platform's internal path — there is no URL and no token.
             </span>
           </label>`
-        : html`<label>${endpointLabel}<input class="k-input" name="endpoint" .value=${(usesChannel ? c.spec.channel : c.spec.baseURL) || ''} /></label>`}
+        : html`<label>${endpointLabel}<input class="k-input" name="endpoint" .value=${this.editValues.endpoint ?? (usesChannel ? c.spec.channel : c.spec.baseURL) ?? ''} ?disabled=${this.editBusy} @input=${(event: Event) => this.setEditValue('endpoint', event)} /></label>`}
       ${instanceBacked(c)
         ? nothing
         : shape.discordWebhook
@@ -565,12 +721,14 @@ export class Connections extends StoreElement {
             </p>`
           : html`<label>
               New ${shape.discordBot ? 'bot token' : 'secret / token'}
-              <input class="k-input" name="secret" type="password" placeholder="leave blank to keep the current one" autocomplete="off" />
+              <input class="k-input" name="secret" type="password" .value=${this.editValues.secret || ''} placeholder="leave blank to keep the current one" autocomplete="off" ?disabled=${this.editBusy} @input=${(event: Event) => this.setEditValue('secret', event)} />
               <span class="agents-hint">Only set this to rotate the credential.</span>
             </label>`}
-      <div class="agents-form-actions">
-        <button class="k-btn k-btn--primary" type="submit">Save changes</button>
-        <button type="button" class="k-btn k-btn--ghost secondary" @click=${() => (this.editing = null)}>Cancel</button>
+      </div>
+      <div class=${routePage ? 'k-create-actions' : 'agents-form-actions'}>
+        ${routePage ? html`<button type="button" class="k-btn k-btn--ghost secondary" ?disabled=${this.editBusy} @click=${() => this.cancelEdit()}>Cancel</button>` : nothing}
+        <button class="k-btn k-btn--primary" type="submit" ?disabled=${this.editBusy}>${this.editBusy ? 'Saving…' : 'Save changes'}</button>
+        ${routePage ? nothing : html`<button type="button" class="k-btn k-btn--ghost secondary" ?disabled=${this.editBusy} @click=${() => this.cancelEdit()}>Cancel</button>`}
       </div>
     </form>`
   }
