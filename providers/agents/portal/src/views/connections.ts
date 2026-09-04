@@ -19,6 +19,7 @@ import type { CreateSuccessDetail } from '../router'
 import {
   CATEGORY_META,
   CONN_DEFS,
+  SLACK_SIGNING_SECRET_FIELD,
   connCategory,
   connShape,
   type ConnCategory,
@@ -134,6 +135,8 @@ export class Connections extends StoreElement {
     else patch.baseURL = g('endpoint')
     const secret = g('secret')
     if (secret) patch.secret = secret
+    const signingSecret = g('signingSecret')
+    if (signingSecret) patch.signingSecret = signingSecret
     const res = await mutate(this.store, {
       run: () => this.api.patchConnection(c.metadata.name, patch),
       success: 'Connection updated.',
@@ -568,6 +571,13 @@ export class Connections extends StoreElement {
               <input class="k-input" name="secret" type="password" placeholder="leave blank to keep the current one" autocomplete="off" />
               <span class="agents-hint">Only set this to rotate the credential.</span>
             </label>`}
+      ${c.spec.type === 'slack' && !(c.spec.channel || '').startsWith('https://')
+        ? html`<label>
+            ${SLACK_SIGNING_SECRET_FIELD.label}
+            <input class="k-input" name="signingSecret" type="password" placeholder="leave blank to keep the current one" autocomplete="off" />
+            <span class="agents-hint">${SLACK_SIGNING_SECRET_FIELD.hint}</span>
+          </label>`
+        : nothing}
       <div class="agents-form-actions">
         <button class="k-btn k-btn--primary" type="submit">Save changes</button>
         <button type="button" class="k-btn k-btn--ghost secondary" @click=${() => (this.editing = null)}>Cancel</button>
