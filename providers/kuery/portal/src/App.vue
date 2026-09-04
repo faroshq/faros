@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import type { ObjectResult } from './api'
 import type { FarosContext } from './element'
-import { errorMessage, serviceBase, tenantHeaders } from './kuery'
+import { createKueryRequestContext, errorMessage } from './kuery'
 import ImpactView from './components/ImpactView.vue'
 import InventoryView from './components/InventoryView.vue'
 import PlaygroundView from './components/PlaygroundView.vue'
@@ -12,8 +12,9 @@ import Tabs from './portalkit/Tabs.vue'
 
 const props = defineProps<{ state: { context: FarosContext | null } }>()
 const context = computed(() => props.state.context)
-const identity = computed(() => `${context.value?.basePath || ''}|${context.value?.orgUUID || ''}|${context.value?.workspaceUUID || ''}`)
-const token = computed(() => context.value?.token ?? null)
+const requestContext = computed(() => createKueryRequestContext(context.value))
+const identity = computed(() => requestContext.value.scopeIdentity)
+const token = computed(() => requestContext.value.token)
 type TabID = 'topology' | 'inventory' | 'playground'
 const active = ref<TabID>('topology')
 const visited = ref<Record<TabID, boolean>>({ topology: true, inventory: false, playground: false })
@@ -40,17 +41,14 @@ function selectTab(id: string): void {
 
 async function loadEdges(): Promise<void> {
   const requestID = ++edgesRequestID
-  const requestContext = context.value
-  const requestIdentity = identity.value
-  const requestToken = requestContext?.token ?? null
+  const request = requestContext.value
+  const requestIdentity = request.identity
   edgesController?.abort()
   edgesController = null
   const isCurrent = (): boolean =>
     edgesRequestID === requestID &&
-    identity.value === requestIdentity &&
-    (context.value?.token ?? null) === requestToken
-  const base = serviceBase(requestContext)
-  if (!base || !requestToken) {
+    requestContext.value.identity === requestIdentity
+  if (!request.basePath || !request.token) {
     if (isCurrent()) edgesLoading.value = false
     return
   }
@@ -59,8 +57,8 @@ async function loadEdges(): Promise<void> {
   edgesLoading.value = true
   edgesError.value = ''
   try {
-    const response = await fetch(`${base}/api/edges`, {
-      credentials: 'same-origin', headers: tenantHeaders(requestContext), signal: controller.signal,
+    const response = await fetch(`${request.basePath}/api/edges`, {
+      credentials: 'same-origin', headers: request.headers, signal: controller.signal,
     })
     const body = await response.text()
     if (!isCurrent()) return

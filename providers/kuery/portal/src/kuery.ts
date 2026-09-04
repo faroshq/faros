@@ -2,25 +2,26 @@ import { computed, type Ref } from 'vue'
 
 import { createKueryApi, type KueryApi, type QuerySpec, type QueryStatus } from './api'
 import type { FarosContext } from './element'
-import { serviceBase as providerServiceBase } from './portalkit/tenant'
+import { createKueryRequestContext } from './request-context'
+import type { KueryRequestContext } from './request-context'
+
+export { createKueryRequestContext }
+export type { KueryRequestContext }
 
 export function serviceBase(context: FarosContext | null): string {
-  return providerServiceBase(context?.basePath || '').replace(/\/+$/, '')
+  return createKueryRequestContext(context).basePath
 }
 
 export function tenantHeaders(context: FarosContext | null): Record<string, string> {
-  const headers: Record<string, string> = {}
-  if (context?.token) headers.Authorization = `Bearer ${context.token}`
-  if (context?.orgUUID) headers['X-Faros-Org'] = context.orgUUID
-  if (context?.workspaceUUID) headers['X-Faros-Workspace'] = context.workspaceUUID
-  return headers
+  return createKueryRequestContext(context).headers
 }
 
 export function useKueryApi(context: Ref<FarosContext | null>): { api: Readonly<Ref<KueryApi | null>>; query: (spec: QuerySpec, signal?: AbortSignal) => Promise<QueryStatus> } {
+  const requestContext = computed(() => createKueryRequestContext(context.value))
   const api = computed(() => {
-    const basePath = serviceBase(context.value)
-    return basePath && context.value?.token
-      ? createKueryApi({ basePath, headers: () => tenantHeaders(context.value) })
+    const request = requestContext.value
+    return request.basePath && request.token
+      ? createKueryApi({ basePath: request.basePath, headers: request.headers })
       : null
   })
   return {
