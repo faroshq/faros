@@ -71,8 +71,10 @@ func TokenFromKubeconfig(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolving %s=%s: %w", EnvProviderKubeconfig, path, err)
 	}
-	if rc.BearerToken != "" {
-		return rc.BearerToken, nil
+	// clientcmd reads a tokenFile into BearerToken verbatim, so trim the
+	// trailing newline a hand-written token file usually carries.
+	if t := strings.TrimSpace(rc.BearerToken); t != "" {
+		return t, nil
 	}
 	if rc.BearerTokenFile != "" {
 		b, err := os.ReadFile(rc.BearerTokenFile)
