@@ -41,7 +41,7 @@ in the [component entries](../components/); page composition stays in the
   state. Explain whether a credential is needed and how to supply or rotate it;
   expose a safe reference or non-secret status instead. The sole setup-handoff
   exception is a newly generated, one-time secret that the user must transfer:
-  keep it masked, reveal or copy it only through an explicit action, and clear
+  keep it masked, copy it only through an explicit action, and clear
   it on dismissal, navigation, context change, or unmount. It never enters a
   table, toast, error, log, or persisted browser state. Internal workloads may
   be described by name precisely because their setup does not need a URL or
