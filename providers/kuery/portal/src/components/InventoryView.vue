@@ -5,7 +5,7 @@ import type { ObjectResult } from '../api'
 import type { FarosContext } from '../element'
 import {
   applyInventoryPage, beginInventoryRequest, changeInventoryPager, createInventoryPager,
-  isCurrentInventoryRequest,
+  isCurrentInventoryRequest, normalizeInventoryFilter,
 } from '../inventory-pager'
 import { age, edgeName, errorMessage, resourceLabel, useKueryApi } from '../kuery'
 import ResourceTable from '../portalkit/ResourceTable.vue'
@@ -21,8 +21,8 @@ const loaded = ref(false)
 const loading = ref(false)
 const error = ref('')
 const warnings = ref<string[]>([])
-const knownKinds = ref<string[]>([])
-const knownNamespaces = ref<string[]>([])
+const kindInput = ref('')
+const namespaceInput = ref('')
 let controller: AbortController | null = null
 
 const columns = [
@@ -32,17 +32,18 @@ const columns = [
 ]
 const filters = computed<TableFilterDefinition[]>(() => [
   { key: 'edge', label: 'Edge', options: props.edges.map(value => ({ value, label: value })) },
-  { key: 'kind', label: 'Kind', control: 'combobox', options: knownKinds.value.map(value => ({ value, label: value })) },
-  { key: 'namespace', label: 'Namespace', control: 'combobox', options: knownNamespaces.value.map(value => ({ value, label: value })) },
 ])
 
-function rememberFacets(objects: ObjectResult[]): void {
-  const kinds = new Set(knownKinds.value); const namespaces = new Set(knownNamespaces.value)
-  for (const object of objects) {
-    if (object.object?.kind) kinds.add(object.object.kind)
-    if (object.object?.metadata?.namespace) namespaces.add(object.object.metadata.namespace)
+function applyFacetFilters(): void {
+  const filters = {
+    ...pager.value.filters,
+    kind: normalizeInventoryFilter(kindInput.value),
+    namespace: normalizeInventoryFilter(namespaceInput.value),
   }
-  knownKinds.value = [...kinds].sort(); knownNamespaces.value = [...namespaces].sort()
+  pager.value = changeInventoryPager(pager.value, {
+    reason: 'filter', page: 1, pageSize: pager.value.pageSize, query: pager.value.query, filters, cursor: null,
+  })
+  void load()
 }
 
 async function load(): Promise<void> {
@@ -65,7 +66,6 @@ async function load(): Promise<void> {
       edge: edgeName(object.cluster), kind: object.object?.kind || '—', namespace: object.object?.metadata?.namespace || '—',
       name: object.object?.metadata?.name || '—', age: age(object.object?.metadata?.creationTimestamp),
     }))
-    rememberFacets(page.objects)
     warnings.value = page.warnings
     loaded.value = true
   } catch (reason) {
@@ -89,12 +89,28 @@ function inspect(row: Record<string, unknown>): void {
 
 onMounted(() => void load())
 watch(api, (ready, wasReady) => { if (ready && !wasReady) void load() })
+watch(
+  () => [pager.value.filters.kind || '', pager.value.filters.namespace || ''] as const,
+  ([kind, namespace]) => { kindInput.value = kind; namespaceInput.value = namespace },
+  { immediate: true },
+)
 onBeforeUnmount(() => controller?.abort())
 </script>
 
 <template>
   <section class="kuery-panel k-card" aria-labelledby="inventory-title">
-    <div class="kuery-panel-head"><div><h2 id="inventory-title" class="kuery-panel-title">Fleet inventory</h2><p class="meta">Server-paginated inventory across connected edges. Search matches an exact resource name; selected Edge, Kind, and Namespace filters apply to the full fleet query. Kind and Namespace choices are learned from pages you visit.</p></div></div>
+    <div class="kuery-panel-head"><div><h2 id="inventory-title" class="kuery-panel-title">Fleet inventory</h2><p class="meta">Server-paginated inventory across connected edges. Name, Kind, and Namespace searches are exact and apply to the full fleet query.</p></div></div>
+    <form class="kuery-toolbar" aria-label="Filter fleet inventory" @submit.prevent="applyFacetFilters">
+      <label>
+        <span class="kuery-sr-only">Exact Kind</span>
+        <input id="inventory-kind-filter" v-model="kindInput" class="k-input kuery-control" type="text" autocomplete="off" placeholder="Kind (exact, e.g. Deployment)">
+      </label>
+      <label>
+        <span class="kuery-sr-only">Exact Namespace</span>
+        <input id="inventory-namespace-filter" v-model="namespaceInput" class="k-input kuery-control" type="text" autocomplete="off" placeholder="Namespace (exact)">
+      </label>
+      <button class="k-btn k-btn--primary" type="submit">Apply filters</button>
+    </form>
     <ResourceTable
       :columns="columns" :rows="rows" row-key="_key" aria-label="Fleet inventory" :loaded="loaded" :loading="loading"
       refresh-mode="background" :error="error" :stale="loaded && !!error" retryable searchable search-placeholder="Exact resource name…"

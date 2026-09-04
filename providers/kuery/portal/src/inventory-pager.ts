@@ -21,6 +21,10 @@ export interface InventoryRequest {
   filters: InventoryFilters
 }
 
+export function normalizeInventoryFilter(value: string | null | undefined): string {
+  return value?.trim() ?? ''
+}
+
 export function createInventoryPager(pageSize = 50): InventoryPagerState {
   return { page: 1, pageSize, query: '', filters: {}, cursor: null, nextCursor: null, pageCursors: [null], pageInfo: { hasNext: false, nextCursor: null, total: null }, paginationGap: false, requestID: 0 }
 }
@@ -28,7 +32,8 @@ export function createInventoryPager(pageSize = 50): InventoryPagerState {
 export function changeInventoryPager(state: InventoryPagerState, change: ResourceTableChange): InventoryPagerState {
   const shapeChanged = change.reason !== 'page'
   if (shapeChanged) {
-    return { ...state, page: 1, pageSize: change.pageSize, query: change.query, filters: { ...change.filters }, cursor: null, nextCursor: null, pageCursors: [null], pageInfo: { hasNext: false, nextCursor: null, total: null }, paginationGap: false }
+    const filters = Object.fromEntries(Object.entries(change.filters).map(([key, value]) => [key, normalizeInventoryFilter(value)]))
+    return { ...state, page: 1, pageSize: change.pageSize, query: change.query, filters, cursor: null, nextCursor: null, pageCursors: [null], pageInfo: { hasNext: false, nextCursor: null, total: null }, paginationGap: false }
   }
   const pageCursors = [...state.pageCursors]
   while (pageCursors.length < change.page) pageCursors.push(undefined)
@@ -41,9 +46,9 @@ export function changeInventoryPager(state: InventoryPagerState, change: Resourc
 export function beginInventoryRequest(state: InventoryPagerState): { state: InventoryPagerState; request: InventoryRequest } {
   const id = state.requestID + 1
   const filters: InventoryFilters = {
-    edge: state.filters.edge || undefined,
-    kind: state.filters.kind || undefined,
-    namespace: state.filters.namespace || undefined,
+    edge: normalizeInventoryFilter(state.filters.edge) || undefined,
+    kind: normalizeInventoryFilter(state.filters.kind) || undefined,
+    namespace: normalizeInventoryFilter(state.filters.namespace) || undefined,
     // PortalKit's standardized search field is exact because Kuery's server
     // contract has no substring operator. Whitespace is not cursor state.
     name: state.query.trim() || undefined,

@@ -35,6 +35,25 @@ test('query, filter, and page-size changes reset page and cursor state', () => {
   }
 })
 
+test('free-text kind and namespace filters stay exact, trim input, and reset pagination', () => {
+  const seeded = { ...pager.createInventoryPager(50), page: 3, cursor: 'three', pageCursors: [null, 'two', 'three'] }
+  const state = pager.changeInventoryPager(seeded, change('filter', {
+    query: '  api  ',
+    filters: { edge: 'edge-a', kind: '  CustomWidget  ', namespace: '  tenant-only  ' },
+    cursor: 'ignored',
+  }))
+
+  assert.equal(state.page, 1)
+  assert.equal(state.cursor, null)
+  assert.deepEqual(state.pageCursors, [null])
+  assert.deepEqual(state.filters, { edge: 'edge-a', kind: 'CustomWidget', namespace: 'tenant-only' })
+
+  const begun = pager.beginInventoryRequest(state)
+  assert.deepEqual(begun.request.filters, {
+    edge: 'edge-a', kind: 'CustomWidget', namespace: 'tenant-only', name: 'api',
+  })
+})
+
 test('count is authoritative for terminal pages and incomplete never invents navigation', () => {
   let state = { ...pager.createInventoryPager(50), page: 3, cursor: 'three', requestID: 7 }
   state = pager.applyInventoryPage(state, 7, { nextCursor: 'engine-token', total: 120, hasNext: true })
