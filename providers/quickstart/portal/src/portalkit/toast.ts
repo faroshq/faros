@@ -2,13 +2,13 @@
 // providers/*/portal/src/portalkit/; edit here and run `make sync-portalkit`.
 //
 // Framework-free toast bus + renderer ("Violet Circuit" toast recipe,
-// docs/design-book.md §10). Tone is carried by the leading icon in the
+// docs/design/components/toast.md). Tone is carried by the leading icon in the
 // semantic colour; the error variant also turns the card border danger. No
 // tinted backgrounds, no glow. One fixed bottom-right stack per document.
 //
-// The agents portal predates this file and renders the same recipe through
-// its own lit host (providers/agents/portal/src/ui/toast.ts) — visuals must
-// stay identical between the two.
+// The agents portal consumes this renderer through its compatibility adapter
+// at providers/agents/portal/src/ui/toast.ts, so every provider shares this
+// document-level visual and lifecycle implementation.
 //
 // Usage:
 //   import { toast } from './portalkit/toast'

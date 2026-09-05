@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
-import { ArrowUpCircle, Boxes, Cable, Check, ChevronDown, ChevronUp, Cloud, Copy, Cpu, Globe2, Home, Plug, Plus, RefreshCw, Server, TerminalSquare, Trash2 } from 'lucide-vue-next'
+import { ArrowUpCircle, Boxes, Cable, Check, ChevronDown, ChevronUp, Cloud, Copy, Cpu, Globe2, Home, Plug, Plus, RefreshCw, Server, TerminalSquare } from 'lucide-vue-next'
 import { getEdge, deleteEdge, listEdgeServices, connectEdgeService, deleteEdgeService } from './api'
 import { confirmDialog } from './portalkit/confirm'
+import { toast } from './portalkit/toast'
 import ConditionsPanel from './portalkit/ConditionsPanel.vue'
 import ActionMenu, { type ActionMenuItem } from './portalkit/ActionMenu.vue'
 import ResourcePage from './portalkit/ResourcePage.vue'
 import ResourceBackLink from './portalkit/ResourceBackLink.vue'
+import ResourceTableDeleteButton from './portalkit/ResourceTableDeleteButton.vue'
 import ResourceSectionCard from './portalkit/ResourceSectionCard.vue'
 import ResourceStatCards, { type ResourceStatCard } from './portalkit/ResourceStatCards.vue'
 import StatusBadge from './portalkit/StatusBadge.vue'
@@ -22,6 +24,7 @@ import type { EdgeDetail, EdgeService, EdgeType, ErrorResponse } from './types'
 
 const props = defineProps<{ name: string; type: EdgeType; cluster: string | null; token: string | null }>()
 const emit = defineEmits<{ back: []; deleted: []; addService: [] }>()
+let stopped = false
 
 // SSH terminals dock at the bottom of the host portal (survives page
 // navigation) rather than rendering inline here. The provider is an isolated
@@ -96,12 +99,15 @@ async function refreshDetail() {
 }
 
 async function onDelete() {
-  if (!edge.value || deleting.value) return
+  const current = edge.value
+  if (!current || deleting.value) return
   if (!(await confirmDialog({ title: `Delete ${props.type === 'server' ? 'server' : 'cluster'} "${props.name}"?`, danger: true, confirmLabel: 'Delete' }))) return
   deleting.value = true
   mutationError.value = null
   try {
-    await deleteEdge(edge.value)
+    await deleteEdge(current)
+    if (stopped || props.name !== current.name) return
+    toast('info', `${props.type === 'server' ? 'Server' : 'Cluster'} deletion requested for ${current.name}.`)
     emit('deleted')
   } catch (e) {
     mutationError.value = (e as ErrorResponse)?.message ?? 'Delete failed'
@@ -253,6 +259,7 @@ sudo systemctl restart faros-agent-${props.name}`,
 const services = ref<EdgeService[]>([])
 const servicesLoaded = ref(false)
 const svcError = ref<string | null>(null)
+const deletingServiceName = ref<string | null>(null)
 const connectFor = ref<string | null>(null) // Service name being connected
 const tokenInput = ref('')
 const connecting = ref(false)
@@ -337,12 +344,19 @@ function loadServices() {
 }
 
 async function removeService(name: string) {
+  if (deleting.value || deletingServiceName.value) return
   if (!(await confirmDialog({ title: `Delete service "${name}"?`, danger: true, confirmLabel: 'Delete' }))) return
+  if (deleting.value || deletingServiceName.value) return
+  deletingServiceName.value = name
   try {
     await deleteEdgeService(name)
+    if (stopped || props.name !== edge.value?.name) return
+    toast('info', `Service deletion requested for ${name}.`)
     await loadServices()
   } catch (e) {
     svcError.value = (e as ErrorResponse)?.message ?? 'Delete failed'
+  } finally {
+    if (deletingServiceName.value === name) deletingServiceName.value = null
   }
 }
 
@@ -353,12 +367,15 @@ function startConnect(name: string) {
 
 async function submitConnect() {
   if (!connectFor.value || !tokenInput.value.trim()) return
+  const name = connectFor.value
   connecting.value = true
   svcError.value = null
   try {
-    await connectEdgeService(connectFor.value, tokenInput.value.trim())
+    await connectEdgeService(name, tokenInput.value.trim())
+    if (stopped || connectFor.value !== name) return
     connectFor.value = null
     tokenInput.value = ''
+    toast('ok', `Service credentials saved for ${name}.`)
     await loadServices()
   } catch (e) {
     svcError.value = (e as ErrorResponse)?.message ?? 'Connect failed'
@@ -404,6 +421,7 @@ watch(() => [props.name, props.type], () => {
   void load('foreground')
 }, { immediate: true })
 onUnmounted(() => {
+  stopped = true
   detailRefresh.stop()
   poller.stop()
   if (copyTimer) clearTimeout(copyTimer)
@@ -685,9 +703,14 @@ kubectl --kubeconfig {{ name }}.kubeconfig get nodes</pre>
                       </span>
                       <div class="row">
                         <StatusBadge :status="es.phase || 'Detected'" :tone="serviceTone(es)" />
-                        <button v-if="type === 'kubernetes'" class="k-table-action k-table-action--delete" type="button" title="Delete service" :disabled="deleting" @click="removeService(es.name)">
-                          <Trash2 :size="14" aria-hidden="true" />
-                        </button>
+                        <ResourceTableDeleteButton
+                          v-if="type === 'kubernetes'"
+                          :label="`Delete service ${es.name}`"
+                          :busy-label="`Deleting service ${es.name}`"
+                          :busy="deletingServiceName === es.name"
+                          :disabled="deleting || (deletingServiceName !== null && deletingServiceName !== es.name)"
+                          @click="removeService(es.name)"
+                        />
                       </div>
                     </div>
                     <div class="svc-meta">

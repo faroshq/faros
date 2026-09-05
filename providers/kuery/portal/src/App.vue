@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { Braces, Network, TableProperties } from 'lucide-vue-next'
 
 import type { ObjectResult } from './api'
 import type { FarosContext } from './element'
@@ -27,9 +28,9 @@ let edgesController: AbortController | null = null
 let edgesRequestID = 0
 
 const tabs = [
-  { id: 'topology', label: 'Topology' },
-  { id: 'inventory', label: 'Inventory' },
-  { id: 'playground', label: 'Playground' },
+  { id: 'topology', label: 'Topology', icon: Network },
+  { id: 'inventory', label: 'Inventory', icon: TableProperties },
+  { id: 'playground', label: 'Playground', icon: Braces },
 ]
 
 function selectTab(id: string): void {
@@ -57,7 +58,7 @@ async function loadEdges(): Promise<void> {
   edgesLoading.value = true
   edgesError.value = ''
   try {
-    const response = await fetch(`${request.basePath}/api/edges`, {
+    const response = await request.fetch(`${request.basePath}/api/edges`, {
       credentials: 'same-origin', headers: request.headers, signal: controller.signal,
     })
     const body = await response.text()
@@ -100,7 +101,7 @@ onBeforeUnmount(() => { edgesRequestID += 1; edgesController?.abort(); edgesCont
     <div v-show="!impact" class="kuery-collection-surfaces">
       <div class="kuery-topbar">
         <Tabs :tabs="tabs" :active="active" aria-label="Kuery views" @select="selectTab" />
-        <span class="k-badge" :class="edges.length ? 'k-badge--success' : 'k-badge--warning'">
+        <span class="k-badge" :class="edges.length ? 'k-badge--success' : 'k-badge--warning'" role="status" aria-live="polite" aria-atomic="true">
           {{ edgesLoading && !edgesLoaded ? 'Discovering edges' : `${edges.length} edge${edges.length === 1 ? '' : 's'} engaged` }}
         </span>
       </div>

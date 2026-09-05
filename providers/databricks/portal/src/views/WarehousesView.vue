@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, onUnmounted, ref } from 'vue'
+import { computed, inject, onActivated, onMounted, onUnmounted, ref } from 'vue'
 import DatabricksEmptyState from '../components/DatabricksEmptyState.vue'
+import { contextGenerationKey } from '../context'
 import SplitCreateButton from '../components/SplitCreateButton.vue'
 import type { DatabricksJourneyAction, DatabricksPrerequisiteKind } from '../journey'
 import ResourceTable from '../portalkit/ResourceTable.vue'
@@ -9,6 +10,7 @@ import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import { formatDatabricksError, isTenantMissingError } from '../errors'
 import { confirmDialog } from '../portalkit/confirm'
+import { toast } from '../portalkit/toast'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import type { Connection, Warehouse } from '../types'
 import {
@@ -42,6 +44,7 @@ const emit = defineEmits<{
   (e: 'create', mode: 'manual' | 'browse'): void
   (e: 'prerequisite', kind: DatabricksPrerequisiteKind): void
 }>()
+const contextGeneration = inject(contextGenerationKey, ref(0))
 
 const connections = ref<Connection[]>([])
 const warehouses = ref<Warehouse[]>([])
@@ -90,7 +93,6 @@ const rows = computed<Array<Record<string, unknown>>>(() => warehouses.value
 const firstPageSettled = ref(false)
 const pendingDeletions = new Map<string, string | undefined>()
 const showFirstRun = computed(() => firstPageSettled.value
-  && !error.value
   && rows.value.length === 0
   && warehousePage.value === 1
   && !hasActiveFilters(warehouseQuery.value, warehouseFiltersValue.value))
@@ -266,11 +268,13 @@ async function remove(row: Record<string, unknown>) {
   mutationError.value = null
   try {
     await api.deleteWarehouse(wh.name)
+    if (!mounted) return
     invalidateCompleteAuthority()
     firstPageSettled.value = false
     pendingDeletions.set(wh.name, wh.uid)
     operations.tombstone(lock, wh.uid)
     warehouses.value = warehouses.value.filter(item => item.name !== wh.name)
+    toast('info', `Warehouse deletion requested for ${wh.name}.`)
     load()
   } catch (e) {
     mutationError.value = formatDatabricksError(e)
@@ -280,6 +284,7 @@ async function remove(row: Record<string, unknown>) {
 }
 
 refresh = createLatestRefreshController(async (requestID, mode) => {
+  const expectedContext = contextGeneration.value
   const request = currentWarehouseRequest()
   let walkGeneration: number | undefined
   let supportGeneration: number | undefined
@@ -295,7 +300,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
     supportGeneration = authorityGeneration
     const availableConnections = await supportRead.request()
     supportReadPending = false
-    if (!mounted || supportGeneration !== authorityGeneration) return
+    if (!mounted || contextGeneration.value !== expectedContext || supportGeneration !== authorityGeneration) return
     connections.value = availableConnections
 
     const currentAfterSupport = currentWarehouseRequest()
@@ -303,7 +308,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
       fullWalkPending = true
       walkGeneration = authorityGeneration
       const warehouseList = await completeRead.request()
-      if (!mounted) return
+      if (!mounted || contextGeneration.value !== expectedContext) return
       if (walkGeneration !== authorityGeneration) return
       const current = currentWarehouseRequest()
       if (!current.active && current.mode === 'server') return
@@ -324,7 +329,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
       serverPageGeneration = authorityGeneration
       const warehousePageResult = await serverPageRead.request()
       serverPageReadPending = false
-      if (!mounted || serverPageGeneration !== authorityGeneration) return
+      if (!mounted || contextGeneration.value !== expectedContext || serverPageGeneration !== authorityGeneration) return
       const currentAfterPage = currentWarehouseRequest()
       const currentIsActive = currentAfterPage.active || currentAfterPage.mode === 'client'
       const nextPageInfo = toPageInfo(warehousePageResult.continue)
@@ -340,7 +345,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
         fullWalkPending = true
         walkGeneration = authorityGeneration
         const warehouseList = await completeRead.request()
-        if (!mounted) return
+        if (!mounted || contextGeneration.value !== expectedContext) return
         if (walkGeneration !== authorityGeneration) return
         const current = currentWarehouseRequest()
         if (!current.active && current.mode === 'server') return
@@ -397,13 +402,13 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
     const staleSupport = supportGeneration !== undefined && supportGeneration !== authorityGeneration
     const staleServerPage = serverPageGeneration !== undefined && serverPageGeneration !== authorityGeneration
     const staleServerRequest = !(current.active || current.mode === 'client') && !warehouseRequestIsCurrent(requestID, request)
-    if (!mounted || staleWalk || staleSupport || staleServerPage || staleServerRequest) return
+    if (!mounted || contextGeneration.value !== expectedContext || staleWalk || staleSupport || staleServerPage || staleServerRequest) return
     error.value = isTenantMissingError(e) ? null : formatDatabricksError(e)
   } finally {
     fullWalkPending = false
     supportReadPending = false
     serverPageReadPending = false
-    if (refresh.isCurrent(requestID)) {
+    if (contextGeneration.value === expectedContext && refresh.isCurrent(requestID)) {
       if (mode === 'foreground') loading.value = false
       poll.schedule()
     }
@@ -448,12 +453,17 @@ onUnmounted(() => {
       <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
     </div>
 
-    <DatabricksEmptyState
-      v-if="showFirstRun"
-      kind="warehouse"
-      :has-connections="connections.length > 0"
-      @action="handleFirstRunAction"
-    />
+    <template v-if="showFirstRun">
+      <div v-if="error" class="error" role="status" aria-live="polite">
+        Showing the last successful result. {{ error }}
+        <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
+      </div>
+      <DatabricksEmptyState
+        kind="warehouse"
+        :has-connections="connections.length > 0"
+        @action="handleFirstRunAction"
+      />
+    </template>
 
     <div v-else class="databricks-resource-table">
       <ResourceTable

@@ -28,9 +28,11 @@ const api = vi.hoisted(() => ({
 const confirm = vi.hoisted(() => ({
   confirmDialog: vi.fn(),
 }))
+const toastMock = vi.hoisted(() => vi.fn())
 
 vi.mock('./api', () => api)
 vi.mock('./portalkit/confirm', () => confirm)
+vi.mock('./portalkit/toast', () => ({ toast: toastMock }))
 
 import Services from './Services.vue'
 import App from './App.vue'
@@ -857,6 +859,7 @@ describe('edge list views', () => {
       expect(state.canCreate).toBe(false)
       await state.onCreate()
       expect(api.createKubeEdgeService).not.toHaveBeenCalled()
+      expect(toastMock).not.toHaveBeenCalled()
 
       state.draft.host = '  https://192.168.1.1:443/  '
       expect(state.canCreate).toBe(true)
@@ -866,6 +869,8 @@ describe('edge list views', () => {
         targetName: '',
         edgeKind: 'KubernetesCluster',
       }))
+      expect(toastMock).toHaveBeenCalledTimes(1)
+      expect(toastMock).toHaveBeenCalledWith('info', 'Service creation requested for unifi.')
     } finally {
       mounted.unmount()
     }
@@ -1061,6 +1066,7 @@ describe('edge list views', () => {
       expect(state.deleting).toBe(false)
       expect(state.busy).toBe(false)
       expect(state.mutationError).toBe('delete failed')
+      expect(toastMock).not.toHaveBeenCalled()
     } finally {
       mounted.unmount()
     }
@@ -1092,6 +1098,7 @@ describe('edge detail actions', () => {
         confirmLabel: 'Delete',
       }))
       expect(api.deleteEdge).not.toHaveBeenCalled()
+      expect(toastMock).not.toHaveBeenCalled()
       expect(state.edge).toEqual(edgeDetail)
 
       const pendingDelete = deferred<void>()
@@ -1110,6 +1117,66 @@ describe('edge detail actions', () => {
       expect(state.edge).toEqual(edgeDetail)
       expect(state.mutationError).toBe('delete failed')
       expect(state.actionItems[0].disabled).toBe(false)
+      expect(toastMock).not.toHaveBeenCalled()
+    } finally {
+      mounted.unmount()
+    }
+  })
+
+  it('emits one informational toast before leaving a successfully deleted edge', async () => {
+    api.getEdge.mockResolvedValue(edgeDetail)
+    api.listEdgeServices.mockResolvedValue([])
+    confirm.confirmDialog.mockResolvedValue(true)
+    const deleted = vi.fn()
+    const mounted = await mount(Detail, {
+      name: edgeDetail.name,
+      type: edgeDetail.type,
+      cluster: null,
+      token: null,
+      onDeleted: deleted,
+    })
+    try {
+      await flush()
+      await flush()
+      await mounted.instance.setupState.onDelete()
+
+      expect(toastMock).toHaveBeenCalledTimes(1)
+      expect(toastMock).toHaveBeenCalledWith('info', 'Cluster deletion requested for edge-a.')
+      expect(deleted).toHaveBeenCalledTimes(1)
+    } finally {
+      mounted.unmount()
+    }
+  })
+
+  it('names and locks a service deletion while it is pending, then recovers on failure', async () => {
+    api.getEdge.mockResolvedValue(edgeDetail)
+    api.listEdgeServices.mockResolvedValue([{ name: 'svc-a', serviceType: 'generic', port: 8080 }])
+    const pendingDelete = deferred<void>()
+    api.deleteEdgeService.mockImplementation(() => pendingDelete.promise)
+    confirm.confirmDialog.mockResolvedValue(true)
+    const mounted = await mount(Detail, {
+      name: edgeDetail.name,
+      type: edgeDetail.type,
+      cluster: null,
+      token: null,
+    })
+    try {
+      await flush()
+      await flush()
+      const state = mounted.instance.setupState
+      const deletePromise = state.removeService('svc-a')
+      await flush()
+      expect(state.deletingServiceName).toBe('svc-a')
+      expect(confirm.confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Delete service "svc-a"?',
+        danger: true,
+        confirmLabel: 'Delete',
+      }))
+
+      pendingDelete.reject({ reason: 'HTTPError', message: 'service delete failed' })
+      await deletePromise
+      expect(state.deletingServiceName).toBeNull()
+      expect(state.svcError).toBe('service delete failed')
     } finally {
       mounted.unmount()
     }
@@ -1219,10 +1286,12 @@ describe('edge onboarding controls', () => {
     }
   })
 
-  it('offers an explicit masked-to-revealed fallback when clipboard access fails', async () => {
+  it('keeps the setup secret masked and makes explicit copy retryable after clipboard failure', async () => {
     const previousNavigator = globalThis.navigator
     const previousWindow = globalThis.window
-    const writeText = vi.fn().mockRejectedValue(new Error('clipboard denied'))
+    const writeText = vi.fn()
+      .mockRejectedValueOnce(new Error('clipboard denied'))
+      .mockResolvedValueOnce(undefined)
     Object.defineProperty(globalThis, 'navigator', {
       configurable: true,
       value: { clipboard: { writeText } },
@@ -1238,24 +1307,16 @@ describe('edge onboarding controls', () => {
       state.joinToken = 'join-secret'
       await state.copy(state.cliSnippet, 'cli', 'CLI command')
       expect(state.failedCopyField).toBe('cli')
-      expect(state.revealedCommand).toBeNull()
       expect(state.cliText).toContain('••••••••••••••••')
       expect(state.cliText).not.toContain('join-secret')
+      expect(state.copyControlLabel('cli', 'CLI command')).toBe('Retry copying CLI command')
+      expect(state.copyFeedback).toContain('join token remains masked')
 
-      state.revealForManualCopy('cli')
-      expect(state.revealedCommand).toBe('cli')
-      expect(state.cliSnippet(state.joinToken)).toContain('--token join-secret')
-      expect(state.copyFeedback).toContain('join token is sensitive')
-
-      await state.copy(state.helmSnippet, 'helm', 'Helm command')
-      expect(state.failedCopyField).toBe('helm')
-      expect(state.revealedCommand).toBeNull()
+      await state.copy(state.cliSnippet, 'cli', 'CLI command')
+      expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('--token join-secret'))
+      expect(state.failedCopyField).toBeNull()
+      expect(state.copied).toBe('cli')
       expect(state.cliText).not.toContain('join-secret')
-
-      state.revealForManualCopy('helm')
-      expect(state.revealedCommand).toBe('helm')
-      state.hideRevealedCommand()
-      expect(state.revealedCommand).toBeNull()
     } finally {
       mounted.unmount()
       Object.defineProperty(globalThis, 'navigator', {
@@ -1286,6 +1347,87 @@ describe('edge onboarding controls', () => {
       expect(focus).toHaveBeenCalledTimes(2)
     } finally {
       mounted.unmount()
+    }
+  })
+
+  it('announces generation, waiting, and connection without exposing the token or elapsed time', async () => {
+    vi.useFakeTimers()
+    api.probeEdge
+      .mockResolvedValueOnce({ joinToken: 'join-secret', connected: false })
+      .mockResolvedValueOnce({ joinToken: 'join-secret', connected: true, agentVersion: '1.2.3' })
+    const mounted = await mount(Wizard, { cluster: null })
+    try {
+      const state = mounted.instance.setupState
+      state.name = 'edge-live'
+      await state.handleCreate()
+      await flush()
+      expect(state.connectionAnnouncement).toBe('Generating join token for edge-live.')
+
+      await vi.advanceTimersByTimeAsync(2500)
+      await flush()
+      expect(state.connectionAnnouncement).toBe('Waiting for edge-live to connect.')
+      expect(state.connectionAnnouncement).not.toContain('join-secret')
+      expect(state.connectionAnnouncement).not.toMatch(/\d+s/)
+
+      await vi.advanceTimersByTimeAsync(2500)
+      await flush()
+      expect(state.step).toBe(3)
+      expect(state.connectionAnnouncement).toBe('edge-live connected.')
+      expect(state.joinToken).toBeNull()
+    } finally {
+      mounted.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not restore a setup token from a probe that resolves after unmount', async () => {
+    vi.useFakeTimers()
+    const pendingProbe = deferred<{ joinToken: string; connected: boolean } | null>()
+    api.probeEdge.mockReturnValueOnce(pendingProbe.promise)
+    const mounted = await mount(Wizard, { cluster: null })
+    const state = mounted.instance.setupState
+    state.name = 'edge-late'
+    await state.handleCreate()
+    await vi.advanceTimersByTimeAsync(2500)
+    expect(api.probeEdge).toHaveBeenCalledOnce()
+
+    mounted.unmount()
+    pendingProbe.resolve({ joinToken: 'late-secret', connected: false })
+    await flush()
+    expect(state.joinToken).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('does not restore a setup token from an older probe after a newer probe connects', async () => {
+    vi.useFakeTimers()
+    const olderProbe = deferred<{ joinToken: string; connected: boolean } | null>()
+    const newerProbe = deferred<{ joinToken: string; connected: boolean } | null>()
+    api.probeEdge
+      .mockReturnValueOnce(olderProbe.promise)
+      .mockReturnValueOnce(newerProbe.promise)
+    const mounted = await mount(Wizard, { cluster: null })
+    try {
+      const state = mounted.instance.setupState
+      state.name = 'edge-race'
+      await state.handleCreate()
+
+      vi.advanceTimersByTime(2500)
+      await flush()
+      vi.advanceTimersByTime(2500)
+      await flush()
+      expect(api.probeEdge).toHaveBeenCalledTimes(2)
+
+      newerProbe.resolve({ joinToken: 'current-secret', connected: true })
+      await flush()
+      expect(state.step).toBe(3)
+      expect(state.joinToken).toBeNull()
+
+      olderProbe.resolve({ joinToken: 'stale-secret', connected: false })
+      await flush()
+      expect(state.joinToken).toBeNull()
+    } finally {
+      mounted.unmount()
+      vi.useRealTimers()
     }
   })
 

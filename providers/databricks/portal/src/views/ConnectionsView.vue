@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ExternalLink } from 'lucide-vue-next'
-import { computed, onActivated, onMounted, onUnmounted, ref } from 'vue'
+import { computed, inject, onActivated, onMounted, onUnmounted, ref } from 'vue'
 import DatabricksEmptyState from '../components/DatabricksEmptyState.vue'
+import { contextGenerationKey } from '../context'
 import type { DatabricksJourneyAction } from '../journey'
 import ResourceTable from '../portalkit/ResourceTable.vue'
 import ResourceTableDeleteButton from '../portalkit/ResourceTableDeleteButton.vue'
@@ -9,6 +10,7 @@ import StatusBadge from '../portalkit/StatusBadge.vue'
 import { api } from '../api'
 import { formatDatabricksError, isTenantMissingError } from '../errors'
 import { confirmDialog } from '../portalkit/confirm'
+import { toast } from '../portalkit/toast'
 import { isCompleteFirstCursorPage, type ResourceTableChange } from '../portalkit/table'
 import type { Connection } from '../types'
 import {
@@ -38,6 +40,7 @@ import {
 } from '../databricksPagination'
 
 const emit = defineEmits<{ (e: 'open', name: string): void; (e: 'create'): void }>()
+const contextGeneration = inject(contextGenerationKey, ref(0))
 
 const connections = ref<Connection[]>([])
 const loading = ref(false)
@@ -66,7 +69,6 @@ const rows = computed<Array<Record<string, unknown>>>(() => connections.value
 const firstPageSettled = ref(false)
 const pendingDeletions = new Map<string, string | undefined>()
 const showFirstRun = computed(() => firstPageSettled.value
-  && !error.value
   && rows.value.length === 0
   && connectionPage.value === 1
   && !hasActiveFilters(connectionQuery.value, connectionFilters.value))
@@ -241,11 +243,13 @@ async function remove(row: Record<string, unknown>) {
   mutationError.value = null
   try {
     await api.deleteConnection(conn)
+    if (!mounted) return
     invalidateCompleteAuthority()
     firstPageSettled.value = false
     pendingDeletions.set(conn.name, conn.uid)
     operations.tombstone(lock, conn.uid)
     connections.value = connections.value.filter(item => item.name !== conn.name)
+    toast('info', `Connection deletion requested for ${conn.name}.`)
     load()
   } catch (e) {
     mutationError.value = formatDatabricksError(e)
@@ -255,6 +259,7 @@ async function remove(row: Record<string, unknown>) {
 }
 
 refresh = createLatestRefreshController(async (requestID, mode) => {
+  const expectedContext = contextGeneration.value
   const request = currentConnectionRequest()
   let walkGeneration: number | undefined
   let serverPageGeneration: number | undefined
@@ -271,7 +276,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
       fullWalkPending = true
       walkGeneration = authorityGeneration
       const next = await completeRead.request()
-      if (!mounted) return
+      if (!mounted || contextGeneration.value !== expectedContext) return
       if (walkGeneration !== authorityGeneration) return
       const current = currentConnectionRequest()
       if (!current.active && current.mode === 'server') return
@@ -292,7 +297,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
       serverPageGeneration = authorityGeneration
       const next = await serverPageRead.request()
       serverPageReadPending = false
-      if (!mounted || serverPageGeneration !== authorityGeneration) return
+      if (!mounted || contextGeneration.value !== expectedContext || serverPageGeneration !== authorityGeneration) return
       const currentAfterPage = currentConnectionRequest()
       const currentIsActive = currentAfterPage.active || currentAfterPage.mode === 'client'
       const nextPageInfo = toPageInfo(next.continue)
@@ -308,7 +313,7 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
         fullWalkPending = true
         walkGeneration = authorityGeneration
         const connectionList = await completeRead.request()
-        if (!mounted) return
+        if (!mounted || contextGeneration.value !== expectedContext) return
         if (walkGeneration !== authorityGeneration) return
         const current = currentConnectionRequest()
         if (!current.active && current.mode === 'server') return
@@ -363,12 +368,12 @@ refresh = createLatestRefreshController(async (requestID, mode) => {
     const staleWalk = walkGeneration !== undefined && walkGeneration !== authorityGeneration
     const staleServerPage = serverPageGeneration !== undefined && serverPageGeneration !== authorityGeneration
     const staleServerRequest = !(current.active || current.mode === 'client') && !connectionRequestIsCurrent(requestID, request)
-    if (!mounted || staleWalk || staleServerPage || staleServerRequest) return
+    if (!mounted || contextGeneration.value !== expectedContext || staleWalk || staleServerPage || staleServerRequest) return
     error.value = isTenantMissingError(e) ? null : formatDatabricksError(e)
   } finally {
     fullWalkPending = false
     serverPageReadPending = false
-    if (refresh.isCurrent(requestID)) {
+    if (contextGeneration.value === expectedContext && refresh.isCurrent(requestID)) {
       if (mode === 'foreground') loading.value = false
       poll.schedule()
     }
@@ -413,11 +418,13 @@ onUnmounted(() => {
       <button class="k-btn k-btn--ghost" type="button" @click="mutationError = null">Dismiss</button>
     </div>
 
-    <DatabricksEmptyState
-      v-if="showFirstRun"
-      kind="connection"
-      @action="handleFirstRunAction"
-    />
+    <template v-if="showFirstRun">
+      <div v-if="error" class="error" role="status" aria-live="polite">
+        Showing the last successful result. {{ error }}
+        <button class="k-btn k-btn--ghost" type="button" @click="load">Retry</button>
+      </div>
+      <DatabricksEmptyState kind="connection" @action="handleFirstRunAction" />
+    </template>
 
     <div v-else class="databricks-resource-table">
       <ResourceTable

@@ -2,12 +2,18 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const styles = readFileSync(new URL('./style.css', import.meta.url), 'utf8')
+const app = readFileSync(new URL('./App.vue', import.meta.url), 'utf8')
 const provision = readFileSync(new URL('./views/ProvisionPage.vue', import.meta.url), 'utf8')
 const dynamicForm = readFileSync(new URL('./components/DynamicForm.vue', import.meta.url), 'utf8')
 const viewValue = readFileSync(new URL('./components/ViewValue.vue', import.meta.url), 'utf8')
 const templateCard = readFileSync(new URL('./components/TemplateCard.vue', import.meta.url), 'utf8')
 
 describe('Infrastructure composition contracts', () => {
+  it('does not recreate manifest-owned navigation inside the provider', () => {
+    expect(app).not.toContain('class="infra-tabs"')
+    expect(styles).not.toContain('.infra-tabs')
+  })
+
   it('adds deliberate columns for wide template catalogs', () => {
     expect(styles).toMatch(/@media \(min-width: 1440px\)[\s\S]*repeat\(4, minmax\(0, 1fr\)\)/)
     expect(styles).toMatch(/@media \(min-width: 1920px\)[\s\S]*repeat\(5, minmax\(0, 1fr\)\)/)
@@ -26,7 +32,9 @@ describe('Infrastructure composition contracts', () => {
     expect(styles).not.toMatch(/\.dynform-group \{[^}]*grid-column:/)
     expect(provision).not.toContain('infrastructure-provision-form')
     expect(provision).toContain('class="provision-identity"')
+    expect(provision).toContain('class="provision-generated-fields"')
     expect(styles).toMatch(/\.provision-identity \{[\s\S]*max-width: 42rem;/)
+    expect(styles).toMatch(/\.provision-generated-fields \{[\s\S]*width: min\(100%, 42rem\);/)
     expect(styles).toMatch(/\.dynform-row \{[\s\S]*min-width: 0;/)
     expect(styles).toMatch(/\.dynform-group \{[\s\S]*min-inline-size: 0;[\s\S]*min-width: 0;/)
   })
@@ -36,7 +44,11 @@ describe('Infrastructure composition contracts', () => {
     expect(viewValue).toContain('k-icon-action')
     expect(viewValue).toContain(':data-k-tip=')
     expect(viewValue).not.toContain(':title=')
-    expect(templateCard).toContain(':data-k-tip=')
+    expect(dynamicForm).toContain('class="k-icon-action dynform-map-remove"')
+    expect(dynamicForm).toContain(':data-k-tip=')
+    expect(templateCard).toContain('class="exposure-note"')
+    expect(templateCard).toContain('{{ exposure.label }}')
+    expect(templateCard).not.toContain(':data-k-tip=')
     expect(templateCard).not.toContain(':title=')
   })
 })

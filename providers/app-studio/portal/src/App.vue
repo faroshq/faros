@@ -40,6 +40,8 @@ import {
 } from 'lucide-vue-next'
 import { api, isProjectAPIInitializingError, isProjectAPINotFoundError, ProjectAPIRequestError, type ProjectAssistantThreadItemPage } from './api'
 import ConfirmDialog from './portalkit/ConfirmDialog.vue'
+import ToastHost from './portalkit/ToastHost.vue'
+import InlineNotification from './portalkit/InlineNotification.vue'
 import Tabs from './portalkit/Tabs.vue'
 import LayoutSelector from './portalkit/LayoutSelector.vue'
 import ResourceTable from './portalkit/ResourceTable.vue'
@@ -48,6 +50,12 @@ import { useDelayedLoading } from './portalkit/useDelayedLoading'
 import { confirmDialog, confirmState } from './portalkit/confirm'
 import { readLayoutPreference, writeLayoutPreference, type LayoutMode } from './portalkit/layoutPreference'
 import { toast } from './portalkit/toast'
+import {
+  accessMutationToast,
+  previewAccessUpdateToast,
+  productionAccessUpdateToast,
+  type AccessMutation,
+} from './toastPolicy'
 import {
   canSubmitCreatePrompt,
   createSetupItems,
@@ -3997,6 +4005,8 @@ async function publishCurrentProject() {
     // publication immediately; the background refresh intentionally does not
     // overwrite a live Share draft while the dialog is open.
     shareMode.value = state.publication?.mode === 'public' ? 'public' : mode
+    const notice = productionAccessUpdateToast()
+    toast(notice.kind, notice.message)
     await loadPublishing()
   } catch (err) {
     if (selected.value?.name === name) {
@@ -4020,6 +4030,8 @@ async function savePreviewAccess() {
     if (selected.value?.name !== name) return
     previewAccess.value = state
     previewMode.value = state.mode === 'public' ? 'public' : 'restricted'
+    const notice = previewAccessUpdateToast(state.converged)
+    toast(notice.kind, notice.message)
   } catch (err) {
     if (selected.value?.name === name) {
       publishingActionError.value = err instanceof Error ? err.message : String(err)
@@ -4033,30 +4045,49 @@ async function savePreviewAccess() {
 // instance, so the two grant lists are independent — revoking preview access
 // leaves production access untouched.
 async function grantCurrentProjectPreviewAccess(user: string) {
-  await mutatePreviewGrants((name) => api.createPreviewGrant(props.ctx, name, user, false))
+  await mutatePreviewGrants({
+    mutation: 'grant',
+    subject: user,
+    run: (name) => api.createPreviewGrant(props.ctx, name, user, false),
+  })
 }
 
 async function inviteCurrentProjectPreviewAccess(email: string) {
-  await mutatePreviewGrants((name) => api.createPreviewGrant(props.ctx, name, email, true))
+  await mutatePreviewGrants({
+    mutation: 'invite',
+    subject: email,
+    run: (name) => api.createPreviewGrant(props.ctx, name, email, true),
+  })
 }
 
 async function revokeCurrentProjectPreviewAccess(grant: string) {
-  await mutatePreviewGrants((name) => api.revokePreviewGrant(props.ctx, name, grant))
+  await mutatePreviewGrants({
+    mutation: 'revoke',
+    run: (name) => api.revokePreviewGrant(props.ctx, name, grant),
+  })
 }
 
-async function mutatePreviewGrants(run: (name: string) => Promise<ProjectPublishingGrant[]>) {
+interface PreviewGrantMutation {
+  mutation: AccessMutation
+  subject?: string
+  run: (name: string) => Promise<ProjectPublishingGrant[]>
+}
+
+async function mutatePreviewGrants(operation: PreviewGrantMutation) {
   const name = selected.value?.name
   if (!name || publishingActionBusy.value) return
   publishingActionBusy.value = true
   publishingActionError.value = null
   try {
-    const grants = await run(name)
+    const grants = await operation.run(name)
     if (selected.value?.name !== name) return
     // Keep the visibility fields and swap only the grant list, so the toggle's
     // converged/pending state is not reset by a grant mutation.
     previewAccess.value = previewAccess.value
       ? { ...previewAccess.value, grants }
       : previewAccess.value
+    const notice = accessMutationToast('preview', operation.mutation, operation.subject)
+    toast(notice.kind, notice.message)
   } catch (err) {
     if (selected.value?.name === name) {
       publishingActionError.value = err instanceof Error ? err.message : String(err)
@@ -4089,6 +4120,7 @@ async function unpublishCurrentProject() {
     const state = await api.unpublishProject(props.ctx, name)
     if (selected.value?.name !== name) return
     publishing.value = state
+    toast('ok', 'Production access disabled.')
     await loadPublishing()
     disableSucceeded = true
   } catch (err) {
@@ -4122,6 +4154,8 @@ async function grantOrInviteProjectAccess(user: string, invite: boolean) {
   try {
     await api.grantPublishingAccess(props.ctx, name, selectedUser, invite)
     if (selected.value?.name !== name) return
+    const notice = accessMutationToast('production', invite ? 'invite' : 'grant', selectedUser)
+    toast(notice.kind, notice.message)
     await loadPublishing()
   } catch (err) {
     if (selected.value?.name === name) {
@@ -4140,6 +4174,8 @@ async function revokeCurrentProjectAccess(grant: string) {
   try {
     await api.revokePublishingAccess(props.ctx, name, grant)
     if (selected.value?.name !== name) return
+    const notice = accessMutationToast('production', 'revoke')
+    toast(notice.kind, notice.message)
     await loadPublishing()
   } catch (err) {
     if (selected.value?.name === name) {
@@ -5830,6 +5866,7 @@ async function archiveAssistantThread(threadID: string) {
     unreadAssistantThreadIDs.value = unreadAssistantThreadIDs.value.filter((candidate) => candidate !== threadID)
     const remaining = assistantThreads.value.filter((thread) => thread.id !== threadID)
     assistantThreads.value = remaining
+    toast('ok', 'Conversation archived.')
     if (!wasActive) {
       threadRailRef.value?.focusThread?.(activeAssistantThreadID.value)
       return
@@ -7011,10 +7048,12 @@ async function requestDeleteProject(project: Project) {
     }
     toast('info', `Deletion accepted for ${projectLabel}. Cleanup continues in the background.`)
     if (!hasRemainingProjects && !selectedProjectWasDeleted) props.navigate(CREATE_PROJECT_ROUTE)
-  } catch (e) {
+  } catch {
     if (responseIsCurrent()) {
-      const detail = e instanceof Error ? e.message : String(e)
-      const failureMessage = `Could not delete ${projectLabel}. ${detail || 'The server rejected the request.'}`
+      // Keep provider and transport details out of the contextual message.
+      // They may contain implementation paths or other data unsuitable for
+      // a user-facing surface; the retry action carries the recovery path.
+      const failureMessage = `Could not delete ${projectLabel}. Try again.`
       const retryContextFingerprint = operation.context.fingerprint
       const retryRoutePath = operation.context.routePath
       const retryDeletion = () => {
@@ -7029,10 +7068,6 @@ async function requestDeleteProject(project: Project) {
       error.value = null
       projectDeletionError.value = failureMessage
       projectDeletionRetry.value = retryDeletion
-      toast('error', failureMessage, {
-        label: 'Retry deletion',
-        run: retryDeletion,
-      })
     }
   } finally {
     if (lifecycleIsCurrent()) {
@@ -8038,6 +8073,10 @@ function onNestedProviderNavigate(e: Event) {
   const path = (typeof detail?.path === 'string' ? detail.path : '').replace(/^\/+/, '')
   const tab = activeWorkbenchTab.value
   if (!tab || tab.kind !== 'provider') return
+  // A cancelable nested-provider event uses preventDefault as a synchronous
+  // acknowledgement that App Studio owns this navigation. Without it, a
+  // provider with standalone hash fallback also mutates the outer URL.
+  e.preventDefault()
   // Nested provider tabs have one persisted descriptor rather than their own
   // shell history stack. Updating that descriptor in place is therefore the
   // equivalent of both push and replace navigation, while accepting optional
@@ -8522,12 +8561,15 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               v-model="projectQuery"
               class="app-studio-touch-target h-9 w-full rounded-md border border-border-subtle bg-surface-raised py-1.5 pl-8 pr-8 text-[13px] text-text-primary outline-none transition focus:border-accent/50"
               placeholder="Search"
+              aria-label="Search projects"
               :disabled="loading || !projectsLoaded"
               :aria-busy="loading || !projectsLoaded"
             />
             <button
               v-if="projectQuery"
+              type="button"
               class="app-studio-touch-target absolute right-1.5 top-1.5 flex h-6 w-6 items-center justify-center rounded-md text-text-muted hover:bg-surface-hover hover:text-text-primary"
+              aria-label="Clear project search"
               title="Clear search"
               @click="projectQuery = ''"
             >
@@ -8543,10 +8585,14 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           <LayoutSelector v-model="projectLayout" class="ml-auto" aria-label="Project layout" />
         </div>
 
-        <div v-if="projectDeletionError" class="mb-4 flex max-w-[720px] flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert" aria-live="assertive">
-          <span class="min-w-0 flex-1">{{ projectDeletionError }}</span>
-          <button type="button" class="font-medium underline underline-offset-2" @click="projectDeletionRetry?.()">Retry deletion</button>
-        </div>
+        <InlineNotification
+          v-if="projectDeletionError"
+          class="mb-4 max-w-[720px]"
+          tone="error"
+          :message="projectDeletionError"
+          action-label="Retry deletion"
+          @action="projectDeletionRetry?.()"
+        />
         <div v-if="error && !projectDeletionError" class="mb-4 flex max-w-[720px] flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert" aria-live="assertive" aria-atomic="true">
           <template v-if="isMissingCodeConnectionError(error)">
             You need to
@@ -9099,10 +9145,14 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         </template>
         <template v-else>{{ error }}</template>
       </div>
-      <div v-if="projectDeletionError" class="mx-3 mt-3 flex flex-wrap items-center gap-3 rounded-md border border-danger/30 bg-danger-subtle p-3 text-[12px] text-danger" role="alert" aria-live="assertive">
-        <span class="min-w-0 flex-1">{{ projectDeletionError }}</span>
-        <button type="button" class="font-medium underline underline-offset-2" @click="projectDeletionRetry?.()">Retry deletion</button>
-      </div>
+      <InlineNotification
+        v-if="projectDeletionError"
+        class="mx-3 mt-3"
+        tone="error"
+        :message="projectDeletionError"
+        action-label="Retry deletion"
+        @action="projectDeletionRetry?.()"
+      />
 
       <template v-if="selected || projectRouteShellVisible">
         <div class="relative min-h-0 flex-1">
@@ -10895,6 +10945,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
   <Teleport to="body">
     <ConfirmDialog />
   </Teleport>
+  <ToastHost owner="fallback" />
   <ProjectShareDialog
     v-if="shareDialogOpen"
     :open="shareDialogOpen"

@@ -1,4 +1,4 @@
-import type { ProviderFetch } from './portalkit/tenant'
+import { providerFetch, type ProviderFetch } from './portalkit/tenant'
 
 // QuickstartElement is the custom element the faros portal renders for
 // this provider. The portal:
@@ -118,7 +118,9 @@ export class QuickstartElement extends HTMLElement {
         return
       }
       const url = this._apiURL()
-      fetch(url, { credentials: 'same-origin' })
+      // Reference pattern: hub requests go through the host-owned transport,
+      // never the global fetch — the host injects credentials for us.
+      providerFetch(this._ctx)(url, { credentials: 'same-origin' })
         .then((r) => r.json().then((j) => ({ ok: r.ok, code: r.status, j })))
         .then(({ ok, code, j }) => {
           this._apiState = ok
