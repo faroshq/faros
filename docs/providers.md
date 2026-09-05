@@ -515,6 +515,14 @@ Content-Type: application/json
   and still records the beat so providers on older charts keep reporting
   alive while they are rolled forward; `enforce` (next release's default)
   rejects them, and such a provider goes stale after the TTL.
+- A rejection body says only which class of failure it was (`heartbeat not
+  authenticated` / `forbidden` / `heartbeat verification unavailable`); the
+  reason — logical cluster, expected service account, TokenReview error —
+  goes to the hub log only, because the endpoint answers anonymous callers.
+  For the same reason `enforce` answers a beat for an unregistered provider
+  with exactly that 401 rather than a 404, so the endpoint cannot be used to
+  enumerate provider names. In `warn` mode, which accepts unauthenticated
+  beats by design, an unknown name still gets 404.
 - Provider side: the bearer is `FAROS_HUB_TOKEN` if set, otherwise the token
   in `FAROS_PROVIDER_KUBECONFIG` (`provider-sdk/hubclient.ResolveHubToken`).
   Charts need no change.

@@ -107,20 +107,46 @@ func TestHeartbeatFailsWhenPersistFails(t *testing.T) {
 }
 
 func TestHeartbeatUnknownProviderIsNotPersisted(t *testing.T) {
-	reg := NewRegistry()
-	persisted := false
-	handler := NewHeartbeatHandler(reg, func(context.Context, string, string, time.Time) error {
-		persisted = true
-		return nil
-	}, allowAllHeartbeats, HeartbeatAuthEnforce, logr.Discard())
+	// Enforce mode hides the fact that the name is unknown behind the same 401
+	// a bad credential gets (see TestHeartbeatEnforceHidesUnknownProviders);
+	// warn mode, which accepts unauthenticated beats anyway, says 404.
+	for mode, want := range map[HeartbeatAuthMode]int{
+		HeartbeatAuthEnforce: http.StatusUnauthorized,
+		HeartbeatAuthWarn:    http.StatusNotFound,
+	} {
+		reg := NewRegistry()
+		persisted := false
+		handler := NewHeartbeatHandler(reg, func(context.Context, string, string, time.Time) error {
+			persisted = true
+			return nil
+		}, allowAllHeartbeats, mode, logr.Discard())
 
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, heartbeatRequestFor("nope"))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", rec.Code)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, heartbeatRequestFor("nope"))
+		if rec.Code != want {
+			t.Fatalf("%s: status = %d, want %d", mode, rec.Code, want)
+		}
+		if persisted {
+			t.Fatalf("%s: persisted a heartbeat for a provider that is not registered", mode)
+		}
 	}
-	if persisted {
-		t.Fatal("persisted a heartbeat for a provider that is not registered")
+}
+
+// An unknown name must be turned away before the authenticator runs: the
+// TokenReview round trip and, in warn mode, the log line per beat are work an
+// anonymous caller would otherwise drive at will.
+func TestHeartbeatUnknownProviderIsNotAuthenticated(t *testing.T) {
+	for _, mode := range []HeartbeatAuthMode{HeartbeatAuthEnforce, HeartbeatAuthWarn} {
+		calls := 0
+		handler := NewHeartbeatHandler(NewRegistry(), nil, func(context.Context, *http.Request, string) error {
+			calls++
+			return nil
+		}, mode, logr.Discard())
+
+		handler.ServeHTTP(httptest.NewRecorder(), heartbeatRequestWithBearer("nope", "tok"))
+		if calls != 0 {
+			t.Fatalf("%s: authenticator ran %d times for an unregistered provider, want 0", mode, calls)
+		}
 	}
 }
 

@@ -215,6 +215,28 @@ func bearerToken(r *http.Request) (string, bool) {
 	return token, token != ""
 }
 
+// heartbeatAuthFailureBody is the whole body the handler returns for a beat it
+// refused in enforce mode: one short string per status class, and nothing that
+// varies with the hub's state.
+//
+// The authenticator's errors are written for the log, not for the wire — they
+// name the logical cluster the TokenReview was issued in, the service account
+// username the beat was expected to authenticate as, and whether a CatalogEntry
+// cluster is known for the provider at all. This endpoint is mounted with no
+// auth middleware in front of it, so returning any of that would hand an
+// anonymous caller a map of the deployment. The detail stays in the handler's
+// log lines, which is where an operator debugs a provider that cannot beat.
+func heartbeatAuthFailureBody(status int) string {
+	switch status {
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusUnauthorized:
+		return "heartbeat not authenticated"
+	default:
+		return "heartbeat verification unavailable"
+	}
+}
+
 // heartbeatAuthStatus maps an authenticator error to the HTTP status the
 // handler returns in enforce mode.
 func heartbeatAuthStatus(err error) int {

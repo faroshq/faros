@@ -176,6 +176,153 @@ func TestHeartbeatWarnRecordsAndLogsFailures(t *testing.T) {
 	}
 }
 
+// The endpoint answers anonymous callers, so a rejection must not describe the
+// deployment back to them: the authenticator's errors name logical cluster IDs
+// and the service account username a beat was expected to carry.
+func TestHeartbeatEnforceRejectionBodiesRevealNothing(t *testing.T) {
+	const (
+		cluster  = "1axwjxprfb96jgta"
+		otherSA  = "system:serviceaccount:kube-system:sneaky"
+		provider = "code"
+	)
+	cases := map[string]struct {
+		err    error
+		status int
+		body   string
+	}{
+		"no bearer": {ErrHeartbeatNoBearer, http.StatusUnauthorized, "heartbeat not authenticated"},
+		"token rejected": {
+			fmt.Errorf("%w in cluster %s", ErrHeartbeatTokenRejected, cluster),
+			http.StatusUnauthorized, "heartbeat not authenticated",
+		},
+		"wrong identity": {
+			fmt.Errorf("%w: authenticated as %q, want %q", ErrHeartbeatWrongIdentity, otherSA, ProviderSAUsername),
+			http.StatusForbidden, "forbidden",
+		},
+		"cannot verify": {
+			fmt.Errorf("%w: reviewing token in cluster %s: %v", ErrHeartbeatAuthUnavailable, cluster, errors.New("connection refused")),
+			http.StatusServiceUnavailable, "heartbeat verification unavailable",
+		},
+	}
+	for name, tc := range cases {
+		reg := NewRegistry()
+		reg.Upsert(Provider{Name: provider, EndpointsValid: true, CatalogEntryCluster: cluster})
+		handler := NewHeartbeatHandler(reg, nil, func(context.Context, *http.Request, string) error {
+			return tc.err
+		}, HeartbeatAuthEnforce, logr.Discard())
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, heartbeatRequestWithBearer(provider, "tok"))
+		if rec.Code != tc.status {
+			t.Errorf("%s: status = %d, want %d", name, rec.Code, tc.status)
+		}
+		body := strings.TrimSpace(rec.Body.String())
+		if body != tc.body {
+			t.Errorf("%s: body = %q, want %q", name, body, tc.body)
+		}
+		for _, secret := range []string{cluster, otherSA, ProviderSAUsername, ProviderSAName, ProviderSANamespace, "connection refused"} {
+			if strings.Contains(body, secret) {
+				t.Errorf("%s: body %q leaks %q", name, body, secret)
+			}
+		}
+	}
+}
+
+// Enforce mode must not answer differently for a name that exists and a name
+// that does not; otherwise the endpoint enumerates the platform's providers for
+// anyone who can reach the hub.
+func TestHeartbeatEnforceHidesUnknownProviders(t *testing.T) {
+	reg := NewRegistry()
+	reg.Upsert(Provider{Name: "code", EndpointsValid: true, CatalogEntryCluster: "code-cluster"})
+	handler := NewHeartbeatHandler(reg, nil, func(context.Context, *http.Request, string) error {
+		return ErrHeartbeatTokenRejected
+	}, HeartbeatAuthEnforce, logr.Discard())
+
+	known := httptest.NewRecorder()
+	handler.ServeHTTP(known, heartbeatRequestWithBearer("code", "garbage"))
+	unknown := httptest.NewRecorder()
+	handler.ServeHTTP(unknown, heartbeatRequestWithBearer("no-such-provider", "garbage"))
+
+	if known.Code != unknown.Code {
+		t.Fatalf("status: known provider %d, unknown provider %d; they must match", known.Code, unknown.Code)
+	}
+	if known.Body.String() != unknown.Body.String() {
+		t.Fatalf("body: known provider %q, unknown provider %q; they must match", known.Body, unknown.Body)
+	}
+	if unknown.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", unknown.Code)
+	}
+	if strings.Contains(unknown.Body.String(), "not found") {
+		t.Fatalf("body %q admits the provider is unknown", unknown.Body)
+	}
+}
+
+// A registered provider whose CatalogEntry has not been observed yet is a
+// transient startup state, not an unknown name: it must keep producing the 503
+// the provider retries rather than the permanent 401 an unknown name gets.
+func TestHeartbeatEnforceStillReports503BeforeTheClusterIsKnown(t *testing.T) {
+	reg := NewRegistry()
+	reg.Upsert(Provider{Name: "code", EndpointsValid: true}) // no CatalogEntryCluster yet
+	f := &tokenReviewFake{}
+	now := time.Now()
+	a := newTestTokenReviewAuthenticator(reg, f, &now)
+	handler := NewHeartbeatHandler(reg, nil, a.Authenticate, HeartbeatAuthEnforce, logr.Discard())
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, heartbeatRequestWithBearer("code", "tok"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 while the cluster is still unknown", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != "heartbeat verification unavailable" || strings.Contains(body, "code") {
+		t.Fatalf("body = %q, want the generic unavailable message", body)
+	}
+
+	// Once the entry is observed the same beat authenticates and is recorded.
+	reg.Upsert(Provider{Name: "code", EndpointsValid: true, CatalogEntryCluster: "code-cluster"})
+	f.status = authnv1.TokenReviewStatus{Authenticated: true, User: authnv1.UserInfo{Username: ProviderSAUsername}}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, heartbeatRequestWithBearer("code", "tok"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if got, _ := reg.Get("code"); !got.HeartbeatRequired || got.LastHeartbeat.IsZero() {
+		t.Fatalf("authenticated beat not recorded: %+v", got)
+	}
+}
+
+// The detail the response no longer carries has to stay somewhere an operator
+// can read it.
+func TestHeartbeatEnforceLogsTheDetailedReason(t *testing.T) {
+	reg := NewRegistry()
+	reg.Upsert(Provider{Name: "code", EndpointsValid: true})
+
+	var logged []string
+	log := funcr.New(func(prefix, args string) { logged = append(logged, prefix+" "+args) },
+		funcr.Options{Verbosity: 1})
+	handler := NewHeartbeatHandler(reg, nil, func(context.Context, *http.Request, string) error {
+		return fmt.Errorf("%w: authenticated as %q, want %q", ErrHeartbeatWrongIdentity, "system:serviceaccount:kube-system:sneaky", ProviderSAUsername)
+	}, HeartbeatAuthEnforce, log)
+
+	handler.ServeHTTP(httptest.NewRecorder(), heartbeatRequestWithBearer("code", "tok"))
+	handler.ServeHTTP(httptest.NewRecorder(), heartbeatRequestWithBearer("no-such-provider", "tok"))
+
+	var identity, unknown bool
+	for _, line := range logged {
+		if strings.Contains(line, `"provider"="code"`) && strings.Contains(line, "system:serviceaccount:kube-system:sneaky") && strings.Contains(line, ProviderSAUsername) {
+			identity = true
+		}
+		if strings.Contains(line, `"provider"="no-such-provider"`) && strings.Contains(line, "not registered") {
+			unknown = true
+		}
+	}
+	if !identity {
+		t.Errorf("no log line carrying the wrong-identity detail; got %q", logged)
+	}
+	if !unknown {
+		t.Errorf("no log line saying the provider is not registered; got %q", logged)
+	}
+}
+
 func TestParseHeartbeatAuthMode(t *testing.T) {
 	for in, want := range map[string]HeartbeatAuthMode{"warn": HeartbeatAuthWarn, " Enforce ": HeartbeatAuthEnforce} {
 		got, err := ParseHeartbeatAuthMode(in)
