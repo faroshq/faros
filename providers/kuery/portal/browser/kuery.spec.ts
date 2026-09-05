@@ -154,6 +154,10 @@ test('dashboard tile uses shared semantics while preserving escaping and navigat
   await expect(page.locator('.k-dashboard-tile')).toHaveCount(1)
   await expect(row).toHaveClass(/k-dashboard-tile__row/)
   await expect(row).toHaveAttribute('data-edge', 'edge-<one>&')
+  expect(await page.locator('.k-dashboard-tile__list').evaluate(element => {
+    const style = getComputedStyle(element)
+    return { listStyle: style.listStyleType, margin: style.margin, padding: style.padding }
+  })).toEqual({ listStyle: 'none', margin: '0px', padding: '0px' })
   await row.click()
   expect(await page.evaluate(() => (window as typeof window & { tileNavigation?: unknown }).tileNavigation)).toEqual({ path: '' })
 })
