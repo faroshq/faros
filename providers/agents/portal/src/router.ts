@@ -9,6 +9,12 @@
 //   #/activity                        run feed + approvals
 //   #/activity/<runID>                run trace
 //   #/connections #/models
+//   #/connections/<name>/edit         connection edit
+//   #/toolsets/<name>/edit            toolset edit
+//   #/agents/<name>/schedules/create
+//   #/agents/<name>/schedules/<schedule>/edit
+//   #/agents/<name>/triggers/create
+//   #/agents/<name>/triggers/<trigger>/edit
 //   #/create/agent
 //   #/create/connection[/<type>]
 //   #/create/toolset #/create/model
@@ -16,6 +22,7 @@
 export type MenuKey = 'agents' | 'activity' | 'connections' | 'models'
 export type AgentTab = 'config' | 'runs'
 export type CreateResource = 'agent' | 'connection' | 'toolset' | 'model'
+export type AutomationResource = 'schedule' | 'trigger'
 
 export const MENUS: MenuKey[] = ['agents', 'activity', 'connections', 'models']
 const AGENT_TABS: AgentTab[] = ['config', 'runs']
@@ -24,7 +31,10 @@ export type Route =
   | { kind: 'menu'; menu: MenuKey }
   | { kind: 'agent'; name: string; tab: AgentTab }
   | { kind: 'run'; id: string }
+  | { kind: 'edit'; resource: 'connection' | 'toolset'; name: string }
   | { kind: 'create'; resource: CreateResource; type?: string }
+  | { kind: 'automation'; resource: AutomationResource; agent: string; action: 'create' }
+  | { kind: 'automation'; resource: AutomationResource; agent: string; action: 'edit'; name: string }
 
 // Create surfaces send this event after their API write succeeds. Keeping the
 // result on the event lets the shell make it immediately visible in the owning
@@ -34,7 +44,24 @@ export interface CreateSuccessDetail {
   name?: string
   item?: unknown
   destination?: Route
+  store?: unknown
+  authorityEpoch?: number
+  createSession?: number
 }
+
+export interface EditSuccessDetail {
+  resource: 'connection' | 'toolset'
+  name: string
+  item?: unknown
+  store?: unknown
+  authorityEpoch?: number
+  createSession?: number
+}
+
+export type EditCancelDetail = Pick<
+  EditSuccessDetail,
+  'resource' | 'name' | 'store' | 'authorityEpoch' | 'createSession'
+>
 
 export const DEFAULT_ROUTE: Route = { kind: 'menu', menu: 'agents' }
 
@@ -43,7 +70,7 @@ export const DEFAULT_ROUTE: Route = { kind: 'menu', menu: 'agents' }
 // tabs) redirect one-way onto their new home.
 export function parseHash(hash = location.hash): Route {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
-  const [head, second, third] = parts
+  const [head, second, third, fourth, fifth] = parts
   if (head === 'create') {
     if (second === 'agent' || second === 'toolset' || second === 'model') return { kind: 'create', resource: second }
     if (second === 'connection') {
@@ -51,7 +78,22 @@ export function parseHash(hash = location.hash): Route {
     }
   }
   if ((head === 'agents' || head === 'agent') && second) {
+    if ((third === 'schedules' || third === 'triggers') && fourth === 'create' && parts.length === 4) {
+      return { kind: 'automation', resource: third === 'schedules' ? 'schedule' : 'trigger', agent: decodePart(second), action: 'create' }
+    }
+    if ((third === 'schedules' || third === 'triggers') && fourth && fifth === 'edit' && parts.length === 5) {
+      return {
+        kind: 'automation', resource: third === 'schedules' ? 'schedule' : 'trigger',
+        agent: decodePart(second), action: 'edit', name: decodePart(fourth),
+      }
+    }
     return { kind: 'agent', name: decodePart(second), tab: normalizeTab(third) }
+  }
+  if (head === 'connections' && second && third === 'edit' && parts.length === 3) {
+    return { kind: 'edit', resource: 'connection', name: decodePart(second) }
+  }
+  if (head === 'toolsets' && second && third === 'edit' && parts.length === 3) {
+    return { kind: 'edit', resource: 'toolset', name: decodePart(second) }
   }
   if (head === 'activity' && second) return { kind: 'run', id: decodePart(second) }
   if (head === 'runs' && second) return { kind: 'run', id: decodePart(second) }
@@ -69,8 +111,16 @@ export function hashFor(route: Route): string {
       return `#/agents/${encodeURIComponent(route.name)}/${route.tab}`
     case 'run':
       return `#/activity/${encodeURIComponent(route.id)}`
+    case 'edit':
+      return `#/${route.resource === 'connection' ? 'connections' : 'toolsets'}/${encodeURIComponent(route.name)}/edit`
     case 'create':
       return `#/create/${route.resource}${route.type ? `/${encodeURIComponent(route.type)}` : ''}`
+    case 'automation': {
+      const collection = `${route.resource}s`
+      return route.action === 'create'
+        ? `#/agents/${encodeURIComponent(route.agent)}/${collection}/create`
+        : `#/agents/${encodeURIComponent(route.agent)}/${collection}/${encodeURIComponent(route.name)}/edit`
+    }
     default:
       return `#/${route.menu}`
   }
@@ -86,8 +136,11 @@ export function writeHash(route: Route, mode: HashHistoryMode = 'push'): void {
   const h = hashFor(route)
   if (location.hash !== h) {
     try {
-      if (mode === 'replace') history.replaceState(null, '', h)
-      else history.pushState(null, '', h)
+      // Embedded navigation is delegated to the host router by App.vue. Keep
+      // any ambient state intact in the standalone/fallback path so a host
+      // that does not acknowledge the event still avoids clobbering it.
+      if (mode === 'replace') history.replaceState(history.state, '', h)
+      else history.pushState(history.state, '', h)
     } catch {
       // Sandboxed history — assignment still gives the host a usable route.
       location.hash = h
@@ -106,6 +159,8 @@ export function syncHash(route: Route): void {
 export function activeMenu(route: Route): MenuKey {
   if (route.kind === 'agent') return 'agents'
   if (route.kind === 'run') return 'activity'
+  if (route.kind === 'edit') return 'connections'
+  if (route.kind === 'automation') return 'agents'
   if (route.kind === 'create') {
     if (route.resource === 'model') return 'models'
     if (route.resource === 'connection' || route.resource === 'toolset') return 'connections'
