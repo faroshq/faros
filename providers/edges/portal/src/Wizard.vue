@@ -37,16 +37,39 @@ const elapsed = ref(0)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let elapsedTimer: ReturnType<typeof setInterval> | null = null
 let copyTimer: ReturnType<typeof setTimeout> | null = null
-onUnmounted(() => {
+let active = true
+
+function stopPolling(): void {
   if (pollTimer) clearInterval(pollTimer)
   if (elapsedTimer) clearInterval(elapsedTimer)
+  pollTimer = null
+  elapsedTimer = null
+}
+
+function clearSetupSecret(): void {
+  joinToken.value = null
+  revealedCommand.value = null
+}
+
+onUnmounted(() => {
+  active = false
+  stopPolling()
   if (copyTimer) clearTimeout(copyTimer)
+  clearSetupSecret()
 })
 
 const trimmed = computed(() => name.value.trim())
 const edgeTypeLocked = computed(() => props.requiredType !== undefined)
 const canContinue = computed(() => trimmed.value.length > 0 && !saving.value && (!props.requiredType || edgeType.value === props.requiredType))
 const stepLabels = ['Configure', 'Install agent', 'Connected'] as const
+const connectionAnnouncement = computed(() => {
+  if (step.value === 1) return 'Step 1 of 3: Configure.'
+  if (step.value === 3) return `${trimmed.value} connected.`
+  if (tokenError.value) return ''
+  return joinToken.value
+    ? `Waiting for ${trimmed.value} to connect.`
+    : `Generating join token for ${trimmed.value}.`
+})
 async function focusCurrentStepHeading(): Promise<void> {
   await nextTick()
   document.getElementById('edge-wizard-step-heading')?.focus()
@@ -160,12 +183,14 @@ async function handleCreate() {
   error.value = null
   try {
     await createEdge(trimmed.value, edgeType.value, parseLabels())
+    if (!active) return
     step.value = 2
     startPolling()
   } catch (e) {
+    if (!active) return
     error.value = (e as ErrorResponse)?.message ?? 'Create failed'
   } finally {
-    saving.value = false
+    if (active) saving.value = false
   }
 }
 
@@ -176,21 +201,30 @@ function startPolling() {
   elapsed.value = 0
   elapsedTimer = setInterval(() => (elapsed.value += 1), 1000)
   pollTimer = setInterval(async () => {
+    if (!active || step.value !== 2) return
     try {
       const p = await probeEdge(edgeName, type)
-      if (!p) return
+      if (!active || step.value !== 2 || !p) return
       if (!joinToken.value && p.joinToken) joinToken.value = p.joinToken
       if (!joinToken.value && Date.now() > tokenDeadline) {
         tokenError.value = `Could not retrieve join token. Run: faros edge join-command ${edgeName}`
       }
       if (p.connected) {
         agentVersion.value = p.agentVersion ?? null
-        if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-        if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null }
+        stopPolling()
         step.value = 3
+        clearSetupSecret()
       }
     } catch { /* transient; keep polling */ }
   }, 2500)
+}
+
+function leaveWizard(event: 'cancel' | 'created'): void {
+  active = false
+  stopPolling()
+  clearSetupSecret()
+  if (event === 'cancel') emit('cancel')
+  else emit('created', trimmed.value, edgeType.value)
 }
 
 function fmt(s: number) {
@@ -213,9 +247,9 @@ function fmt(s: number) {
         <CircleDot :size="12" /> {{ l }}
       </li>
     </ol>
-    <span class="wiz-sr-only" role="status" aria-live="polite">Step {{ step }} of 3: {{ stepLabels[step - 1] }}</span>
+    <span class="wiz-sr-only" role="status" aria-live="polite" aria-atomic="true">{{ connectionAnnouncement }}</span>
 
-    <div v-if="error" class="banner error">{{ error }}</div>
+    <div v-if="error" class="banner error" role="alert" aria-live="assertive">{{ error }}</div>
 
     <!-- Step 1 -->
     <div v-if="step === 1" class="wiz-card k-card k-create-surface--guided">
@@ -241,7 +275,7 @@ function fmt(s: number) {
           <input id="edge-labels" v-model="labels" class="k-input" placeholder="env=prod, region=us-east" />
 
           <div class="wiz-actions">
-            <button type="button" class="k-btn k-btn--ghost" :disabled="saving" @click="emit('cancel')">
+            <button type="button" class="k-btn k-btn--ghost" :disabled="saving" @click="leaveWizard('cancel')">
               <ArrowLeft :size="14" aria-hidden="true" /> {{ props.cancelLabel }}
             </button>
             <button type="button" class="k-btn k-btn--primary" :disabled="!canContinue" @click="handleCreate">
@@ -267,7 +301,7 @@ function fmt(s: number) {
       <p class="muted">Run one of the commands below from the target. This updates automatically when
         <b>{{ trimmed }}</b> connects.</p>
 
-      <div v-if="tokenError" class="banner warn">{{ tokenError }}</div>
+      <div v-if="tokenError" class="banner warn" role="alert" aria-live="assertive">{{ tokenError }}</div>
       <div v-else-if="!joinToken" class="muted row"><Loader2 :size="14" class="spin" /> Generating join token…</div>
 
       <template v-if="joinToken || tokenError">
@@ -323,8 +357,8 @@ function fmt(s: number) {
 
       <div class="waiting"><Loader2 :size="14" class="spin" /> Waiting for <b>{{ trimmed }}</b> to connect… <span class="muted">({{ fmt(elapsed) }})</span></div>
       <div class="wiz-actions">
-        <button type="button" class="k-btn k-btn--ghost" @click="emit('cancel')">{{ props.cancelLabel }}</button>
-        <button type="button" class="k-btn k-btn--ghost" @click="emit('created', trimmed, edgeType)">Skip waiting — continue</button>
+        <button type="button" class="k-btn k-btn--ghost" @click="leaveWizard('cancel')">{{ props.cancelLabel }}</button>
+        <button type="button" class="k-btn k-btn--ghost" @click="leaveWizard('created')">Skip waiting — continue</button>
       </div>
     </div>
 
@@ -334,7 +368,7 @@ function fmt(s: number) {
       <h3 id="edge-wizard-step-heading" tabindex="-1"><b>{{ trimmed }}</b> is online</h3>
       <p class="muted">Agent {{ agentVersion || '—' }} · connected after {{ fmt(elapsed) }}</p>
       <div class="wiz-actions">
-        <button type="button" class="k-btn k-btn--primary" @click="emit('created', trimmed, edgeType)">Continue <ArrowRight :size="14" /></button>
+        <button type="button" class="k-btn k-btn--primary" @click="leaveWizard('created')">Continue <ArrowRight :size="14" /></button>
       </div>
     </div>
   </div>

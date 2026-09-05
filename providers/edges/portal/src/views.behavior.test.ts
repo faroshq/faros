@@ -1356,6 +1356,88 @@ describe('edge onboarding controls', () => {
     }
   })
 
+  it('announces generation, waiting, and connection without exposing the token or elapsed time', async () => {
+    vi.useFakeTimers()
+    api.probeEdge
+      .mockResolvedValueOnce({ joinToken: 'join-secret', connected: false })
+      .mockResolvedValueOnce({ joinToken: 'join-secret', connected: true, agentVersion: '1.2.3' })
+    const mounted = await mount(Wizard, { cluster: null })
+    try {
+      const state = mounted.instance.setupState
+      state.name = 'edge-live'
+      await state.handleCreate()
+      await flush()
+      expect(state.connectionAnnouncement).toBe('Generating join token for edge-live.')
+
+      await vi.advanceTimersByTimeAsync(2500)
+      await flush()
+      expect(state.connectionAnnouncement).toBe('Waiting for edge-live to connect.')
+      expect(state.connectionAnnouncement).not.toContain('join-secret')
+      expect(state.connectionAnnouncement).not.toMatch(/\d+s/)
+
+      await vi.advanceTimersByTimeAsync(2500)
+      await flush()
+      expect(state.step).toBe(3)
+      expect(state.connectionAnnouncement).toBe('edge-live connected.')
+      expect(state.joinToken).toBeNull()
+    } finally {
+      mounted.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not restore a setup token from a probe that resolves after unmount', async () => {
+    vi.useFakeTimers()
+    const pendingProbe = deferred<{ joinToken: string; connected: boolean } | null>()
+    api.probeEdge.mockReturnValueOnce(pendingProbe.promise)
+    const mounted = await mount(Wizard, { cluster: null })
+    const state = mounted.instance.setupState
+    state.name = 'edge-late'
+    await state.handleCreate()
+    await vi.advanceTimersByTimeAsync(2500)
+    expect(api.probeEdge).toHaveBeenCalledOnce()
+
+    mounted.unmount()
+    pendingProbe.resolve({ joinToken: 'late-secret', connected: false })
+    await flush()
+    expect(state.joinToken).toBeNull()
+    expect(state.revealedCommand).toBeNull()
+    vi.useRealTimers()
+  })
+
+  it('does not restore a setup token from an older probe after a newer probe connects', async () => {
+    vi.useFakeTimers()
+    const olderProbe = deferred<{ joinToken: string; connected: boolean } | null>()
+    const newerProbe = deferred<{ joinToken: string; connected: boolean } | null>()
+    api.probeEdge
+      .mockReturnValueOnce(olderProbe.promise)
+      .mockReturnValueOnce(newerProbe.promise)
+    const mounted = await mount(Wizard, { cluster: null })
+    try {
+      const state = mounted.instance.setupState
+      state.name = 'edge-race'
+      await state.handleCreate()
+
+      vi.advanceTimersByTime(2500)
+      await flush()
+      vi.advanceTimersByTime(2500)
+      await flush()
+      expect(api.probeEdge).toHaveBeenCalledTimes(2)
+
+      newerProbe.resolve({ joinToken: 'current-secret', connected: true })
+      await flush()
+      expect(state.step).toBe(3)
+      expect(state.joinToken).toBeNull()
+
+      olderProbe.resolve({ joinToken: 'stale-secret', connected: false })
+      await flush()
+      expect(state.joinToken).toBeNull()
+    } finally {
+      mounted.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('opens the shared action menu from the keyboard, skips locked items, and emits the selected action', async () => {
     const selected = vi.fn()
     const items: ActionMenuItem[] = [
