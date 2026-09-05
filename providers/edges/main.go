@@ -34,10 +34,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -84,18 +86,55 @@ func main() {
 		case "serve":
 			// fall through
 		default:
-			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\nusage: edges-provider [init|serve]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\nusage: edges-provider [init|serve [--allow-unverified-ssh-host-key]]\n", os.Args[1])
 			os.Exit(2)
 		}
 	}
-	if err := runServe(); err != nil {
+	var serveArgs []string
+	if len(os.Args) > 2 {
+		serveArgs = os.Args[2:]
+	}
+	opts, err := parseServeOptions(serveArgs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "serve:", err)
+		os.Exit(2)
+	}
+	if err := runServe(opts); err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
 		os.Exit(1)
 	}
 }
 
-func runServe() error {
+// serveOptions are the serve-time switches. Each has a flag and an env form
+// (the chart sets the env); either enables it.
+type serveOptions struct {
+	// allowUnverifiedSSHHostKey is the legacy escape hatch for LinuxServers
+	// whose agents never reported an sshd host key: SSH sessions to them are
+	// opened without verifying the server. Edges with a known or pinned key
+	// are always verified regardless.
+	allowUnverifiedSSHHostKey bool
+}
+
+func parseServeOptions(args []string) (serveOptions, error) {
+	var opts serveOptions
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.BoolVar(&opts.allowUnverifiedSSHHostKey, "allow-unverified-ssh-host-key", false,
+		"open SSH sessions to LinuxServers with no known host key without verifying the server (legacy escape hatch; env FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY=true)")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if v, _ := strconv.ParseBool(os.Getenv("FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY")); v {
+		opts.allowUnverifiedSSHHostKey = true
+	}
+	return opts, nil
+}
+
+func runServe(opts serveOptions) error {
 	log := klog.Background().WithName("edges")
+
+	if opts.allowUnverifiedSSHHostKey {
+		log.Info("WARNING: --allow-unverified-ssh-host-key is set: SSH sessions to LinuxServers with no known host key will NOT verify the server (MITM risk); pin spec.sshHostKey or let agents report keys, then remove the flag")
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -144,12 +183,13 @@ func runServe() error {
 			{GVR: edgesv1alpha1.KubernetesClusterGVR, Kind: "KubernetesCluster"},
 			{GVR: edgesv1alpha1.LinuxServerGVR, Kind: "LinuxServer"},
 		},
-		AgentPickupPath:     agentPickupPath,
-		EdgeProxyPublicPath: edgeProxyPublicPath,
-		KCPConfig:           kcpConfig,
-		HubExternalURL:      hubExternalURL,
-		HubInternalURL:      os.Getenv("FAROS_HUB_INTERNAL_URL"),
-		Logger:              log,
+		AgentPickupPath:           agentPickupPath,
+		EdgeProxyPublicPath:       edgeProxyPublicPath,
+		KCPConfig:                 kcpConfig,
+		HubExternalURL:            hubExternalURL,
+		HubInternalURL:            os.Getenv("FAROS_HUB_INTERNAL_URL"),
+		AllowUnverifiedSSHHostKey: opts.allowUnverifiedSSHHostKey,
+		Logger:                    log,
 	})
 	if err != nil {
 		return fmt.Errorf("build tunnel server: %w", err)

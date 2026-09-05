@@ -227,6 +227,35 @@ When the agent starts with `--token` and `--ssh-user`/`--ssh-password`:
 4. `storeSSHCredentials` creates a `faros-ssh-<name>` Secret in `faros-system`.
 5. `edge.status.sshCredentials` is populated with the username and secret ref.
 
+### SSH host key verification
+
+The provider verifies the sshd host key on every SSH session and fails closed
+(`providers/edges/internal/tunnel/agent_proxy_builder.go`, `newSSHClient`):
+
+- **Key source.** `spec.sshHostKey` (operator pin, authorized_keys format) wins.
+  Otherwise `status.sshHostKey`, which the agent reports once on tunnel connect
+  (`X-Faros-SSH-HostKey`). The provider records the reported key **write-once**:
+  a later report with a different fingerprint is not applied and instead sets
+  the `SSHHostKeyChanged` condition (both fingerprints in the message). Resolve
+  it by pinning `spec.sshHostKey` or clearing `status.sshHostKey`.
+- **Unparseable key** → the session is refused.
+- **No key known** → `spec.sshHostKeyPolicy` decides:
+  - `strict` (default): the session is refused until a key is pinned or
+    reported.
+  - `tofu`: the key presented on the first session is trusted, recorded in
+    `status.sshHostKey`, and enforced from then on.
+- **Legacy escape hatch.** `edges-provider serve --allow-unverified-ssh-host-key`
+  (env `FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY=true`, chart value
+  `allowUnverifiedSSHHostKey`) opens sessions to edges with no known key
+  without verification. It is logged at verbosity 0 on startup and on every
+  use, and never affects an edge whose key is known.
+
+Every session emits two structured lines at verbosity 0: `SSH session opened`
+(cluster, edge, caller, SSH user, mode, exec command, remote address, host key
+fingerprint) and `SSH session ended` (plus duration and error). A session
+refused before opening still gets the `ended` line with `opened=false`. When the
+caller's TokenReview fails the lines carry `caller=unknown` and `callerError`.
+
 ### SSH username mapping (OIDC)
 
 With OIDC auth, the SSH username is derived from the user's token claim:
