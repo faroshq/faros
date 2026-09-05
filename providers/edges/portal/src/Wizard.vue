@@ -30,7 +30,6 @@ const tokenError = ref<string | null>(null)
 const copied = ref<string | null>(null)
 const copyFeedback = ref('')
 const failedCopyField = ref<string | null>(null)
-const revealedCommand = ref<string | null>(null)
 const agentVersion = ref<string | null>(null)
 const elapsed = ref(0)
 
@@ -48,7 +47,8 @@ function stopPolling(): void {
 
 function clearSetupSecret(): void {
   joinToken.value = null
-  revealedCommand.value = null
+  failedCopyField.value = null
+  copyFeedback.value = ''
 }
 
 onUnmounted(() => {
@@ -121,7 +121,8 @@ const helmText = computed(() => helmSnippet(masked))
 const cliText = computed(() => cliSnippet(masked))
 
 function copyControlLabel(field: string, label: string): string {
-  return copied.value === field ? 'Copied' : `Copy ${label}`
+  if (copied.value === field) return 'Copied'
+  return failedCopyField.value === field ? `Retry copying ${label}` : `Copy ${label}`
 }
 
 async function copy(build: (t: string) => string, field: string, label: string) {
@@ -132,12 +133,10 @@ async function copy(build: (t: string) => string, field: string, label: string) 
   }
   copied.value = null
   failedCopyField.value = null
-  revealedCommand.value = null
   try {
     await navigator.clipboard.writeText(build(joinToken.value))
     copied.value = field
     failedCopyField.value = null
-    revealedCommand.value = null
     copyFeedback.value = `${label} copied to clipboard.`
     copyTimer = setTimeout(() => {
       copied.value = null
@@ -146,19 +145,8 @@ async function copy(build: (t: string) => string, field: string, label: string) 
     }, 2000)
   } catch {
     failedCopyField.value = field
-    copyFeedback.value = `Could not copy the ${label.toLowerCase()}. Reveal it to copy manually.`
+    copyFeedback.value = `Could not copy the ${label.toLowerCase()}. The join token remains masked; try copying again.`
   }
-}
-
-function revealForManualCopy(field: string): void {
-  if (!joinToken.value || failedCopyField.value !== field) return
-  revealedCommand.value = field
-  copyFeedback.value = 'Command revealed. The join token is sensitive; hide it after copying.'
-}
-
-function hideRevealedCommand(): void {
-  revealedCommand.value = null
-  copyFeedback.value = 'Command hidden.'
 }
 
 function parseLabels(): Record<string, string> {
@@ -318,7 +306,7 @@ function fmt(s: number) {
               <component :is="copied === 'helm' ? Check : Copy" :size="12" :stroke-width="1.75" aria-hidden="true" />
             </button>
           </div>
-          <pre>{{ revealedCommand === 'helm' && joinToken ? helmSnippet(joinToken) : helmText }}</pre>
+          <pre>{{ helmText }}</pre>
         </div>
         <div class="snippet">
           <div class="snippet-head"><span>CLI — faros agent join</span>
@@ -333,24 +321,12 @@ function fmt(s: number) {
               <component :is="copied === 'cli' ? Check : Copy" :size="12" :stroke-width="1.75" aria-hidden="true" />
             </button>
           </div>
-          <pre>{{ revealedCommand === 'cli' && joinToken ? cliSnippet(joinToken) : cliText }}</pre>
+          <pre>{{ cliText }}</pre>
         </div>
       </template>
 
       <div v-if="failedCopyField" class="banner warn" role="alert">
-        Clipboard access is unavailable. Revealing the command will display its sensitive one-time join token.
-        <button
-          v-if="revealedCommand !== failedCopyField"
-          type="button"
-          class="k-btn k-btn--ghost compact-control"
-          @click="revealForManualCopy(failedCopyField)"
-        >Reveal command for manual copy</button>
-        <button
-          v-else
-          type="button"
-          class="k-btn k-btn--ghost compact-control"
-          @click="hideRevealedCommand"
-        >Hide join token</button>
+        Clipboard access is unavailable. The one-time join token remains masked; retry the explicit copy action.
       </div>
 
       <span class="wiz-sr-only" role="status" aria-live="polite">{{ copyFeedback }}</span>

@@ -1286,10 +1286,12 @@ describe('edge onboarding controls', () => {
     }
   })
 
-  it('offers an explicit masked-to-revealed fallback when clipboard access fails', async () => {
+  it('keeps the setup secret masked and makes explicit copy retryable after clipboard failure', async () => {
     const previousNavigator = globalThis.navigator
     const previousWindow = globalThis.window
-    const writeText = vi.fn().mockRejectedValue(new Error('clipboard denied'))
+    const writeText = vi.fn()
+      .mockRejectedValueOnce(new Error('clipboard denied'))
+      .mockResolvedValueOnce(undefined)
     Object.defineProperty(globalThis, 'navigator', {
       configurable: true,
       value: { clipboard: { writeText } },
@@ -1305,24 +1307,16 @@ describe('edge onboarding controls', () => {
       state.joinToken = 'join-secret'
       await state.copy(state.cliSnippet, 'cli', 'CLI command')
       expect(state.failedCopyField).toBe('cli')
-      expect(state.revealedCommand).toBeNull()
       expect(state.cliText).toContain('••••••••••••••••')
       expect(state.cliText).not.toContain('join-secret')
+      expect(state.copyControlLabel('cli', 'CLI command')).toBe('Retry copying CLI command')
+      expect(state.copyFeedback).toContain('join token remains masked')
 
-      state.revealForManualCopy('cli')
-      expect(state.revealedCommand).toBe('cli')
-      expect(state.cliSnippet(state.joinToken)).toContain('--token join-secret')
-      expect(state.copyFeedback).toContain('join token is sensitive')
-
-      await state.copy(state.helmSnippet, 'helm', 'Helm command')
-      expect(state.failedCopyField).toBe('helm')
-      expect(state.revealedCommand).toBeNull()
+      await state.copy(state.cliSnippet, 'cli', 'CLI command')
+      expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('--token join-secret'))
+      expect(state.failedCopyField).toBeNull()
+      expect(state.copied).toBe('cli')
       expect(state.cliText).not.toContain('join-secret')
-
-      state.revealForManualCopy('helm')
-      expect(state.revealedCommand).toBe('helm')
-      state.hideRevealedCommand()
-      expect(state.revealedCommand).toBeNull()
     } finally {
       mounted.unmount()
       Object.defineProperty(globalThis, 'navigator', {
@@ -1401,7 +1395,6 @@ describe('edge onboarding controls', () => {
     pendingProbe.resolve({ joinToken: 'late-secret', connected: false })
     await flush()
     expect(state.joinToken).toBeNull()
-    expect(state.revealedCommand).toBeNull()
     vi.useRealTimers()
   })
 

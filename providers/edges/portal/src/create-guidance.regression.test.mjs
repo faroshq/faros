@@ -54,6 +54,7 @@ describe('Edges create guidance', () => {
     expect(wizard).toMatch(/class="banner warn" role="alert" aria-live="assertive"/)
     expect(wizard).toMatch(/const masked = '••••••••••••••••'/)
     expect(wizard).toMatch(/navigator\.clipboard\.writeText\(build\(joinToken\.value\)\)/)
+    expect(wizard).not.toMatch(/revealedCommand|revealForManualCopy|Reveal command for manual copy/)
     expect(wizard).toMatch(/onUnmounted\(\(\) => \{[\s\S]*clearSetupSecret\(\)/)
   })
 })
