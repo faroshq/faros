@@ -18,6 +18,7 @@ test('dashboard tiles expose matching Tailwind and plain-DOM semantic slots', ()
   for (const className of classNames) {
     assert.ok(styles.includes(`.${className}`), `missing canonical CSS for ${className}`)
   }
+  assert.match(styles, /\.k-dashboard-tile__list\s*\{[^}]*margin: 0;[^}]*padding: 0;[^}]*list-style: none;/s)
 })
 
 test('stylesheet marker and runtime handoff require the same version', () => {
