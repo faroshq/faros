@@ -90,6 +90,11 @@ func uiIntegrityVersion(specVersion, reportedVersion string) string {
 // keeps the previous pin: a transient upstream error must not silently unpin a
 // bundle. A failure after a version change drops the pin so the portal can
 // still load the new bundle, unpinned, until the next reconcile succeeds.
+//
+// Safe to call concurrently for one provider. The lock is dropped across the
+// fetch, so the error path decides on the cache entry it re-reads rather than
+// the snapshot it took beforehand: a record another reconcile wrote meanwhile
+// is left alone, and only this call's own superseded pin is dropped.
 func (r *CatalogReconciler) pinUIIntegrity(ctx context.Context, logger logr.Logger, prov Provider, version string) (string, bool) {
 	if prov.OrgUUID != "" || (prov.LocalUIAssets == nil && prov.UIURL == nil) {
 		return "", false
