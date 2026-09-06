@@ -45,11 +45,15 @@ const AnnotationCatalogEntryCreationMigrated = "tenants.faros.sh/catalog-entry-c
 // Organizations are created with an explicit value and are simply stamped on
 // first sight.
 //
+// reader supplies the Organization list and MUST NOT be cache-backed: an
+// empty list from a cold cache is indistinguishable from an empty cluster, and
+// this backfill treats "nothing to do" as final. writer applies the patches.
+//
 // Returns the number of Organizations updated. Errors are returned after the
 // first failed write; the caller retries, and every write is idempotent.
-func BackfillCatalogEntryCreation(ctx context.Context, c client.Client) (int, error) {
+func BackfillCatalogEntryCreation(ctx context.Context, reader client.Reader, writer client.Client) (int, error) {
 	var orgs tenancyv1alpha1.OrganizationList
-	if err := c.List(ctx, &orgs); err != nil {
+	if err := reader.List(ctx, &orgs); err != nil {
 		return 0, fmt.Errorf("listing Organizations: %w", err)
 	}
 	updated := 0
@@ -66,7 +70,7 @@ func BackfillCatalogEntryCreation(ctx context.Context, c client.Client) (int, er
 			org.Annotations = map[string]string{}
 		}
 		org.Annotations[AnnotationCatalogEntryCreationMigrated] = time.Now().UTC().Format(time.RFC3339)
-		if err := c.Patch(ctx, org, patch); err != nil {
+		if err := writer.Patch(ctx, org, patch); err != nil {
 			return updated, fmt.Errorf("backfilling catalogEntryCreation on Organization %s: %w", org.Name, err)
 		}
 		updated++
@@ -79,11 +83,34 @@ func BackfillCatalogEntryCreation(ctx context.Context, c client.Client) (int, er
 // stops. It is registered from SetupWithManager so the hub needs no extra
 // wiring, and it never fails the manager: a transient apiserver error must
 // not take the whole controller down.
+//
+// The backfill stops after one successful pass, so that pass has to see every
+// Organization that exists. Two things make that true, and both are needed:
+//
+//   - The list goes through mgr.GetAPIReader(), which reads the apiserver
+//     directly. mgr.GetClient() would read the informer cache, and a cache
+//     that has not been populated yet answers with an empty list — a result
+//     this runnable cannot tell apart from "no Organizations exist", after
+//     which it would exit having silently migrated nothing. Every remaining
+//     Organization would keep an empty spec.catalogEntryCreation, which now
+//     reads as "admin", quietly taking provider registration away from
+//     members.
+//   - It blocks on cache sync first anyway. mgr.Add puts a plain
+//     RunnableFunc in the leader-election group, which controller-runtime
+//     starts only after the cache group has synced — but that is a property
+//     of how this runnable happens to be classified, not something the code
+//     states, and it would change the moment someone gave it a
+//     NeedLeaderElection method. The explicit wait keeps the guarantee local.
 func catalogEntryCreationBackfill(mgr manager.Manager) manager.RunnableFunc {
 	return func(ctx context.Context) error {
 		logger := klog.FromContext(ctx).WithName("catalog-entry-creation-backfill")
+		if !mgr.GetCache().WaitForCacheSync(ctx) {
+			// Only returns false when ctx is done — the manager is stopping.
+			logger.V(2).Info("cache sync interrupted; skipping backfill")
+			return nil
+		}
 		return wait.PollUntilContextCancel(ctx, 10*time.Second, true, func(ctx context.Context) (bool, error) {
-			updated, err := BackfillCatalogEntryCreation(ctx, mgr.GetClient())
+			updated, err := BackfillCatalogEntryCreation(ctx, mgr.GetAPIReader(), mgr.GetClient())
 			if err != nil {
 				logger.Error(err, "backfill failed; retrying")
 				return false, nil
