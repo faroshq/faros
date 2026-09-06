@@ -47,6 +47,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -129,6 +130,12 @@ type delegatedTokenKey struct {
 	orgUUID, wsUUID, user, provider string
 }
 
+// String is the singleflight key. Every component is NUL-free by
+// validateDelegatedInputs, so distinct tuples cannot collide on one string.
+func (k delegatedTokenKey) String() string {
+	return strings.Join([]string{k.orgUUID, k.wsUUID, k.user, k.provider}, "\x00")
+}
+
 type delegatedTokenEntry struct {
 	token     string
 	expiresAt time.Time
@@ -157,7 +164,33 @@ func (m *Manager) IssueDelegatedUserToken(ctx context.Context, orgUUID, wsUUID s
 		return token, expiresAt, nil
 	}
 
-	return m.mintDelegatedUserToken(ctx, key, orgUUID, wsUUID, user, providerName)
+	// Deduplicate the mint per tuple. Without this every concurrent request
+	// for the same (org, workspace, user, provider) that misses the cache
+	// mints its own token and reconciles the same ServiceAccount and
+	// ClusterRoleBinding in parallel — a burst of TokenRequests and writes
+	// against one object for a result they all share. singleflight collapses
+	// the burst into one mint whose result every waiter receives.
+	type mintResult struct {
+		token     string
+		expiresAt time.Time
+	}
+	value, err, _ := m.delegatedFlight.Do(key.String(), func() (any, error) {
+		// The winner re-checks the cache: a request that queued behind an
+		// in-flight mint for a *different* key may still find a fresh entry.
+		if token, expiresAt, ok := m.cachedDelegatedToken(key); ok {
+			return mintResult{token: token, expiresAt: expiresAt}, nil
+		}
+		token, expiresAt, err := m.mintDelegatedUserToken(ctx, key, orgUUID, wsUUID, user, providerName)
+		if err != nil {
+			return nil, err
+		}
+		return mintResult{token: token, expiresAt: expiresAt}, nil
+	})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	result := value.(mintResult)
+	return result.token, result.expiresAt, nil
 }
 
 // cachedDelegatedToken returns a still-usable cached token for key.
@@ -419,5 +452,10 @@ func (m *Manager) clock() time.Time {
 type delegatedCache struct {
 	delegatedMu sync.Mutex
 	delegated   map[delegatedTokenKey]delegatedTokenEntry
-	now         func() time.Time
+	// delegatedFlight collapses concurrent cache misses for one tuple into a
+	// single mint. Process-local: it removes the stampede within a replica,
+	// which is where it happens — a burst is one user's browser opening
+	// several provider requests at once, and those all land on one replica.
+	delegatedFlight singleflight.Group
+	now             func() time.Time
 }

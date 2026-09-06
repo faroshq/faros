@@ -19,6 +19,7 @@ package serviceaccounts
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -434,5 +435,62 @@ func TestIssueDelegatedUserTokenFailsClosedWithoutProofKey(t *testing.T) {
 	m.proofKeys = nil
 	if _, _, err := m.IssueDelegatedUserToken(context.Background(), delegatedTestOrg, delegatedTestWS, delegatedTestUser, delegatedTestProvider); err == nil {
 		t.Fatal("minted a delegated token with no proof key source")
+	}
+}
+
+// TestIssueDelegatedUserTokenMintsOnceUnderConcurrency: concurrent callers for
+// one tuple share a single mint instead of each issuing their own token and
+// racing on the same ServiceAccount and binding.
+func TestIssueDelegatedUserTokenMintsOnceUnderConcurrency(t *testing.T) {
+	m, cs := managerFor(t)
+	defer resetTestClientset()
+
+	var mu sync.Mutex
+	mints := 0
+	release := make(chan struct{})
+	cs.PrependReactor("create", "serviceaccounts/token", func(clienttesting.Action) (bool, runtime.Object, error) {
+		mu.Lock()
+		mints++
+		mu.Unlock()
+		// Hold the mint open until every caller has arrived, so a
+		// non-deduplicated implementation cannot pass by being fast enough
+		// for later callers to hit the cache.
+		<-release
+		return true, &authnv1.TokenRequest{Status: authnv1.TokenRequestStatus{
+			Token:               "delegated-token",
+			ExpirationTimestamp: metav1.NewTime(time.Now().Add(WorkloadIdentityTokenTTL)),
+		}}, nil
+	})
+
+	const callers = 8
+	ctx := context.Background()
+	tokens := make([]string, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tokens[i], _, errs[i] = m.IssueDelegatedUserToken(ctx, delegatedTestOrg, delegatedTestWS, delegatedTestUser, delegatedTestProvider)
+		}()
+	}
+	// Give every caller time to reach the singleflight before the one that
+	// won it completes.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if tokens[i] != "delegated-token" {
+			t.Fatalf("caller %d got token %q", i, tokens[i])
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if mints != 1 {
+		t.Fatalf("concurrent callers for one tuple minted %d tokens, want 1", mints)
 	}
 }
