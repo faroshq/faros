@@ -134,7 +134,19 @@ func NewHeartbeatHandler(reg *Registry, record HeartbeatRecorder, authenticate H
 				http.Error(w, heartbeatAuthFailureBody(status), status)
 				return
 			}
-			logger.Info("heartbeat failed authentication; accepting because --provider-heartbeat-auth=warn (enforce becomes the default next release)",
+			// Warn mode exists so an operator can see which providers will
+			// break when enforce becomes the default, so a rejected identity
+			// is worth a line per beat. "Cannot verify" is not: it says
+			// nothing about this provider, repeats for every provider on
+			// every tick, and both ways it happens are already reported
+			// elsewhere — a hub with no kcp says so once at startup, and a
+			// hub whose kcp is unreachable fails the heartbeat recorder,
+			// which logs at error level.
+			warn := logger.V(0)
+			if heartbeatAuthStatus(err) == http.StatusServiceUnavailable {
+				warn = logger.V(1)
+			}
+			warn.Info("heartbeat failed authentication; accepting because --provider-heartbeat-auth=warn (enforce becomes the default next release)",
 				"provider", name, "reason", err.Error())
 		}
 		var body heartbeatRequest
