@@ -81,7 +81,11 @@ assistant:
     maxIterations: ""
     # APP_STUDIO_ASSISTANT_ROLLOUT_BUDGET_TOKENS
     rolloutBudgetTokens: ""
-    # APP_STUDIO_ORG_MONTHLY_USD_CAP (USD, decimals allowed)
+    # APP_STUDIO_ORG_MONTHLY_USD_CAP (USD, decimals allowed). The cap bounds
+    # spend already incurred, not spend in flight: a model call's cost is only
+    # known once it returns, so the month can overshoot by at most one call per
+    # call in flight when the cap is crossed, after which every call fails
+    # closed.
     orgMonthlyUSDCap: ""
 
 # Signed DOM annotation sharing starts automatically while the embedded preview
