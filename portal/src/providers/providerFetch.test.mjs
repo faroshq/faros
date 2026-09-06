@@ -19,6 +19,7 @@ const {
   providerFetchAllowedPrefixes,
 } = await vite.ssrLoadModule('/src/providers/providerFetch.ts')
 const { createProviderContext } = await vite.ssrLoadModule('/src/providers/providerContext.ts')
+const { providerFetch: portalkitProviderFetch } = await vite.ssrLoadModule('/src/portalkit/tenant.ts')
 test.after(() => vite.close())
 
 const ORIGIN = 'https://hub.example'
@@ -114,6 +115,59 @@ test('the host fetch resolves relative URLs and injects the host credentials', a
   await providerFetch(new URL('/graphql/2abc1', ORIGIN), { method: 'POST' })
   assert.equal(calls[1].init.headers.get('Authorization'), 'Bearer id-token-2')
   assert.equal(calls[1].init.headers.has('X-Faros-Workspace'), false)
+})
+
+test('the host fetch keeps same-origin credentials whatever the provider passes', async () => {
+  const calls = []
+  const providerFetch = createProviderFetch({
+    providerName: 'agents',
+    origin: ORIGIN,
+    scope: () => ({ token: 't', orgUUID: ORG, workspaceUUID: 'ws' }),
+    fetchImpl: async (input, init) => {
+      calls.push({ input, init })
+      return new Response()
+    },
+  })
+  // The wrapper applies its policy after the caller's init, so a provider
+  // cannot widen (include) or narrow (omit) the credentials mode, while
+  // request-shaping fields it does not own still pass through.
+  for (const credentials of ['include', 'omit', 'same-origin', undefined]) {
+    const controller = new AbortController()
+    await providerFetch('/services/providers/agents/api/agents', {
+      credentials,
+      mode: 'cors',
+      redirect: 'manual',
+      signal: controller.signal,
+    })
+    const { init } = calls.at(-1)
+    assert.equal(init.credentials, 'same-origin', `credentials: ${credentials}`)
+    assert.equal(init.mode, 'cors')
+    assert.equal(init.redirect, 'manual')
+    assert.equal(init.signal, controller.signal)
+  }
+  assert.equal(calls.length, 4)
+})
+
+test('the portalkit token fallback keeps same-origin credentials whatever the caller passes', async () => {
+  const calls = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input, init })
+    return new Response()
+  }
+  try {
+    const fallback = portalkitProviderFetch({ fetch: null, token: 'legacy-token' })
+    for (const credentials of ['include', 'omit', 'same-origin', undefined]) {
+      await fallback(`${ORIGIN}/services/providers/agents/api/agents`, { credentials, headers: { Accept: 'text/plain' } })
+      const { init } = calls.at(-1)
+      assert.equal(init.credentials, 'same-origin', `credentials: ${credentials}`)
+      assert.equal(init.headers.get('Authorization'), 'Bearer legacy-token')
+      assert.equal(init.headers.get('Accept'), 'text/plain')
+    }
+    assert.equal(calls.length, 4)
+  } finally {
+    globalThis.fetch = realFetch
+  }
 })
 
 test('the host fetch refuses a denied URL before any request is made', async () => {

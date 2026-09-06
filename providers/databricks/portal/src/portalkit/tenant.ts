@@ -98,6 +98,8 @@ export function providerFetch(ctx: ProviderFetchContext | null | undefined): Pro
     if (!token) return fetch(input, init)
     const headers = new Headers(init?.headers ?? (typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined))
     if (!headers.has('Authorization')) headers.set('Authorization', `Bearer ${token}`)
-    return fetch(input, { credentials: 'same-origin', ...init, headers })
+    // Same rule as the host wrapper: what this transport enforces goes after
+    // the caller's init so it cannot be overridden.
+    return fetch(input, { ...init, credentials: 'same-origin', headers })
   }
 }

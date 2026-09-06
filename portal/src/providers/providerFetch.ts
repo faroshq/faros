@@ -165,7 +165,11 @@ export function createProviderFetch(options: ProviderFetchOptions): ProviderFetc
     if (current.workspaceUUID) headers.set('X-Faros-Workspace', current.workspaceUUID)
     else headers.delete('X-Faros-Workspace')
 
-    const nextInit: RequestInit = { credentials: 'same-origin', ...init, headers }
+    // Policy the host owns goes after the spread so a provider's init cannot
+    // override it: the credentials mode and the headers assembled above.
+    // Request-shaping fields (method, body, mode, redirect, signal, ...) stay
+    // the caller's.
+    const nextInit: RequestInit = { ...init, credentials: 'same-origin', headers }
     if (isRequest) return fetchImpl(new Request(input as Request, nextInit))
     return fetchImpl(url.toString(), nextInit)
   }
