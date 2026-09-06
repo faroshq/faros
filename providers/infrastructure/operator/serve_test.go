@@ -18,13 +18,81 @@ package operator
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 
 	v1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 )
+
+// serveRBACConflictClient is a clientset whose serve ClusterRoleBinding
+// survives the Delete (still terminating, or recreated by another actor) and
+// therefore answers the follow-up Create with AlreadyExists. roleRefs is the
+// roleRef each successive Get observes.
+func serveRBACConflictClient(crbName, saName string, roleRefs ...string) *fake.Clientset {
+	client := fake.NewSimpleClientset()
+	gets := 0
+	binding := func(roleRef string) *rbacv1.ClusterRoleBinding {
+		return &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: crbName},
+			RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: roleRef},
+			Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: saName, Namespace: ServeNamespace}},
+		}
+	}
+	client.PrependReactor("get", "clusterrolebindings", func(clienttesting.Action) (bool, runtime.Object, error) {
+		roleRef := roleRefs[min(gets, len(roleRefs)-1)]
+		gets++
+		return true, binding(roleRef), nil
+	})
+	client.PrependReactor("delete", "clusterrolebindings", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, nil
+	})
+	client.PrependReactor("create", "clusterrolebindings", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewAlreadyExists(rbacv1.Resource("clusterrolebindings"), crbName)
+	})
+	return client
+}
+
+// A create that loses the race must not report success. Deleting a
+// ClusterRoleBinding whose roleRef is wrong and recreating it is not atomic:
+// the API server can still hold the old object and answer the Create with
+// AlreadyExists. Ignoring that error left the serve ServiceAccount bound to the
+// old, broader ClusterRole while the reconcile reported success, so the
+// least-privilege role only took effect on some later pass — or never.
+func TestEnsureServeRBACRejectsStaleBindingAfterCreateConflict(t *testing.T) {
+	const saName = "infrastructure"
+	crbName := "faros-infrastructure-serve-" + saName
+	t.Setenv(serveClusterRoleEnv, "infrastructure-serve")
+
+	client := serveRBACConflictClient(crbName, saName, "cluster-admin")
+	err := ensureServeRBAC(context.Background(), client, saName)
+	if err == nil {
+		t.Fatal("ensureServeRBAC returned nil, want an error: the binding still carries the old cluster-admin roleRef")
+	}
+	if !strings.Contains(err.Error(), "cluster-admin") || !strings.Contains(err.Error(), "infrastructure-serve") {
+		t.Fatalf("ensureServeRBAC error = %v, want it to name both the stale and the desired ClusterRole", err)
+	}
+}
+
+// The same conflict is not an error once the surviving object carries the
+// roleRef we wanted: another actor replaced the binding first and the desired
+// state holds.
+func TestEnsureServeRBACAcceptsCreateConflictWithDesiredRoleRef(t *testing.T) {
+	const saName = "infrastructure"
+	crbName := "faros-infrastructure-serve-" + saName
+	t.Setenv(serveClusterRoleEnv, "infrastructure-serve")
+
+	client := serveRBACConflictClient(crbName, saName, "cluster-admin", "infrastructure-serve")
+	if err := ensureServeRBAC(context.Background(), client, saName); err != nil {
+		t.Fatalf("ensureServeRBAC: %v, want nil once the surviving binding already has the desired roleRef", err)
+	}
+}
 
 func TestEnsureProviderServePropagatesPlatformPreviewBridgeJWKS(t *testing.T) {
 	const jwks = `{"keys":[{"kid":"current"}]}`

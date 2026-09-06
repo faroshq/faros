@@ -315,8 +315,28 @@ func ensureServeRBAC(ctx context.Context, cs kubernetes.Interface, saName string
 			return fmt.Errorf("replace serve ClusterRoleBinding (roleRef %s -> %s): %w", existing.RoleRef.Name, crb.RoleRef.Name, derr)
 		}
 	}
-	if _, cerr := cs.RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{}); cerr != nil && !apierrors.IsAlreadyExists(cerr) {
-		return fmt.Errorf("create serve ClusterRoleBinding: %w", cerr)
+	if _, cerr := cs.RbacV1().ClusterRoleBindings().Create(ctx, crb, metav1.CreateOptions{}); cerr != nil {
+		if !apierrors.IsAlreadyExists(cerr) {
+			return fmt.Errorf("create serve ClusterRoleBinding: %w", cerr)
+		}
+		// AlreadyExists here means something else owns the name right now: the
+		// binding we just deleted is still terminating, or another actor
+		// recreated it. roleRef is immutable, so the survivor cannot be
+		// patched into shape — if it still carries the old role, serve keeps
+		// the privileges this change exists to drop. Verify and fail, so the
+		// reconcile retries promptly instead of silently reporting success and
+		// waiting for the next periodic pass (or forever, if the recreating
+		// actor keeps winning).
+		current, gerr := cs.RbacV1().ClusterRoleBindings().Get(ctx, crbName, metav1.GetOptions{})
+		if gerr != nil {
+			return fmt.Errorf("get serve ClusterRoleBinding after create conflict: %w", gerr)
+		}
+		if current.RoleRef != crb.RoleRef {
+			return fmt.Errorf(
+				"serve ClusterRoleBinding %s still bound to ClusterRole %s, want %s: the replaced binding has not been removed yet",
+				crbName, current.RoleRef.Name, crb.RoleRef.Name,
+			)
+		}
 	}
 	return nil
 }
