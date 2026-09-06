@@ -33,9 +33,12 @@ continuously:
 
 It is the same `infrastructure-provider` binary (`controller` subcommand); the
 runtime image bundles the `helm` CLI so the operator pod can drive kro. The
-chart binds the operator's ServiceAccount to `cluster-admin`
-(`operator.clusterAdmin`, default on) so it can helm-install kro (which creates
-ClusterRoles/CRDs) and manage runtime workloads.
+chart binds the operator's ServiceAccount to an enumerated ClusterRole that
+covers helm-installing kro (its CRDs, ClusterRole and binding, workload) and
+the serve rollout, and ships a second enumerated role the operator binds the
+serve ServiceAccount to for the in-cluster runtime. `operator.clusterAdmin`
+(default off) additionally binds `cluster-admin` for setups whose kro chart or
+Templates need kinds outside that set.
 
 ### Prerequisites
 
@@ -231,6 +234,14 @@ and enforces the 12-hour idle and hard lifetime bounds. Hosted installations
 keep the feature disabled; BYO chart self-hosting values explicitly opt in and
 must provide immutable universal and dev-agent image references.
 
+Every synthesized development pod, the coding sandbox included, runs
+PSS-restricted (non-root UID 1000, seccomp `RuntimeDefault`, all capabilities
+dropped, no privilege escalation) but still shares the host kernel. Set
+`FAROS_SANDBOX_RUNTIME_CLASS_NAME` (chart value `sandbox.runtimeClassName`, CR
+field `spec.sandbox.runtimeClassName`) to the name of a hardened RuntimeClass
+installed on the runtime cluster, `gvisor` or `kata`, before exposing App
+Studio to untrusted users. Empty keeps the cluster default runtime.
+
 ## Env vars
 
 | Var | Default | Purpose |
@@ -246,6 +257,7 @@ must provide immutable universal and dev-agent image references.
 | `FAROS_CODING_SANDBOX_ENABLED` | `false` | Opts into seeding/admitting the platform-owned universal coding sandbox; enabled deployments require immutable universal and dev-agent images |
 | `FAROS_DEV_IMAGE_UNIVERSAL` | `ghcr.io/faroshq/faros-universal-dev:latest` | Platform-selected Node/Go/Python image token; the coding sandbox gate accepts only a digest-pinned override |
 | `FAROS_DEV_AGENT_IMAGE` | `ghcr.io/faroshq/faros-dev-agent:latest` | Platform-selected injector and control-token bootstrap image; the coding sandbox gate accepts only a digest-pinned override |
+| `FAROS_SANDBOX_RUNTIME_CLASS_NAME` | (unset → cluster default runtime) | RuntimeClass (`gvisor` or `kata`) stamped on every synthesized development pod, including the universal coding sandbox; required before serving untrusted users |
 | `FAROS_DEV_ALLOW_TENANT_QUERY` | (unset) | `true` lets `?tenant=` replace `X-Faros-Tenant` (dev only) |
 | `KRO_KUBECONFIG` | (unset → stub mode) | Central kro cluster kubeconfig |
 | `KRO_NAMESPACE_PREFIX` | `faros-tenants-` | Per-tenant namespace prefix |
