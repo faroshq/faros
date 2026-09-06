@@ -83,8 +83,23 @@ func projectEinoAssistantOrgSpendCapExceeded(err error) bool {
 	return errors.Is(err, errProjectAssistantOrgSpendCapExceeded)
 }
 
+// projectAssistantFormatUSDMicros renders micro-USD for humans. Whole cents
+// keep the familiar two-decimal form; anything finer keeps its significant
+// digits, because a sub-cent cap that printed as "$0.00" would leave an
+// administrator unable to read back what the cap actually is. The arithmetic
+// is integral so large ledgers do not drift through float64.
 func projectAssistantFormatUSDMicros(micros int64) string {
-	return fmt.Sprintf("$%.2f", float64(micros)/float64(projectAssistantUSDMicros))
+	sign := ""
+	if micros < 0 {
+		sign, micros = "-", -micros
+	}
+	fraction := strconv.FormatInt(projectAssistantUSDMicros+micros%projectAssistantUSDMicros, 10)[1:]
+	if trimmed := strings.TrimRight(fraction, "0"); len(trimmed) > 2 {
+		fraction = trimmed
+	} else {
+		fraction = fraction[:2]
+	}
+	return fmt.Sprintf("$%s%d.%s", sign, micros/projectAssistantUSDMicros, fraction)
 }
 
 func projectAssistantOrgMonthlyUSDCapMicros() int64 {
@@ -237,12 +252,29 @@ func newProjectEinoAssistantOrgSpendGuard(
 	}
 }
 
+// Check fails the next model call once the organization's ledger has reached
+// the cap.
+//
+// Enforcement guarantee. Check reads and Record writes; between them the
+// provider call happens, so this is deliberately not an atomic reservation and
+// the cap is a bound on spend already incurred, not a hard ceiling on spend in
+// flight. Concurrent calls — across runs and across replicas — can each pass
+// Check while the ledger is still under the cap, so the month can overshoot by
+// at most one model call per call in flight at the moment the cap is crossed.
+// The overshoot cannot compound: Record adds to the shared row atomically, and
+// once the total reaches the cap every subsequent Check fails, so each run
+// contributes at most its own single in-flight call. Making this strict would
+// mean reserving an estimate of the cost before the provider call and settling
+// it afterwards, since the true cost is only known from the response; that
+// trade — refusing calls against a worst-case estimate — is not worth it for a
+// budget bound whose per-run exposure is already capped by the iteration and
+// rollout-token limits.
 func (g *projectEinoAssistantOrgSpendGuard) Check(ctx context.Context) error {
 	if g == nil {
 		return nil
 	}
 	now := g.now()
-	spend, err := g.store.GetOrganizationSpend(ctx, g.orgUUID, store.OrganizationSpendPeriodStart(now))
+	spend, err := g.store.GetOrganizationSpend(ctx, g.orgUUID, now)
 	if err != nil {
 		return fmt.Errorf("read organization spend: %w", err)
 	}
@@ -265,16 +297,28 @@ func (g *projectEinoAssistantOrgSpendGuard) Record(ctx context.Context, usage *s
 		USDMicros:    projectAssistantModelCostMicros(g.model, inputTokens, outputTokens),
 	}
 	now := g.now()
-	spend, err := g.store.AddOrganizationSpend(ctx, g.orgUUID, store.OrganizationSpendPeriodStart(now), delta, now)
+	// The provider has already billed this response, so the ledger write must
+	// outlive the client. On the request context a caller could cancel in the
+	// window between the provider returning and this write landing, and the
+	// usage would never reach the ledger — cancel at that moment on every
+	// call and the monthly cap is evaded outright. Detached, like the other
+	// durability-critical writes in this package.
+	persistCtx, cancel := detachedProjectPersistenceContext(ctx)
+	defer cancel()
+	spend, err := g.store.AddOrganizationSpend(persistCtx, g.orgUUID, now, delta, now)
 	if err != nil {
 		return fmt.Errorf("record organization spend: %w", err)
 	}
 	if spend.USDMicros >= g.capMicros {
-		g.reportCapReached(ctx, spend)
+		g.reportCapReached(persistCtx, spend)
 	}
 	return nil
 }
 
+// reportCapReached appends the run's one durable cap notice. It is detached
+// for the same reason the ledger write is: the notice explains why the run
+// stopped, and a client that has already gone away is exactly when it is
+// needed.
 func (g *projectEinoAssistantOrgSpendGuard) reportCapReached(ctx context.Context, spend store.OrganizationSpend) {
 	g.mu.Lock()
 	reported := g.capReported
@@ -283,7 +327,9 @@ func (g *projectEinoAssistantOrgSpendGuard) reportCapReached(ctx context.Context
 	if reported || g.onCapReached == nil {
 		return
 	}
-	g.onCapReached(ctx, spend)
+	persistCtx, cancel := detachedProjectPersistenceContext(ctx)
+	defer cancel()
+	g.onCapReached(persistCtx, spend)
 }
 
 // projectEinoAssistantOrgSpendModel wraps every sampling boundary of a run,
@@ -372,17 +418,24 @@ func projectEinoAssistantOrgSpendModelFor(
 	if server == nil || server.store == nil {
 		return base
 	}
-	ledger := req.eventLedger
+	// A run without an event ledger (no durable store for this request) still
+	// gets the cap; it just has nowhere to append the notice. Leave the
+	// callback unset rather than relying on the ledger's nil receiver, so the
+	// guard skips the write instead of manufacturing an error to log.
+	var onCapReached func(context.Context, store.OrganizationSpend)
+	if ledger := req.eventLedger; ledger != nil {
+		onCapReached = func(ctx context.Context, spend store.OrganizationSpend) {
+			if err := ledger.RecordSpendCapReached(ctx, spend); err != nil {
+				klog.V(1).Infof("record assistant spend cap event for org %s: %v", spend.OrgUUID, err)
+			}
+		}
+	}
 	guard := newProjectEinoAssistantOrgSpendGuard(
 		server.store,
 		req.Identity.orgUUID,
 		req.LLM.Model,
 		projectAssistantOrgMonthlyUSDCapMicros(),
-		func(ctx context.Context, spend store.OrganizationSpend) {
-			if err := ledger.RecordSpendCapReached(ctx, spend); err != nil {
-				klog.V(1).Infof("record assistant spend cap event for org %s: %v", spend.OrgUUID, err)
-			}
-		},
+		onCapReached,
 	)
 	return projectEinoAssistantOrgSpendModelWithGuard(base, guard)
 }

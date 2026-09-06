@@ -226,7 +226,7 @@ func newProjectAssistantRunEventLedger(
 // admission state, but it leaves an auditable reason next to the run.
 func (l *projectAssistantRunEventLedger) RecordSpendCapReached(ctx context.Context, spend store.OrganizationSpend) error {
 	if l == nil || l.store == nil || strings.TrimSpace(l.runID) == "" {
-		return fmt.Errorf("assistant run tool ledger is not configured")
+		return fmt.Errorf("assistant run event ledger is not configured")
 	}
 	payload, err := projectAssistantRunSpendCapReachedEventPayload(spend, projectAssistantOrgMonthlyUSDCapMicros())
 	if err != nil {

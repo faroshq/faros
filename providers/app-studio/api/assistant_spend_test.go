@@ -288,3 +288,166 @@ func TestProjectAssistantOrgSpendCapFailureShape(t *testing.T) {
 		t.Fatalf("terminal run error = %#v", view)
 	}
 }
+
+// projectAssistantContextAwareSpendStore is a durable store that fails writes
+// once the caller's context is done, the way a SQL driver does. The memory
+// store ignores its context, so only this fixture can show whether spend
+// accounting survives a client that cancels mid-call.
+type projectAssistantContextAwareSpendStore struct {
+	inner *store.MemoryStore
+}
+
+func (s *projectAssistantContextAwareSpendStore) AddOrganizationSpend(
+	ctx context.Context,
+	orgUUID string,
+	at time.Time,
+	delta store.OrganizationSpendDelta,
+	now time.Time,
+) (store.OrganizationSpend, error) {
+	if err := ctx.Err(); err != nil {
+		return store.OrganizationSpend{}, err
+	}
+	return s.inner.AddOrganizationSpend(ctx, orgUUID, at, delta, now)
+}
+
+func (s *projectAssistantContextAwareSpendStore) GetOrganizationSpend(
+	ctx context.Context,
+	orgUUID string,
+	at time.Time,
+) (store.OrganizationSpend, error) {
+	if err := ctx.Err(); err != nil {
+		return store.OrganizationSpend{}, err
+	}
+	return s.inner.GetOrganizationSpend(ctx, orgUUID, at)
+}
+
+// A client that cancels after the provider has billed a response must not be
+// able to keep that response out of the organization ledger. If cancellation
+// dropped the write, the monthly cap would be evadable by cancelling every
+// request at the right moment.
+func TestProjectEinoAssistantOrgSpendRecordsUnderClientCancellation(t *testing.T) {
+	memory := store.NewMemoryStore()
+	spendStore := &projectAssistantContextAwareSpendStore{inner: memory}
+	now := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	guard := newProjectEinoAssistantOrgSpendGuard(spendStore, "org-a", "gpt-4o", 10_000_000, nil)
+	guard.now = func() time.Time { return now }
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := guard.Record(canceled, &schema.TokenUsage{CompletionTokens: 400_000}); err != nil {
+		t.Fatalf("record with a canceled request context = %v, want the billed usage recorded anyway", err)
+	}
+	spend, err := memory.GetOrganizationSpend(context.Background(), "org-a", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spend.USDMicros != 4_000_000 || spend.OutputTokens != 400_000 {
+		t.Fatalf("ledger after a canceled request = %#v, want the billed usage; the cap is evadable by cancelling", spend)
+	}
+
+	// The same must hold on the streaming path, whose recording happens in a
+	// goroutine after the caller has already gone away.
+	streamGuard := newProjectEinoAssistantOrgSpendGuard(spendStore, "org-b", "gpt-4o", 10_000_000, nil)
+	streamGuard.now = func() time.Time { return now }
+	base := &projectAssistantRolloutBudgetTestModel{usages: []*schema.TokenUsage{{CompletionTokens: 300_000}}}
+	model := projectEinoAssistantOrgSpendModelWithGuard(base, streamGuard)
+
+	streamCtx, cancelStream := context.WithCancel(context.Background())
+	reader, err := model.Stream(streamCtx, []*schema.Message{schema.UserMessage("first")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Recv(); err != nil {
+		t.Fatal(err)
+	}
+	cancelStream()
+	for {
+		if _, err := reader.Recv(); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("stream terminal error = %v, want EOF", err)
+		}
+	}
+	reader.Close()
+
+	streamSpend, err := memory.GetOrganizationSpend(context.Background(), "org-b", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if streamSpend.USDMicros != 3_000_000 || streamSpend.OutputTokens != 300_000 {
+		t.Fatalf("stream ledger after cancellation = %#v, want the billed usage", streamSpend)
+	}
+}
+
+// The spend guard is installed for runs that have no event ledger. Reaching
+// the cap on such a run must report through the guard without faulting.
+func TestProjectEinoAssistantOrgSpendModelForToleratesNilEventLedger(t *testing.T) {
+	t.Setenv(projectAssistantOrgMonthlyUSDCapEnv, "0.000001")
+	server := &Server{store: store.NewMemoryStore()}
+	req := projectAssistantRunRequest{
+		Identity: identity{orgUUID: "org-a"},
+		LLM:      projectLLMSettings{Model: "gpt-4o"},
+	}
+	if req.eventLedger != nil {
+		t.Fatal("fixture must exercise a run with no event ledger")
+	}
+	base := &projectAssistantRolloutBudgetTestModel{usages: []*schema.TokenUsage{{CompletionTokens: 1_000}}}
+	model := projectEinoAssistantOrgSpendModelFor(server, req, base)
+	if model == base {
+		t.Fatal("organization-scoped request must wrap the model with the spend guard")
+	}
+
+	ctx := context.Background()
+	// This call crosses the one-micro cap and therefore reports cap-reached.
+	if _, err := model.Generate(ctx, []*schema.Message{schema.UserMessage("first")}); err != nil {
+		t.Fatalf("crossing call = %v, want the billed response returned", err)
+	}
+	// And the next call fails closed rather than calling the provider again.
+	if _, err := model.Generate(ctx, []*schema.Message{schema.UserMessage("second")}); !projectEinoAssistantOrgSpendCapExceeded(err) {
+		t.Fatalf("call after the cap = %v, want org spend cap exceeded", err)
+	}
+	if base.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", base.calls)
+	}
+}
+
+// Caps and usage below one cent must stay legible: an administrator reads the
+// configured cap back out of these strings.
+func TestProjectAssistantFormatUSDMicros(t *testing.T) {
+	tests := []struct {
+		micros int64
+		want   string
+	}{
+		{micros: 0, want: "$0.00"},
+		{micros: 1, want: "$0.000001"},
+		{micros: 2_500, want: "$0.0025"},
+		{micros: 10_000, want: "$0.01"},
+		{micros: 12_500_000, want: "$12.50"},
+		{micros: 100_000_000, want: "$100.00"},
+		{micros: 100_250_000, want: "$100.25"},
+		{micros: 100_000_001, want: "$100.000001"},
+	}
+	for _, tt := range tests {
+		if got := projectAssistantFormatUSDMicros(tt.micros); got != tt.want {
+			t.Errorf("format %d micros = %q, want %q", tt.micros, got, tt.want)
+		}
+	}
+}
+
+// The unconfigured-ledger error is surfaced in logs when a spend cap event
+// cannot be written, so it has to name the ledger that is actually missing.
+func TestProjectAssistantRunEventLedgerSpendCapNotConfiguredError(t *testing.T) {
+	var nilLedger *projectAssistantRunEventLedger
+	err := nilLedger.RecordSpendCapReached(context.Background(), store.OrganizationSpend{OrgUUID: "org-a"})
+	if err == nil {
+		t.Fatal("an unconfigured ledger must report that it cannot record")
+	}
+	if !strings.Contains(err.Error(), "assistant run event ledger is not configured") {
+		t.Fatalf("error = %q, want it to name the run event ledger", err.Error())
+	}
+	if strings.Contains(err.Error(), "tool ledger") {
+		t.Fatalf("error = %q, must not blame the tool ledger for a run event failure", err.Error())
+	}
+}
