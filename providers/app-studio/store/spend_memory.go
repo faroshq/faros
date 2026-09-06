@@ -26,8 +26,8 @@ type organizationSpendKey struct {
 	periodStart time.Time
 }
 
-func (s *MemoryStore) AddOrganizationSpend(_ context.Context, orgUUID string, periodStart time.Time, delta OrganizationSpendDelta, now time.Time) (OrganizationSpend, error) {
-	orgUUID, periodStart, err := normalizeOrganizationSpendRequest(orgUUID, periodStart, delta)
+func (s *MemoryStore) AddOrganizationSpend(_ context.Context, orgUUID string, at time.Time, delta OrganizationSpendDelta, now time.Time) (OrganizationSpend, error) {
+	orgUUID, periodStart, err := normalizeOrganizationSpendRequest(orgUUID, at, delta)
 	if err != nil {
 		return OrganizationSpend{}, err
 	}
@@ -52,8 +52,8 @@ func (s *MemoryStore) AddOrganizationSpend(_ context.Context, orgUUID string, pe
 	return spend, nil
 }
 
-func (s *MemoryStore) GetOrganizationSpend(_ context.Context, orgUUID string, periodStart time.Time) (OrganizationSpend, error) {
-	orgUUID, periodStart, err := normalizeOrganizationSpendRequest(orgUUID, periodStart, OrganizationSpendDelta{})
+func (s *MemoryStore) GetOrganizationSpend(_ context.Context, orgUUID string, at time.Time) (OrganizationSpend, error) {
+	orgUUID, periodStart, err := normalizeOrganizationSpendRequest(orgUUID, at, OrganizationSpendDelta{})
 	if err != nil {
 		return OrganizationSpend{}, err
 	}

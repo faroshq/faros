@@ -99,6 +99,46 @@ func TestMemoryStoreOrganizationSpendAccounting(t *testing.T) {
 	testOrganizationSpendAccounting(t, NewMemoryStore())
 }
 
+// The spend API takes any instant inside the accounting period, not a
+// pre-normalized month boundary: every instant in the same UTC calendar month
+// addresses one bucket, and the boundary is UTC regardless of the caller's
+// zone.
+func TestOrganizationSpendAcceptsAnyInstantInThePeriod(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	monthStart := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	midMonth := time.Date(2026, 9, 17, 13, 45, 12, 0, time.UTC)
+	// 2026-09-01T01:00+03:00 is 2026-08-31T22:00Z, so it belongs to August.
+	previousMonthInLocalZone := time.Date(2026, 9, 1, 1, 0, 0, 0, time.FixedZone("plus-three", 3*60*60))
+
+	if _, err := s.AddOrganizationSpend(ctx, "org-a", monthStart, OrganizationSpendDelta{USDMicros: 100}, monthStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddOrganizationSpend(ctx, "org-a", midMonth, OrganizationSpendDelta{USDMicros: 25}, midMonth); err != nil {
+		t.Fatal(err)
+	}
+	for _, at := range []time.Time{monthStart, midMonth, time.Date(2026, 9, 30, 23, 59, 59, 0, time.UTC)} {
+		got, err := s.GetOrganizationSpend(ctx, "org-a", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.USDMicros != 125 {
+			t.Fatalf("spend read at %s = %d micros, want 125 from the one September bucket", at, got.USDMicros)
+		}
+		if !got.PeriodStart.Equal(monthStart) {
+			t.Fatalf("period start for %s = %s, want %s", at, got.PeriodStart, monthStart)
+		}
+	}
+
+	august, err := s.GetOrganizationSpend(ctx, "org-a", previousMonthInLocalZone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if august.USDMicros != 0 {
+		t.Fatalf("august spend = %d micros, want 0; the month boundary must be UTC", august.USDMicros)
+	}
+}
+
 func TestEncryptedStoreOrganizationSpendPassesThrough(t *testing.T) {
 	inner := NewMemoryStore()
 	wrapped, err := NewEncryptedStore(inner, []EncryptionKey{{ID: "k1", Value: make([]byte, 32)}})

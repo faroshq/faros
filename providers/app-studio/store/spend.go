@@ -44,23 +44,30 @@ type OrganizationSpendDelta struct {
 
 // OrganizationSpendStore accumulates per-organization model spend so the
 // assistant can enforce a monthly USD cap before each model call.
+//
+// Both methods take at, any instant inside the accounting period — typically
+// just time.Now() — not a pre-normalized boundary. The implementation resolves
+// it to the containing UTC calendar month with OrganizationSpendPeriodStart,
+// so every instant in one month addresses one bucket and callers never have to
+// agree on how the boundary is computed. The returned OrganizationSpend
+// carries the resolved PeriodStart.
 type OrganizationSpendStore interface {
-	// AddOrganizationSpend atomically adds delta to the organization's period
-	// bucket and returns the updated totals.
-	AddOrganizationSpend(ctx context.Context, orgUUID string, periodStart time.Time, delta OrganizationSpendDelta, now time.Time) (OrganizationSpend, error)
-	// GetOrganizationSpend returns the organization's period totals. A period
-	// with no recorded usage returns zero totals, not an error.
-	GetOrganizationSpend(ctx context.Context, orgUUID string, periodStart time.Time) (OrganizationSpend, error)
+	// AddOrganizationSpend atomically adds delta to the bucket containing at
+	// and returns the updated totals.
+	AddOrganizationSpend(ctx context.Context, orgUUID string, at time.Time, delta OrganizationSpendDelta, now time.Time) (OrganizationSpend, error)
+	// GetOrganizationSpend returns the totals for the bucket containing at. A
+	// period with no recorded usage returns zero totals, not an error.
+	GetOrganizationSpend(ctx context.Context, orgUUID string, at time.Time) (OrganizationSpend, error)
 }
 
 // Spend totals are numeric counters, never message content, so the encrypting
 // wrapper passes them through unchanged.
-func (e *encryptedStore) AddOrganizationSpend(ctx context.Context, orgUUID string, periodStart time.Time, delta OrganizationSpendDelta, now time.Time) (OrganizationSpend, error) {
-	return e.inner.AddOrganizationSpend(ctx, orgUUID, periodStart, delta, now)
+func (e *encryptedStore) AddOrganizationSpend(ctx context.Context, orgUUID string, at time.Time, delta OrganizationSpendDelta, now time.Time) (OrganizationSpend, error) {
+	return e.inner.AddOrganizationSpend(ctx, orgUUID, at, delta, now)
 }
 
-func (e *encryptedStore) GetOrganizationSpend(ctx context.Context, orgUUID string, periodStart time.Time) (OrganizationSpend, error) {
-	return e.inner.GetOrganizationSpend(ctx, orgUUID, periodStart)
+func (e *encryptedStore) GetOrganizationSpend(ctx context.Context, orgUUID string, at time.Time) (OrganizationSpend, error) {
+	return e.inner.GetOrganizationSpend(ctx, orgUUID, at)
 }
 
 // OrganizationSpendPeriodStart returns the UTC calendar-month bucket that
@@ -70,16 +77,18 @@ func OrganizationSpendPeriodStart(at time.Time) time.Time {
 	return time.Date(at.Year(), at.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
-func normalizeOrganizationSpendRequest(orgUUID string, periodStart time.Time, delta OrganizationSpendDelta) (string, time.Time, error) {
+// normalizeOrganizationSpendRequest validates one spend call and resolves at
+// to its UTC calendar-month bucket.
+func normalizeOrganizationSpendRequest(orgUUID string, at time.Time, delta OrganizationSpendDelta) (string, time.Time, error) {
 	orgUUID = strings.TrimSpace(orgUUID)
 	if orgUUID == "" {
 		return "", time.Time{}, errors.New("organization spend org uuid is required")
 	}
-	if periodStart.IsZero() {
+	if at.IsZero() {
 		return "", time.Time{}, errors.New("organization spend period is required")
 	}
 	if delta.InputTokens < 0 || delta.OutputTokens < 0 || delta.USDMicros < 0 {
 		return "", time.Time{}, errors.New("organization spend delta must not be negative")
 	}
-	return orgUUID, OrganizationSpendPeriodStart(periodStart), nil
+	return orgUUID, OrganizationSpendPeriodStart(at), nil
 }
