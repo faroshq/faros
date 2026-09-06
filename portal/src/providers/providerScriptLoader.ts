@@ -135,11 +135,14 @@ function injectProviderScript(
     script.src = src
     script.async = true
     if (integrity) {
-      // crossorigin is required for the browser to enforce integrity even on
-      // a same-origin script when the response is served with CORS headers;
-      // 'anonymous' sends no credentials the bundle fetch does not need.
+      // No crossorigin attribute: src is always the same-origin path built
+      // above, so the response type is "basic" and the browser enforces
+      // integrity without one. Setting crossorigin would make this a CORS-mode
+      // request, which the hub's UI proxy answers with no CORS headers — it
+      // serves the bundle same-origin and never sets Access-Control-Allow-
+      // Origin (see pkg/hub/providers/proxy.go). Only a cross-origin bundle
+      // would need the attribute, and the portal never loads one.
       script.integrity = integrity
-      script.crossOrigin = 'anonymous'
     } else {
       // eslint-disable-next-line no-console
       console.warn(

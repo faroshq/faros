@@ -221,11 +221,13 @@ test('pins the bundle with subresource integrity when the catalog carries a hash
   assert.equal(doc.appended.length, 1)
   const script = doc.appended[0]
   // SRI hashes the response body, so the ?v= cache-buster in the URL does not
-  // disturb the check; the attribute pair below is what makes the browser
-  // enforce it.
+  // disturb the check.
   assert.equal(script.src, '/ui/providers/quickstart/main.js?v=7')
   assert.equal(script.integrity, integrity)
-  assert.equal(script.crossOrigin, 'anonymous')
+  // No crossorigin: the bundle is same-origin, so the response type is "basic"
+  // and integrity is enforced without the attribute. Setting it would make the
+  // load a CORS-mode request, and the hub's UI proxy sends no CORS headers.
+  assert.equal(script.crossOrigin, undefined)
   script.onload()
   await load
 })
