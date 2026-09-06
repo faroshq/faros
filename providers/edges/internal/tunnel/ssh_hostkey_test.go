@@ -20,9 +20,12 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	gossh "golang.org/x/crypto/ssh"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -97,21 +100,6 @@ func TestNewSSHClientHostKeyVerification(t *testing.T) {
 		wantLearned string
 	}{
 		{
-			name:    "garbage key errors before dialing",
-			hk:      sshHostKeyVerification{Key: "not a key", Policy: edgeapi.SSHHostKeyPolicyTOFU, AllowUnverified: true},
-			wantErr: "parsing SSH host key",
-		},
-		{
-			name:    "empty key with strict policy errors",
-			hk:      sshHostKeyVerification{Policy: edgeapi.SSHHostKeyPolicyStrict},
-			wantErr: "no SSH host key known",
-		},
-		{
-			name:    "empty key with no policy defaults to strict",
-			hk:      sshHostKeyVerification{},
-			wantErr: "no SSH host key known",
-		},
-		{
 			name:        "empty key with tofu succeeds and learns the presented key",
 			hk:          sshHostKeyVerification{Policy: edgeapi.SSHHostKeyPolicyTOFU},
 			wantLearned: serverKey,
@@ -153,6 +141,172 @@ func TestNewSSHClientHostKeyVerification(t *testing.T) {
 				t.Fatalf("learned key = %q, want %q", learned, tc.wantLearned)
 			}
 		})
+	}
+}
+
+// refusedConn is a net.Conn that records any attempt to use it and refuses.
+//
+// Cases that must be refused BEFORE a handshake are asserted against it: a real
+// socket cannot prove that nothing was sent, and net.Pipe is not an option
+// either — the SSH version exchange writes before it reads on both sides, which
+// deadlocks on an unbuffered pipe (see startTestSSHServer). Read/Write also
+// return an error rather than blocking, so a regression fails the assertion
+// instead of hanging the test.
+//
+// SetDeadline and friends deliberately do NOT count as use: newSSHClient arms
+// the handshake deadline on its way into gossh.NewClientConn, which a refused
+// session never reaches.
+type refusedConn struct {
+	mu   sync.Mutex
+	used []string
+}
+
+func (c *refusedConn) mark(op string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.used = append(c.used, op)
+	return fmt.Errorf("refusedConn: unexpected %s", op)
+}
+
+func (c *refusedConn) uses() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.used...)
+}
+
+func (c *refusedConn) Read([]byte) (int, error)         { return 0, c.mark("read") }
+func (c *refusedConn) Write([]byte) (int, error)        { return 0, c.mark("write") }
+func (c *refusedConn) Close() error                     { return nil }
+func (c *refusedConn) LocalAddr() net.Addr              { return refusedAddr{} }
+func (c *refusedConn) RemoteAddr() net.Addr             { return refusedAddr{} }
+func (c *refusedConn) SetDeadline(time.Time) error      { return nil }
+func (c *refusedConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *refusedConn) SetWriteDeadline(time.Time) error { return nil }
+
+type refusedAddr struct{}
+
+func (refusedAddr) Network() string { return "refused" }
+func (refusedAddr) String() string  { return "refused" }
+
+// TestNewSSHClientRefusesBeforeTouchingTheConnection asserts that a host key
+// that cannot be honoured is rejected without a single byte reaching the edge.
+func TestNewSSHClientRefusesBeforeTouchingTheConnection(t *testing.T) {
+	cases := []struct {
+		name    string
+		hk      sshHostKeyVerification
+		wantErr string
+	}{
+		{
+			name:    "garbage key, even with tofu and the escape hatch set",
+			hk:      sshHostKeyVerification{Key: "not a key", Policy: edgeapi.SSHHostKeyPolicyTOFU, AllowUnverified: true},
+			wantErr: "parsing SSH host key",
+		},
+		{
+			name:    "empty key with strict policy",
+			hk:      sshHostKeyVerification{Policy: edgeapi.SSHHostKeyPolicyStrict},
+			wantErr: "no SSH host key known",
+		},
+		{
+			name:    "empty key with no policy defaults to strict",
+			hk:      sshHostKeyVerification{},
+			wantErr: "no SSH host key known",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &refusedConn{}
+			client, learned, err := newSSHClient(context.Background(), conn, nil, tc.hk, klog.Background())
+			if err == nil {
+				client.Close() //nolint:errcheck
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want it to contain %q", err, tc.wantErr)
+			}
+			if learned != "" {
+				t.Fatalf("refused session learned a key: %q", learned)
+			}
+			if used := conn.uses(); len(used) != 0 {
+				t.Fatalf("the connection was used before the refusal: %v", used)
+			}
+		})
+	}
+}
+
+// TestNewSSHClientBoundsTheHandshake covers a peer that accepts the connection
+// and then says nothing: gossh.NewClientConn takes no context, so without a
+// deadline on the connection the handler goroutine would block forever.
+func TestNewSSHClientBoundsTheHandshake(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listening: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() }) //nolint:errcheck
+
+	// Accept and hold the connection open without ever sending a version string.
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		<-time.After(time.Minute)
+		conn.Close() //nolint:errcheck
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dialling the stalled peer: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() }) //nolint:errcheck
+
+	// A short caller deadline stands in for the production default
+	// (sshHandshakeTimeout), which is too long for a test.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		client, _, err := newSSHClient(ctx, conn, nil, sshHostKeyVerification{AllowUnverified: true}, klog.Background())
+		if client != nil {
+			client.Close() //nolint:errcheck
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected the stalled handshake to fail")
+		}
+		if !strings.Contains(err.Error(), "failed to create SSH client connection") {
+			t.Fatalf("error = %q, want the client-connection failure", err)
+		}
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Fatalf("handshake took %s; the deadline was not honoured", elapsed)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("newSSHClient did not return: the SSH handshake is unbounded")
+	}
+}
+
+func TestSSHHostKeyFingerprintDistinguishesUnknownFromUnparseable(t *testing.T) {
+	// "no key recorded" and "a key is recorded but malformed" must not share a
+	// rendering: they call for different operator action.
+	for _, empty := range []string{"", "   ", "\n\t "} {
+		if got := sshHostKeyFingerprint(empty); got != sshHostKeyFingerprintUnknown {
+			t.Fatalf("sshHostKeyFingerprint(%q) = %q, want %q", empty, got, sshHostKeyFingerprintUnknown)
+		}
+	}
+	for _, bad := range []string{"not a key", "ssh-ed25519 !!!!"} {
+		if got := sshHostKeyFingerprint(bad); got != sshHostKeyFingerprintUnparseable {
+			t.Fatalf("sshHostKeyFingerprint(%q) = %q, want %q", bad, got, sshHostKeyFingerprintUnparseable)
+		}
+	}
+	_, key := newTestHostKey(t)
+	if got := sshHostKeyFingerprint(key); !strings.HasPrefix(got, "SHA256:") {
+		t.Fatalf("sshHostKeyFingerprint(valid key) = %q, want a SHA256 fingerprint", got)
 	}
 }
 

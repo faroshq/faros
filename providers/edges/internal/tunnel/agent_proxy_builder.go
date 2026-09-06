@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	gossh "golang.org/x/crypto/ssh"
@@ -70,7 +71,9 @@ func (p *Server) sshExec(ctx context.Context, wsConn *websocket.Conn, sshClient 
 
 	// Run the remote command (blocks until it exits).
 	if err := sshSession.Run(remoteCmd); err != nil {
-		logger.V(4).Info("SSH exec command finished", "cmd", remoteCmd, "err", err)
+		// remoteCmd is caller-controlled; escape and bound it before logging
+		// (see sanitizeAuditValue).
+		logger.V(4).Info("SSH exec command finished", "cmd", sanitizeAuditValue(remoteCmd), "err", err)
 	}
 
 	// Close the write end of the pipe so the forwarder goroutine sees EOF.
@@ -169,6 +172,11 @@ func sshUsername(creds *SSHClientCredentials) string {
 	return "root"
 }
 
+// sshHandshakeTimeout bounds the SSH version + key exchange when the caller's
+// context carries no deadline. The SSH data-plane path is a WebSocket upgrade,
+// whose request context has none.
+const sshHandshakeTimeout = 30 * time.Second
+
 // newSSHClient creates an SSH client through a device connection. If creds is
 // nil or empty, falls back to empty password authentication.
 //
@@ -176,7 +184,10 @@ func sshUsername(creds *SSHClientCredentials) string {
 // and an empty key is an error under the strict policy. Under tofu the key the
 // server presents is accepted and returned as learnedKey (empty otherwise) so
 // the caller can record it in status.sshHostKey and enforce it from then on.
-func newSSHClient(_ context.Context, deviceConn net.Conn, creds *SSHClientCredentials, hk sshHostKeyVerification, logger klog.Logger) (client *gossh.Client, learnedKey string, err error) {
+//
+// ctx bounds the handshake only (see sshHandshakeTimeout); the established
+// session outlives it.
+func newSSHClient(ctx context.Context, deviceConn net.Conn, creds *SSHClientCredentials, hk sshHostKeyVerification, logger klog.Logger) (client *gossh.Client, learnedKey string, err error) {
 	sshUser := sshUsername(creds)
 	var authMethods []gossh.AuthMethod
 
@@ -238,10 +249,24 @@ func newSSHClient(_ context.Context, deviceConn net.Conn, creds *SSHClientCreden
 		HostKeyCallback: hostKeyCallback,
 	}
 
+	// gossh.NewClientConn takes no context and blocks for as long as the peer
+	// keeps the socket open without completing the version exchange or key
+	// exchange — a stalled tunnel would pin this handler goroutine forever.
+	// Bound it on the connection, the same way remoteDialer.Dial bounds its
+	// relay handshake: honour the caller's deadline when it has one, else a
+	// short default; clear it once the connection is up so the session itself
+	// is not time-limited.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = deviceConn.SetDeadline(deadline)
+	} else {
+		_ = deviceConn.SetDeadline(time.Now().Add(sshHandshakeTimeout))
+	}
 	sshConn, chans, reqs, err := gossh.NewClientConn(deviceConn, "agent:22", sshConfig)
 	if err != nil {
+		_ = deviceConn.SetDeadline(time.Time{})
 		return nil, "", fmt.Errorf("failed to create SSH client connection: %w", err)
 	}
+	_ = deviceConn.SetDeadline(time.Time{})
 
 	if presented != nil {
 		learnedKey = strings.TrimSpace(string(gossh.MarshalAuthorizedKey(presented)))
@@ -249,13 +274,25 @@ func newSSHClient(_ context.Context, deviceConn net.Conn, creds *SSHClientCreden
 	return gossh.NewClient(sshConn, chans, reqs), learnedKey, nil
 }
 
+// Fingerprint placeholders for keys that have none. "no key recorded" and
+// "a key is recorded but it is malformed" are very different states in a
+// condition message or an audit line, so they never share a rendering.
+const (
+	sshHostKeyFingerprintUnknown     = "unknown"
+	sshHostKeyFingerprintUnparseable = "unparseable"
+)
+
 // sshHostKeyFingerprint returns the SHA256 fingerprint of an authorized_keys
-// format host key, or "unparseable" when it does not parse. Used in conditions
+// format host key. An empty (or whitespace-only) key yields "unknown"; a
+// non-empty key that does not parse yields "unparseable". Used in conditions
 // and audit lines so raw keys never need to be compared by eye.
 func sshHostKeyFingerprint(key string) string {
+	if strings.TrimSpace(key) == "" {
+		return sshHostKeyFingerprintUnknown
+	}
 	pk, _, _, _, err := gossh.ParseAuthorizedKey([]byte(key))
 	if err != nil {
-		return "unparseable"
+		return sshHostKeyFingerprintUnparseable
 	}
 	return gossh.FingerprintSHA256(pk)
 }
