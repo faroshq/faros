@@ -171,7 +171,8 @@ defaults so providers installed from older charts keep working while they are
 rolled forward; the next release flips each one. The chart leaves all three
 unset by default (nothing is rendered, the binary default applies), and
 `hub.security` lets you move to the hardened posture now instead of waiting
-for the flip. Recommended production values:
+for the flip. Recommended production values, safe with every provider this
+release ships:
 
 ```yaml
 hub:
@@ -185,19 +186,29 @@ hub:
     # are always delegated. `edges` stays excluded unless you replace the
     # list with providerDelegatedTokensExclude.
     providerDelegatedTokens: platform
-    # Bind provider service accounts to the narrow generated faros:provider
-    # ClusterRole instead of cluster-admin in their own workspace (binary
-    # default: true). Opt-in for now: the infrastructure provider defines
-    # and serves its own CRDs from its provider workspace, which the narrow
-    # role does not grant, so leave this unset (or true) while you run it.
+```
+
+The third flag, `providerWorkspaceClusterAdmin`, is deliberately not in that
+snippet. It binds provider service accounts to the narrow generated
+`faros:provider` ClusterRole instead of cluster-admin in their own workspace,
+and the infrastructure provider defines and serves its own CRDs from its
+provider workspace, which the narrow role does not grant. Leave it unset (or
+`true`) while you run the infrastructure provider. Once you have confirmed
+that none of your providers needs cluster-admin in its workspace, flip it
+separately:
+
+```yaml
+hub:
+  security:
+    # Only once your providers are verified: the hub replaces the binding in
+    # place, and setting this back to true restores cluster-admin.
     providerWorkspaceClusterAdmin: false
 ```
 
-Set `providerWorkspaceClusterAdmin` last and watch your providers after the
-upgrade: the hub replaces the binding in place, and flipping it back to `true`
-restores cluster-admin. Flags the chart does not model yet go in
-`hub.extraArgs` (for example `["--providers=edges,infrastructure"]`); the chart
-refuses an entry that repeats a flag it already renders from a value.
+Watch your providers after that upgrade. Flags the chart does not model yet
+go in `hub.extraArgs` (for example `["--providers=edges,infrastructure"]`);
+the chart refuses an entry that repeats a flag it already renders from a
+value.
 
 ---
 

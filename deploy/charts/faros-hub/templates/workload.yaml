@@ -141,9 +141,19 @@ spec:
             {{- range .providerDelegatedTokensExclude }}
             - --provider-delegated-tokens-exclude={{ . }}
             {{- end }}
-            {{- /* Tri-state: null/absent leaves the binary default; a bool renders --flag=<bool> (pflag needs the explicit =value form for false). */}}
+            {{- /*
+            Tri-state: null/absent leaves the binary default; true/false
+            renders --flag=<bool> (pflag needs the explicit =value form for
+            false). Accept the bool and its string spelling so --set-string
+            keeps working, and refuse anything else here rather than letting
+            a typo reach the hub's flag parser.
+            */}}
             {{- if not (kindIs "invalid" .providerWorkspaceClusterAdmin) }}
-            - --provider-workspace-cluster-admin={{ .providerWorkspaceClusterAdmin }}
+            {{- $clusterAdmin := toString .providerWorkspaceClusterAdmin }}
+            {{- if not (has $clusterAdmin (list "true" "false")) }}
+            {{- fail (printf "hub.security.providerWorkspaceClusterAdmin must be true or false, got %q" $clusterAdmin) }}
+            {{- end }}
+            - --provider-workspace-cluster-admin={{ $clusterAdmin }}
             {{- end }}
             {{- end }}
             {{- /*

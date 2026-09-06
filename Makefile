@@ -271,6 +271,9 @@ test-hub-chart: ## Lint and render the faros-hub chart's provider hardening valu
 			--set hub.security.providerWorkspaceClusterAdmin=true >"$$tmp_dir/admin-true.yaml"; \
 		grep -q -- '- --provider-workspace-cluster-admin=true$$' "$$tmp_dir/admin-true.yaml"; \
 		helm template faros "$$chart" --set hub.hubExternalURL="$$url" \
+			--set-string hub.security.providerWorkspaceClusterAdmin=false >"$$tmp_dir/admin-false-string.yaml"; \
+		grep -q -- '- --provider-workspace-cluster-admin=false$$' "$$tmp_dir/admin-false-string.yaml"; \
+		helm template faros "$$chart" --set hub.hubExternalURL="$$url" \
 			--set 'hub.extraArgs={--providers=edges\,infrastructure,--graphql-playground}' >"$$tmp_dir/extra.yaml"; \
 		grep -q -- '- "--providers=edges,infrastructure"$$' "$$tmp_dir/extra.yaml"; \
 		grep -q -- '- "--graphql-playground"$$' "$$tmp_dir/extra.yaml"; \
@@ -280,8 +283,17 @@ test-hub-chart: ## Lint and render the faros-hub chart's provider hardening valu
 		if helm template faros "$$chart" --set hub.hubExternalURL="$$url" --set hub.security.providerDelegatedTokens=some >/dev/null 2>&1; then \
 			echo "invalid providerDelegatedTokens unexpectedly rendered"; exit 1; \
 		fi; \
+		if helm template faros "$$chart" --set hub.hubExternalURL="$$url" --set hub.security.providerWorkspaceClusterAdmin=maybe >/dev/null 2>&1; then \
+			echo "invalid providerWorkspaceClusterAdmin unexpectedly rendered"; exit 1; \
+		fi; \
 		if helm template faros "$$chart" --set hub.hubExternalURL="$$url" --set 'hub.extraArgs={--dev-mode}' >/dev/null 2>&1; then \
 			echo "extraArgs repeating a modelled flag unexpectedly rendered"; exit 1; \
+		fi; \
+		if helm template faros "$$chart" --set hub.hubExternalURL="$$url" --set 'hub.extraArgs={--provider-heartbeat-auth=enforce}' >/dev/null 2>&1; then \
+			echo "extraArgs repeating --provider-heartbeat-auth unexpectedly rendered"; exit 1; \
+		fi; \
+		if helm template faros "$$chart" --set hub.hubExternalURL="$$url" --set 'hub.extraArgs={--provider-delegated-tokens=platform}' >/dev/null 2>&1; then \
+			echo "extraArgs repeating --provider-delegated-tokens unexpectedly rendered"; exit 1; \
 		fi
 
 ## Generate deepcopy methods + CRD YAML for the infrastructure provider's
