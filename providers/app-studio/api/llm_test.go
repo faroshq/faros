@@ -228,6 +228,90 @@ func TestProjectAssistantRolloutBudgetConfiguration(t *testing.T) {
 	}
 }
 
+// The startup log for a disabled run limit must describe the deployment it
+// runs in: name only the bounds still in force, and say plainly that runs are
+// unbounded when the operator has switched every backstop off too.
+func TestProjectAssistantUnlimitedLimitLogNamesOnlyActiveBounds(t *testing.T) {
+	tests := []struct {
+		name        string
+		disabledEnv string
+		env         map[string]string
+		wantNamed   []string
+		wantAbsent  []string
+	}{
+		{
+			name:        "iterations off, budget and cap default",
+			disabledEnv: projectAssistantMaxIterationsEnv,
+			env:         map[string]string{projectAssistantMaxIterationsEnv: "unlimited"},
+			wantNamed:   []string{projectAssistantBoundNameTokens, projectAssistantBoundNameSpendCap},
+			wantAbsent:  []string{projectAssistantBoundNameIterations, "unbounded"},
+		},
+		{
+			name:        "iterations and budget off, cap set",
+			disabledEnv: projectAssistantMaxIterationsEnv,
+			env: map[string]string{
+				projectAssistantMaxIterationsEnv:       "0",
+				projectAssistantRolloutBudgetTokensEnv: "unlimited",
+				projectAssistantOrgMonthlyUSDCapEnv:    "25",
+			},
+			wantNamed:  []string{projectAssistantBoundNameSpendCap},
+			wantAbsent: []string{projectAssistantBoundNameTokens, projectAssistantBoundNameIterations, "unbounded"},
+		},
+		{
+			name:        "iterations off, everything else off",
+			disabledEnv: projectAssistantMaxIterationsEnv,
+			env: map[string]string{
+				projectAssistantMaxIterationsEnv:       "unlimited",
+				projectAssistantRolloutBudgetTokensEnv: "0",
+				projectAssistantOrgMonthlyUSDCapEnv:    "unlimited",
+			},
+			wantNamed:  []string{"unbounded"},
+			wantAbsent: []string{"bounded only by", projectAssistantBoundNameTokens, projectAssistantBoundNameSpendCap},
+		},
+		{
+			name:        "budget off, iterations off, cap set",
+			disabledEnv: projectAssistantRolloutBudgetTokensEnv,
+			env: map[string]string{
+				projectAssistantRolloutBudgetTokensEnv: "0",
+				projectAssistantMaxIterationsEnv:       "unlimited",
+				projectAssistantOrgMonthlyUSDCapEnv:    "$10",
+			},
+			wantNamed:  []string{projectAssistantBoundNameSpendCap},
+			wantAbsent: []string{projectAssistantBoundNameIterations, projectAssistantBoundNameTokens, "unbounded"},
+		},
+		{
+			name:        "budget off, everything else off",
+			disabledEnv: projectAssistantRolloutBudgetTokensEnv,
+			env: map[string]string{
+				projectAssistantRolloutBudgetTokensEnv: "unlimited",
+				projectAssistantMaxIterationsEnv:       "0",
+				projectAssistantOrgMonthlyUSDCapEnv:    "0",
+			},
+			wantNamed:  []string{"unbounded"},
+			wantAbsent: []string{"bounded only by", projectAssistantBoundNameIterations, projectAssistantBoundNameSpendCap},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			getenv := func(key string) string { return tt.env[key] }
+			got := projectAssistantUnlimitedLimitMessage(tt.disabledEnv, "limit", getenv)
+			if !strings.HasPrefix(got, tt.disabledEnv+" disables the limit") {
+				t.Fatalf("message %q does not name the disabled knob first", got)
+			}
+			for _, want := range tt.wantNamed {
+				if !strings.Contains(got, want) {
+					t.Errorf("message %q should name %q", got, want)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(got, absent) {
+					t.Errorf("message %q must not mention %q", got, absent)
+				}
+			}
+		})
+	}
+}
+
 func TestNewProjectEinoAssistantModelFactoryUsesNativeOpenAIModel(t *testing.T) {
 	factory := newProjectEinoAssistantModelFactory(&Server{})
 	model, err := factory(context.Background(), projectAssistantRunRequest{

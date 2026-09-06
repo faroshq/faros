@@ -87,10 +87,49 @@ func projectAssistantDeepIterations() int {
 	iterations := projectAssistantDeepIterationsForValue(os.Getenv(projectAssistantMaxIterationsEnv))
 	if iterations == projectAssistantUnlimitedIterations {
 		projectAssistantMaxIterationsUnlimitedLogOnce.Do(func() {
-			klog.V(0).Infof("%s disables the assistant model-call ceiling; runs are bounded only by the token budget and the organization spend cap", projectAssistantMaxIterationsEnv)
+			klog.V(0).Info(projectAssistantUnlimitedLimitMessage(projectAssistantMaxIterationsEnv, "assistant model-call ceiling", os.Getenv))
 		})
 	}
 	return iterations
+}
+
+// Human names for the three assistant run limits, used when one is disabled
+// to say which of the others still hold.
+const (
+	projectAssistantBoundNameIterations = "model-call ceiling"
+	projectAssistantBoundNameTokens     = "per-run token budget"
+	projectAssistantBoundNameSpendCap   = "organization spend cap"
+)
+
+// projectAssistantUnlimitedLimitMessage is the startup log for a run limit an
+// operator disabled with "0" or "unlimited". Each of the three limits can be
+// switched off independently, so the message cannot promise the other two as
+// backstops: it reads them from the same configuration via getenv and names
+// only those still in force, or says plainly that runs are unbounded when
+// none is. That keeps the log true for an intentionally unbounded deployment,
+// which is exactly the one an operator most needs to recognise from its logs.
+func projectAssistantUnlimitedLimitMessage(disabledEnv, disabledWhat string, getenv func(string) string) string {
+	var active []string
+	if disabledEnv != projectAssistantMaxIterationsEnv &&
+		projectAssistantDeepIterationsForValue(getenv(projectAssistantMaxIterationsEnv)) != projectAssistantUnlimitedIterations {
+		active = append(active, projectAssistantBoundNameIterations)
+	}
+	if disabledEnv != projectAssistantRolloutBudgetTokensEnv &&
+		projectAssistantRolloutBudgetTokensForValue(getenv(projectAssistantRolloutBudgetTokensEnv)) != projectAssistantUnlimitedRolloutBudgetTokens {
+		active = append(active, projectAssistantBoundNameTokens)
+	}
+	if disabledEnv != projectAssistantOrgMonthlyUSDCapEnv &&
+		projectAssistantOrgMonthlyUSDCapMicrosForValue(getenv(projectAssistantOrgMonthlyUSDCapEnv)) != projectAssistantUnlimitedOrgMonthlyUSDCap {
+		active = append(active, projectAssistantBoundNameSpendCap)
+	}
+	switch len(active) {
+	case 0:
+		return fmt.Sprintf("%s disables the %s; every other assistant run limit is disabled too, so runs are unbounded", disabledEnv, disabledWhat)
+	case 1:
+		return fmt.Sprintf("%s disables the %s; runs are bounded only by the %s", disabledEnv, disabledWhat, active[0])
+	default:
+		return fmt.Sprintf("%s disables the %s; runs are bounded only by the %s and the %s", disabledEnv, disabledWhat, strings.Join(active[:len(active)-1], ", the "), active[len(active)-1])
+	}
 }
 
 // projectAssistantDeepIterationsForValue maps the configured value to the
@@ -116,7 +155,7 @@ func projectAssistantRolloutBudgetTokens() int64 {
 	tokens := projectAssistantRolloutBudgetTokensForValue(os.Getenv(projectAssistantRolloutBudgetTokensEnv))
 	if tokens == projectAssistantUnlimitedRolloutBudgetTokens {
 		projectAssistantRolloutBudgetUnlimitedLogOnce.Do(func() {
-			klog.V(0).Infof("%s disables the assistant per-run token budget; runs are bounded only by the model-call ceiling and the organization spend cap", projectAssistantRolloutBudgetTokensEnv)
+			klog.V(0).Info(projectAssistantUnlimitedLimitMessage(projectAssistantRolloutBudgetTokensEnv, "assistant per-run token budget", os.Getenv))
 		})
 	}
 	return tokens
