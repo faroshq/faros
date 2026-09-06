@@ -250,15 +250,34 @@ func handleSvcUpgrade(w http.ResponseWriter, r *http.Request, target *url.URL, s
 		return
 	}
 
-	// Read the response head off the backend, restamp the policy header and
-	// hand the head to the client; br keeps any bytes read past the head.
+	// Read the response head off the backend and restamp the policy header;
+	// br keeps any bytes read past the head. A backend that hangs up or sends
+	// garbage before a complete head gets a 502 relayed to the caller (the
+	// connection is hijacked, so nothing else would answer) and both sides
+	// are closed by the deferred Close calls above.
 	br := bufio.NewReader(backendConn)
 	resp, err := http.ReadResponse(br, r)
 	if err != nil {
 		logger.Error(err, "failed to read upgrade response from svc target", "target", target.String())
+		_, _ = io.WriteString(clientConn, "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
 		return
 	}
+	defer resp.Body.Close() //nolint:errcheck
 	stampSvcPolicy(resp.Header, warned)
+
+	// Anything but a 101 means the backend declined the upgrade: the reply is
+	// an ordinary HTTP response, not the start of a raw stream. Relay it whole
+	// (resp.Write frames the body from resp.ContentLength/TransferEncoding),
+	// mark it Connection: close and return; the deferred Close calls end both
+	// sides. Piping raw bytes here instead would leave both copy goroutines
+	// blocked on a keep-alive backend, leaking the hijacked client connection.
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		resp.Close = true
+		if err := resp.Write(clientConn); err != nil {
+			logger.Error(err, "failed to forward refused upgrade response to caller")
+		}
+		return
+	}
 	if err := writeResponseHead(clientConn, resp); err != nil {
 		logger.Error(err, "failed to forward upgrade response to caller")
 		return
