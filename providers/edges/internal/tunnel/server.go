@@ -228,10 +228,10 @@ func New(cfg Config) (*Server, error) {
 		kinds[k.GVR.Resource] = k
 	}
 	if len(cfg.StaticTokens) > 0 && !cfg.AllowStaticTokenBypass {
-		return nil, fmt.Errorf("tunnel: StaticTokens are test-only and require AllowStaticTokenBypass")
+		return nil, fmt.Errorf("tunnel: the StaticTokens field is test-only and requires AllowStaticTokenBypass")
 	}
 	if cfg.AllowStaticTokenBypass && cfg.KCPConfig != nil {
-		return nil, fmt.Errorf("tunnel: AllowStaticTokenBypass is only valid without a KCPConfig (kcp validates every token)")
+		return nil, fmt.Errorf("tunnel: the AllowStaticTokenBypass field is only valid without a KCPConfig (kcp validates every token)")
 	}
 	tokenSet := make(map[string]struct{}, len(cfg.StaticTokens))
 	if cfg.AllowStaticTokenBypass {

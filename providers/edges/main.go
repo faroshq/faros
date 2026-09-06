@@ -123,11 +123,12 @@ func runServe() error {
 	// run with a different security posture than the operator assumed.
 	if v := os.Getenv("FAROS_STATIC_TOKENS"); v != "" {
 		if kcpConfig != nil {
-			err := errors.New("FAROS_STATIC_TOKENS is set but the static-token authorization bypass has been removed; every token is validated by kcp — unset the variable")
+			err := errors.New("FAROS_STATIC_TOKENS is set but the static-token authorization bypass has been removed; every token is validated by kcp, so unset the variable")
 			log.Error(err, "refusing to start")
 			return err
 		}
-		log.Info("WARNING: FAROS_STATIC_TOKENS is set but ignored: the static-token authorization bypass has been removed")
+		log.Info("static-token authorization bypass has been removed; the environment variable is ignored",
+			"envVar", "FAROS_STATIC_TOKENS", "ignored", true, "severity", "warning")
 	}
 
 	// Tunnel plane. The provider owns the ConnManager and terminates agent
