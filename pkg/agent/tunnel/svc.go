@@ -289,10 +289,12 @@ func handleSvcUpgrade(w http.ResponseWriter, r *http.Request, target *url.URL, s
 	<-errc
 }
 
-// writeResponseHead writes resp's status line and headers, byte-faithful to
-// what the upstream sent apart from the header edits made on resp.Header. The
-// body (if the upgrade was refused with one) is not consumed here; the caller
-// pipes the remaining bytes as-is.
+// writeResponseHead writes resp's status line and headers for a 101 the
+// upstream sent, with the header edits made on resp.Header applied. It is not
+// a byte-for-byte replay: http.Header.Write canonicalises key names and emits
+// headers in sorted order, which is fine for WebSocket negotiation (peers match
+// on names case-insensitively and do not depend on order). No body is written;
+// the caller pipes the bytes after the head as-is.
 func writeResponseHead(w io.Writer, resp *http.Response) error {
 	if _, err := fmt.Fprintf(w, "HTTP/%d.%d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.Status); err != nil {
 		return err
