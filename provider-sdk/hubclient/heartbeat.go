@@ -92,6 +92,12 @@ type HeartbeatConfig struct {
 // A token-resolution failure is returned together with a usable config whose
 // Token is empty, so a caller can log the error and still run the heartbeat
 // unauthenticated rather than not at all.
+//
+// An empty FAROS_HUB_URL disables the heartbeat, so the token is not resolved
+// at all in that case: reading the provider kubeconfig for a beat that will
+// never be sent is wasted work, and its failure logs a misleading token error
+// in tests and local runs. The returned config is still usable — RunHeartbeat
+// takes its disabled path on the empty HubURL.
 func ConfigFromEnv(defaultName, version string) (HeartbeatConfig, error) {
 	cfg := HeartbeatConfig{
 		HubURL:       strings.TrimRight(strings.TrimSpace(os.Getenv(EnvHubURL)), "/"),
@@ -104,6 +110,9 @@ func ConfigFromEnv(defaultName, version string) (HeartbeatConfig, error) {
 	}
 	if cfg.Version == "" {
 		cfg.Version = version
+	}
+	if cfg.HubURL == "" {
+		return cfg, nil
 	}
 	token, err := ResolveHubToken()
 	cfg.Token = token

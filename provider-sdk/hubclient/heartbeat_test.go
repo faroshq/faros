@@ -274,3 +274,75 @@ func TestConfigFromEnv(t *testing.T) {
 		t.Fatalf("config on token error = %+v, want hub URL kept and empty token", cfg)
 	}
 }
+
+// A provider with no FAROS_HUB_URL has its heartbeat disabled, so
+// ConfigFromEnv must not touch the provider kubeconfig at all: every call site
+// logs ConfigFromEnv's error before RunHeartbeat ever reaches its disabled
+// path, so resolving a token here means a pointless read and a misleading
+// token error in tests and local runs.
+func TestConfigFromEnvSkipsTokenResolutionWhenHeartbeatDisabled(t *testing.T) {
+	t.Setenv(EnvHubURL, "  ") // trims to empty: heartbeat disabled
+	t.Setenv(EnvProviderName, "")
+	t.Setenv(EnvProviderVersion, "")
+	t.Setenv(EnvHubInsecure, "")
+	t.Setenv(EnvHubToken, "")
+	// A directory, so any attempt to read it as a kubeconfig fails loudly.
+	t.Setenv(EnvProviderKubeconfig, t.TempDir())
+
+	cfg, err := ConfigFromEnv("edges", "0.1.0")
+	if err != nil {
+		t.Fatalf("ConfigFromEnv read the kubeconfig for a disabled heartbeat: %v", err)
+	}
+	if cfg.HubURL != "" || cfg.Token != "" {
+		t.Fatalf("ConfigFromEnv = %+v, want an empty hub URL and no token", cfg)
+	}
+	// The config stays usable: RunHeartbeat takes its disabled path on it.
+	rec := &recordingLogger{}
+	cfg.Logger = rec.logger()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunHeartbeat(context.Background(), cfg)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunHeartbeat should return immediately on the disabled config")
+	}
+	if !strings.Contains(rec.joined(), "heartbeat disabled") {
+		t.Fatalf("expected a disabled log line, got:\n%s", rec.joined())
+	}
+}
+
+// A FAROS_HUB_URL ending in "/" used to concatenate into a double slash in
+// seven of the eight per-provider copies. Gorilla mux cleaned the path and
+// 301'd, Go's client turned the redirected POST into a GET, and the hub
+// answered 405 — a silent heartbeat failure that made the provider go stale.
+// End-to-end from the env var to the request line so it cannot come back.
+func TestConfigFromEnvTrailingSlashPostsCleanPath(t *testing.T) {
+	srv, got := heartbeatSink(t, http.StatusOK)
+	t.Setenv(EnvHubURL, srv.URL+"/")
+	t.Setenv(EnvProviderName, "quickstart")
+	t.Setenv(EnvProviderVersion, "")
+	t.Setenv(EnvHubInsecure, "")
+	t.Setenv(EnvHubToken, "sa-token")
+	t.Setenv(EnvProviderKubeconfig, "")
+
+	cfg, err := ConfigFromEnv("quickstart", "0.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HubURL != srv.URL {
+		t.Fatalf("HubURL = %q, want the trailing slash trimmed to %q", cfg.HubURL, srv.URL)
+	}
+	cfg.Interval = time.Hour // only the immediate beat
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go RunHeartbeat(ctx, cfg)
+
+	beats := waitForBeats(t, got, 1)
+	if beats[0].path != "/api/providers/quickstart/heartbeat" {
+		t.Fatalf("path = %q, want no double slash", beats[0].path)
+	}
+}
