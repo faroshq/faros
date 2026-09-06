@@ -25,9 +25,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	authv1 "k8s.io/api/authentication/v1"
@@ -202,9 +205,12 @@ func (p *Server) edgesSSHHandler(ctx context.Context, w http.ResponseWriter, r *
 	if caller == "" {
 		caller = "unknown"
 	}
+	// remoteCmd is a raw query parameter. It is escaped and bounded before it
+	// reaches the audit line so it cannot forge extra records or dump an
+	// unbounded argument list into the log.
 	audit := logger.WithValues(
 		"cluster", cluster, "edge", edgeName, "caller", caller,
-		"mode", mode, "exec", remoteCmd, "remoteAddr", clientAddr(r))
+		"mode", mode, "exec", sanitizeAuditValue(remoteCmd), "remoteAddr", clientAddr(r))
 	if callerErr != nil {
 		audit = audit.WithValues("callerError", callerErr.Error())
 	}
@@ -319,17 +325,85 @@ func (p *Server) edgesSSHHandler(ctx context.Context, w http.ResponseWriter, r *
 	}
 }
 
-// clientAddr returns the caller's address for audit lines: the first
-// X-Forwarded-For hop when the request came through the hub backend proxy
-// (r.RemoteAddr is then the hub), else r.RemoteAddr.
+// unknownAddr is recorded when no address can be trusted or the candidate is
+// not an IP. Better a placeholder than junk echoed into the audit trail.
+const unknownAddr = "unknown"
+
+// clientAddr returns the caller's address for audit lines.
+//
+// Exactly one trusted proxy fronts this handler (the hub backend proxy), and a
+// forwarding proxy APPENDS the peer it saw to X-Forwarded-For. So the LAST hop
+// is the address that proxy observed, and every entry to its left is whatever
+// the client chose to send — an attacker can prepend anything. Taking the last
+// hop is what makes the audit line worth writing. If several trusted proxies
+// were ever chained in front of this handler, the rule would become "count back
+// from the right by the number of trusted hops" — the leading entries stay
+// untrustworthy either way.
+//
+// With no XFF header the immediate peer (r.RemoteAddr) is the client; its port
+// is stripped since only the host identifies the caller. The result is always a
+// parsed IP or unknownAddr.
 func clientAddr(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, ok := strings.Cut(xff, ","); ok {
-			return strings.TrimSpace(first)
-		}
-		return strings.TrimSpace(xff)
+	if xff := r.Header.Get("X-Forwarded-For"); strings.TrimSpace(xff) != "" {
+		hops := strings.Split(xff, ",")
+		return auditIP(hops[len(hops)-1])
 	}
-	return r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return auditIP(host)
+	}
+	return auditIP(r.RemoteAddr)
+}
+
+// auditIP validates that s is an IP address and returns its canonical form, or
+// unknownAddr. Bracketed IPv6 ("[::1]") is accepted.
+func auditIP(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		s = s[1 : len(s)-1]
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return unknownAddr
+	}
+	return addr.String()
+}
+
+// maxAuditValueLen bounds a caller-controlled value in an audit line, in runes.
+const maxAuditValueLen = 256
+
+// auditTruncationMarker is appended when sanitizeAuditValue cuts a value short,
+// so a reader never mistakes a truncated command for the whole one.
+const auditTruncationMarker = "...[truncated]"
+
+// sanitizeAuditValue makes a caller-controlled string safe to place in an audit
+// line. Newlines and other control characters would otherwise let a caller
+// forge additional audit records, and an unbounded value can carry a lot of
+// (possibly sensitive) argument text into the log.
+//
+// Non-printable runes are escaped rather than dropped: this is an audit record,
+// so it must stay a faithful, reversible rendering of what was requested.
+func sanitizeAuditValue(s string) string {
+	var b strings.Builder
+	runes := 0
+	for _, r := range s {
+		if runes >= maxAuditValueLen {
+			b.WriteString(auditTruncationMarker)
+			break
+		}
+		runes++
+		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == utf8.RuneError:
+			// Invalid UTF-8 in the input; range yields RuneError per bad byte.
+			b.WriteString(`�`)
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		}
+	}
+	return b.String()
 }
 
 func firstNonEmpty(values ...string) string {
