@@ -26,7 +26,7 @@ spec:
       crd: {}
   - group: code.faros.sh
     name: repositories
-    schema: v260609-fc69fa2.repositories.code.faros.sh
+    schema: v260906-3f0bac67.repositories.code.faros.sh
     storage:
       crd: {}
   - group: code.faros.sh

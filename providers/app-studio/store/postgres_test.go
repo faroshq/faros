@@ -15,6 +15,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -432,8 +433,17 @@ func TestPostgresStorePointLookupsExternalDSN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].CallID != "call-project-a" || string(events[0].Payload) != `{"scope":"project-a"}` {
+	if len(events) != 1 || events[0].CallID != "call-project-a" {
 		t.Fatalf("postgres scoped run event lookup = %#v", events)
+	}
+	// PostgreSQL jsonb normalizes insignificant whitespace on round-trip.
+	// Compare the complete compact payload while retaining the scope assertion.
+	var payload bytes.Buffer
+	if err := json.Compact(&payload, events[0].Payload); err != nil {
+		t.Fatalf("invalid event JSON: %v", err)
+	}
+	if payload.String() != `{"scope":"project-a"}` {
+		t.Fatalf("postgres scoped event payload = %s", payload.String())
 	}
 }
 

@@ -8,12 +8,14 @@
 
 import type { Edge, EdgeDetail, EdgeType, ErrorResponse } from './types'
 import { providerFetch, type ProviderFetch } from './portalkit/tenant'
+import { serviceEdgeLabel, serviceEdgeLabelValue } from './serviceLabels'
 
 // Kubernetes list options are deliberately small: GraphQL treats continue
 // values as opaque strings and the portal only needs bounded cursor pages.
 export interface KubernetesListOptions {
   limit?: number
   continue?: string
+  labelSelector?: string
 }
 
 // A page keeps the Kubernetes list metadata intact. Callers that need the
@@ -44,6 +46,9 @@ function validateListOptions(options: KubernetesListOptions, kind: string): Kube
   }
   if (options.continue !== undefined && typeof options.continue !== 'string') {
     throw protocolError(`${kind} list continue had an invalid shape`)
+  }
+  if (options.labelSelector !== undefined && typeof options.labelSelector !== 'string') {
+    throw protocolError(`${kind} list label selector had an invalid shape`)
   }
   return options
 }
@@ -605,10 +610,11 @@ async function listServicesPageRaw(
   const variables: Record<string, unknown> = {}
   if (request.limit !== undefined) variables.limit = request.limit
   if (request.continue !== undefined) variables.continue = request.continue
+  if (request.labelSelector !== undefined) variables.labelSelector = request.labelSelector
   const data = await graphql<unknown>(
-    `query ListServicesPage($limit: Int, $continue: String) {
+    `query ListServicesPage($limit: Int, $continue: String, $labelSelector: String) {
        edges_faros_sh { v1alpha1 {
-         Services(limit: $limit, continue: $continue) {
+         Services(limit: $limit, continue: $continue, labelselector: $labelSelector) {
            items { ${EDGE_SVC_SEL} }
            continue remainingItemCount resourceVersion
          }
@@ -650,8 +656,8 @@ export async function getService(name: string): Promise<EdgeService> {
 async function listAllPages<T>(
   kind: 'Services' | 'Workloads',
   fetchPage: (options: KubernetesListOptions, context: RequestContext) => Promise<RawListPage<T>>,
+  context: RequestContext = requestContext(),
 ): Promise<T[]> {
-  const context = requestContext()
   const items: T[] = []
   const seenContinueTokens = new Set<string>()
   let continueToken: string | undefined
@@ -686,7 +692,14 @@ export async function listServices(): Promise<EdgeService[]> {
 
 // listEdgeServices returns the Services for one edge (by spec.edgeRef.name).
 export async function listEdgeServices(edgeName: string): Promise<EdgeService[]> {
-  return (await listServices()).filter((es) => es.edgeName === edgeName)
+  const context = requestContext()
+  const labelSelector = `${serviceEdgeLabel}=${await serviceEdgeLabelValue(edgeName)}`
+  assertCurrentContext(context)
+  const items = await listAllPages('Services', (options, current) =>
+    listServicesPageRaw({ ...options, labelSelector }, current), context)
+  // Defend against a stale/mislabelled relation while the controller repairs it.
+  return items.map(toEdgeService).filter(es => es.edgeName === edgeName)
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 // updateEdgeServiceInstructions merge-patches spec.instructions — the free-form
@@ -747,6 +760,9 @@ export async function updateEdgeService(name: string, e: EdgeServiceEdit): Promi
 // object carries the edge label so it lists alongside discovered ones, but NOT
 // the discovered label — the discovery reconciler must never prune it.
 export async function createKubeEdgeService(d: EdgeServiceDraft): Promise<void> {
+  const context = requestContext()
+  const edgeLabel = await serviceEdgeLabelValue(d.edgeName)
+  assertCurrentContext(context)
   // Targeting is independent of edge kind: spec.host dials an address directly
   // (agent loopback, or a LAN device like a UniFi console); spec.targetRef reaches
   // a named Kubernetes Service by cluster DNS. host wins if both are set.
@@ -765,7 +781,7 @@ export async function createKubeEdgeService(d: EdgeServiceDraft): Promise<void> 
   const object: Record<string, unknown> = {
     metadata: {
       name: d.name,
-      labels: { 'edges.faros.sh/edge': d.edgeName },
+      labels: { [serviceEdgeLabel]: edgeLabel },
     },
     spec,
   }
@@ -774,6 +790,7 @@ export async function createKubeEdgeService(d: EdgeServiceDraft): Promise<void> 
        edges_faros_sh { v1alpha1 { createService(object: $object) { metadata { name } } } }
      }`,
     { object },
+    context,
   )
 }
 

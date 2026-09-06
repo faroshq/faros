@@ -67,44 +67,92 @@ type resumeIntent struct {
 	Approve   bool
 	Note      string
 	FromPhase store.RunPhase
+	// Recovery already acquired this owner/epoch atomically in the sweep. The
+	// resume path verifies the fence rather than attempting a second claim.
+	ExecutionOwner string
+	ExecutionEpoch int64
 }
 
 // resumeRun rehydrates a checkpointed run and continues its loop. Shared by the
 // approval path and the recovery sweep.
 func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID string, rd resumeDeps, intent resumeIntent) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), time.Hour)
-	defer cancel()
+	s.resumeRunWithReady(parent, agentScope, runID, rd, intent, nil)
+}
+
+// resumeRunWithReady is the recovery launch seam. A non-nil ready channel gets
+// exactly one result after durable ownership and checkpoint preflight succeed,
+// before the long-running model/tool work begins. This lets an asynchronous
+// recovery caller report launch failure instead of counting a goroutine whose
+// initial GetRun, checkpoint decode, or fence validation failed.
+func (s *Server) resumeRunWithReady(parent context.Context, agentScope store.Scope, runID string, rd resumeDeps, intent resumeIntent, ready chan<- error) {
+	ctx, preflightCancel := context.WithTimeout(parent, time.Hour)
+	defer preflightCancel()
+	signalReady := func(err error) {
+		if ready != nil {
+			ready <- err
+			ready = nil
+		}
+	}
 
 	run, err := s.store.GetRun(ctx, agentScope, runID)
 	if err != nil {
 		log.Printf("resume: run %s: %v", runID, err)
+		signalReady(err)
 		return
 	}
 	if run.Phase != intent.FromPhase || len(run.Checkpoint) == 0 {
-		log.Printf("resume: run %s is %s (not resumable)", run.ID, run.Phase)
+		err := fmt.Errorf("run %s is %s (not resumable)", run.ID, run.Phase)
+		log.Printf("resume: %v", err)
+		signalReady(err)
 		return
 	}
 	approve, note := intent.Approve, intent.Note
 	var ck runCheckpoint
 	if err := json.Unmarshal(run.Checkpoint, &ck); err != nil {
 		log.Printf("resume: run %s checkpoint corrupt: %v", run.ID, err)
+		signalReady(err)
 		return
 	}
-	// Claim so only one resolver resumes (double /approve, portal + channel).
-	if _, err := s.store.ClaimRun(ctx, agentScope, run.ID, uuid.NewString(), time.Now().UTC()); err != nil {
-		log.Printf("resume: run %s: %v", run.ID, err)
-		return
+	if intent.Approval {
+		// Claim so only one resolver resumes (double /approve, portal + channel).
+		claimed, err := s.store.ClaimRun(ctx, agentScope, run.ID, uuid.NewString(), time.Now().UTC())
+		if err != nil {
+			log.Printf("resume: run %s: %v", run.ID, err)
+			signalReady(err)
+			return
+		}
+		run = claimed
+	} else {
+		if intent.ExecutionOwner == "" || intent.ExecutionEpoch <= 0 ||
+			run.ExecutionOwner != intent.ExecutionOwner || run.ExecutionEpoch != intent.ExecutionEpoch {
+			err := fmt.Errorf("run %s recovery fence no longer owns the run", run.ID)
+			log.Printf("resume: %v", err)
+			signalReady(err)
+			return
+		}
 	}
+	// The stale claim (or approval claim) and checkpoint preflight have now
+	// succeeded. The caller may count this as accepted while this goroutine
+	// continues through model setup and the bounded execution loop.
+	signalReady(nil)
+	// Recovery is intentionally detached once ownership has been accepted. The
+	// caller may cancel the short launch context without cancelling the execution
+	// that now owns the durable lease.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), time.Hour)
+	defer cancel()
 	s.publishRunEvent(agentScope, runEvent{ID: run.ID, Agent: run.AgentName, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseRunning})
+	leaseRun := taskRun{RunID: run.ID, Scope: agentScope, ExecutionOwner: run.ExecutionOwner, ExecutionEpoch: run.ExecutionEpoch}
+	stopLease := s.startRunLease(ctx, leaseRun, cancel)
+	defer stopLease()
 
 	agent, err := rd.CR.GetAgent(ctx, run.AgentName)
 	if err != nil {
-		s.failResume(ctx, agentScope, run, fmt.Errorf("loading agent: %w", err))
+		s.failResume(ctx, agentScope, run, run.ExecutionOwner, run.ExecutionEpoch, fmt.Errorf("loading agent: %w", err))
 		return
 	}
 	model, err := s.buildChatModelCtx(ctx, rd.Creds, agent)
 	if err != nil {
-		s.failResume(ctx, agentScope, run, err)
+		s.failResume(ctx, agentScope, run, run.ExecutionOwner, run.ExecutionEpoch, err)
 		return
 	}
 
@@ -112,6 +160,7 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 	tr := taskRun{
 		Creds: rd.Creds, CR: rd.CR, Scope: agentScope, Agent: agent,
 		RunID: run.ID, SessionID: run.SessionID, Trigger: run.Trigger,
+		ExecutionOwner: run.ExecutionOwner, ExecutionEpoch: run.ExecutionEpoch,
 		SourceName: ck.SourceName, NotifyChannel: ck.NotifyChannel,
 		EdgesEndpoint: rd.EdgesEndpoint, HubToken: rd.HubToken, EdgesInsecure: rd.EdgesInsecure,
 		ClusterID: rd.ClusterID,
@@ -145,9 +194,14 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 		ContextBudgetTokens: turnContextBudget(modelName),
 		CheckpointEvery:     checkpointEveryIterations,
 	}, approve, note, cb)
+	// Preserve the cancellation contract even when an engine returns a late
+	// successful response after its context was canceled.
+	if err == nil {
+		err = ctx.Err()
+	}
 	end := time.Now().UTC()
 	if err != nil {
-		s.failResume(ctx, agentScope, run, err)
+		s.failResume(ctx, agentScope, run, run.ExecutionOwner, run.ExecutionEpoch, err)
 		return
 	}
 	// res.Usage is the run's cumulative total (the engine resumes from the
@@ -167,25 +221,37 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 			InboxID: res.Interrupt.RequestID, SourceName: ck.SourceName, NotifyChannel: ck.NotifyChannel,
 		}
 		ckJSON, _ := json.Marshal(next)
-		if stored, gerr := s.store.GetRun(ctx, agentScope, run.ID); gerr == nil {
-			stored.Phase = store.RunPhasePendingApproval
-			stored.Checkpoint = ckJSON
-			stored.UpdatedAt = end
-			_ = s.store.SaveRun(ctx, agentScope, stored)
+		stored, gerr := s.store.GetRun(ctx, agentScope, run.ID)
+		if gerr != nil {
+			log.Printf("resume: loading run %s for approval checkpoint: %v", run.ID, gerr)
+			return
+		}
+		stored.Phase = store.RunPhasePendingApproval
+		stored.Checkpoint = ckJSON
+		stored.UpdatedAt = end
+		if err := s.store.SaveRunOwned(ctx, agentScope, stored, run.ExecutionOwner, run.ExecutionEpoch); err != nil {
+			log.Printf("resume: saving approval checkpoint for run %s: %v", run.ID, err)
+			return
 		}
 		s.publishRunEvent(agentScope, runEvent{ID: run.ID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhasePendingApproval})
 		return
 	}
 
+	body, sources := splitSources(res.Content)
+	if !s.finishRunOwned(ctx, agentScope, run.ID, run.ExecutionOwner, run.ExecutionEpoch, runOutcome{
+		Phase: store.RunPhaseSucceeded, Usage: res.Usage, CostMicros: costMicros,
+		Output: body, Sources: sources,
+	}, end) {
+		// A previous owner may finish after recovery acquired a new epoch. Do not
+		// append its answer, publish success, or deliver it to a channel when the
+		// fenced terminal write did not commit.
+		log.Printf("resume: run %s terminal outcome was not committed", run.ID)
+		return
+	}
 	_ = s.store.AppendMessage(ctx, agentScope, store.Message{
 		ID: uuid.NewString(), AgentName: agent.Name, SessionID: run.SessionID, RunID: run.ID,
 		Role: "assistant", Content: res.Content, CreatedAt: end,
 	})
-	body, sources := splitSources(res.Content)
-	s.finishRun(ctx, agentScope, run.ID, runOutcome{
-		Phase: store.RunPhaseSucceeded, Usage: res.Usage, CostMicros: costMicros,
-		Output: body, Sources: sources,
-	}, end)
 	s.publishRunEvent(agentScope, runEvent{ID: run.ID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseSucceeded})
 
 	// Deliver the continuation where the run's output was headed: channel runs
@@ -205,9 +271,11 @@ func (s *Server) resumeRun(parent context.Context, agentScope store.Scope, runID
 	}
 }
 
-func (s *Server) failResume(ctx context.Context, scope store.Scope, run store.Run, err error) {
+func (s *Server) failResume(ctx context.Context, scope store.Scope, run store.Run, owner string, epoch int64, err error) {
 	log.Printf("resume: run %s failed: %v", run.ID, err)
-	s.finishRun(ctx, scope, run.ID, runOutcome{Phase: store.RunPhaseFailed, Message: err.Error()}, time.Now().UTC())
+	if !s.finishRunOwned(ctx, scope, run.ID, owner, epoch, runOutcome{Phase: store.RunPhaseFailed, Message: err.Error()}, time.Now().UTC()) {
+		return
+	}
 	s.publishRunEvent(scope, runEvent{ID: run.ID, Agent: run.AgentName, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseFailed})
 }
 

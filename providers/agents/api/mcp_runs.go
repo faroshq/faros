@@ -141,11 +141,14 @@ func (s *Server) registerRunMCPTools(srv *mcp.Server, r *http.Request) {
 			return nil, runAgentOutput{}, err
 		}
 		scope := id.scope(agent.Name)
-		runID := s.startDetachedRun(r, c, id, agent, taskRun{
+		runID, err := s.startDetachedRun(r, c, id, agent, taskRun{
 			SessionID: strings.TrimSpace(in.SessionID), Task: task,
 			Trigger:    agentsv1alpha1.RunTriggerAPI,
 			SourceName: apiRunSource(id),
 		})
+		if err != nil {
+			return nil, runAgentOutput{}, err
+		}
 
 		out := runAgentOutput{RunID: runID, Phase: string(store.RunPhasePending),
 			Status: "started — read it with get_run(runId)"}

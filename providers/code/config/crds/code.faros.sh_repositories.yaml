@@ -64,7 +64,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: RepositorySpec is the desired state.
+            description: |-
+              RepositorySpec is the desired state.
+
+              The object-level rule keeps optional owner presence immutable as well as its
+              value. A field-level oldSelf rule is not evaluated for an omitted optional
+              field by every Kubernetes version, so it cannot reliably reject an
+              absent-to-present transition after handoff.
             properties:
               autoInit:
                 description: |-
@@ -73,8 +79,11 @@ spec:
                   succeed right after creation.
                 type: boolean
               connectionRef:
-                description: ConnectionRef names the Connection (same workspace) whose
-                  credential
+                description: |-
+                  ConnectionRef names the Connection (same workspace) whose credential and
+                  owner this repository is created under. After handoff it may be changed
+                  only to rotate credentials for the same provider, endpoint, and effective
+                  owner; retargeting a repository requires delete and recreate.
                 maxLength: 253
                 minLength: 1
                 type: string
@@ -96,6 +105,9 @@ spec:
                 maxLength: 100
                 minLength: 1
                 type: string
+                x-kubernetes-validations:
+                - message: spec.name is immutable
+                  rule: self == oldSelf
               owner:
                 description: |-
                   Owner overrides the Connection's owner for this single repository
@@ -114,6 +126,10 @@ spec:
             - connectionRef
             - name
             type: object
+            x-kubernetes-validations:
+            - message: spec.owner is immutable
+              rule: has(self.owner) == has(oldSelf.owner) && (!has(self.owner) ||
+                self.owner == oldSelf.owner)
           status:
             description: RepositoryStatus is the observed state.
             properties:
@@ -186,6 +202,48 @@ spec:
                 description: HTMLURL is the browser URL of the repository.
                 maxLength: 2048
                 type: string
+              identity:
+                description: |-
+                  Identity records the external repository identity that was handed to the
+                  backend. It is populated before the first ensure call so a later mutable
+                  update cannot redirect this object to another owner, host, or repository,
+                  and deletion can continue to target the original object.
+                properties:
+                  baseURL:
+                    description: |-
+                      BaseURL identifies a GitHub Enterprise or other self-hosted endpoint.
+                      Empty means the provider's public endpoint.
+                    type: string
+                  connectionRef:
+                    description: |-
+                      ConnectionRef is the Connection currently supplying the credential. It may
+                      rotate to another connection only when the controller proves the external
+                      provider, endpoint, and effective owner are unchanged.
+                    type: string
+                  name:
+                    description: Name is the repository name on the host.
+                    type: string
+                  owner:
+                    description: Owner is the effective account or organization containing
+                      the repository.
+                    type: string
+                  provider:
+                    description: Provider is the registered git backend used at handoff.
+                    enum:
+                    - github
+                    type: string
+                  specOwner:
+                    description: |-
+                      SpecOwner preserves the raw spec.owner value so an older API server or a
+                      fake client cannot turn an inherited owner into a different explicit
+                      ownership contract without being rejected by the controller.
+                    type: string
+                required:
+                - connectionRef
+                - name
+                - owner
+                - provider
+                type: object
               observedGeneration:
                 description: ObservedGeneration mirrors metadata.generation last reconciled.
                 format: int64

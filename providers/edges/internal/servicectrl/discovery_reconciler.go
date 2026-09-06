@@ -92,7 +92,7 @@ func (r *DiscoveryReconciler) Reconcile(ctx context.Context, req mcreconcile.Req
 	// Index existing discovered Services for this edge.
 	var existing edgesv1alpha1.ServiceList
 	if err := c.List(ctx, &existing, client.MatchingLabels{
-		edgesv1alpha1.LabelEdge:       req.Name,
+		edgesv1alpha1.LabelEdge:       edgesv1alpha1.ServiceEdgeLabelValue(req.Name),
 		edgesv1alpha1.LabelDiscovered: "true",
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("listing services: %w", err)
@@ -133,7 +133,7 @@ func (r *DiscoveryReconciler) upsert(ctx context.Context, c client.Client, edgeN
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name,
 				Labels: map[string]string{
-					edgesv1alpha1.LabelEdge:       edgeName,
+					edgesv1alpha1.LabelEdge:       edgesv1alpha1.ServiceEdgeLabelValue(edgeName),
 					edgesv1alpha1.LabelDiscovered: "true",
 				},
 			},

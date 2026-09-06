@@ -383,6 +383,16 @@ test:
 test-util:
 	go test ./pkg/util/...
 
+.PHONY: test-postgres-contracts test-dev-agent test-edges-replica-contract
+test-postgres-contracts: ## Require Agents/App Studio/Kuery PostgreSQL contracts (all three test DSNs required)
+	bash ./hack/test-postgres-contracts.sh
+
+test-dev-agent: ## Test the standalone development runtime, including process lifecycle
+	cd providers/infrastructure/dev-agent && go test -race -count=1 ./...
+
+test-edges-replica-contract: ## Verify replica lease convergence against a real API (explicit test kubeconfig required)
+	bash ./hack/test-edges-replica-contract.sh
+
 lint: $(GOLANGCI_LINT) ## Run golangci-lint
 	$(GOLANGCI_LINT) run ./...
 

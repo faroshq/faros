@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	infrav1alpha1 "github.com/faroshq/provider-infrastructure/apis/v1alpha1"
 	"github.com/faroshq/provider-infrastructure/backend"
@@ -290,6 +291,180 @@ func TestReconcileDelete(t *testing.T) {
 	var post infrav1alpha1.Template
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "delgone"}, &post); err == nil {
 		t.Fatalf("template still present after finalizer removal")
+	}
+}
+
+func TestReconcileRejectsIdentityMutationAndDeletesRecordedBackend(t *testing.T) {
+	ctx := context.Background()
+	tmpl := newTestTemplate(t, "identity")
+	r, stb := newTestReconciler(t, tmpl)
+	reconcileUntilSettled(t, r, tmpl.Name)
+
+	var provisioned infrav1alpha1.Template
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmpl.Name}, &provisioned); err != nil {
+		t.Fatalf("get provisioned template: %v", err)
+	}
+	if provisioned.Status.Backend.Name != stub.Name || provisioned.Status.InstanceCRD == nil {
+		t.Fatalf("provisioned identity missing: backend=%q instanceCRD=%+v", provisioned.Status.Backend.Name, provisioned.Status.InstanceCRD)
+	}
+
+	// A fake client does not run the CRD's CEL admission rule, so this drives
+	// the controller-side defense directly. The edited backend must never see
+	// a second SetupTemplate call, and the edited instance CRD must not redirect
+	// cleanup either.
+	provisioned.Spec.Backend = "missing"
+	provisioned.Spec.InstanceCRD.Resource = "otherresources"
+	if err := r.Client.Update(ctx, &provisioned); err != nil {
+		t.Fatalf("update backend: %v", err)
+	}
+	setupCalls := len(stb.SeenSetups)
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: tmpl.Name}})
+	if err != nil {
+		t.Fatalf("identity mutation reconcile returned error: %v", err)
+	}
+	if len(stb.SeenSetups) != setupCalls {
+		t.Fatalf("identity mutation called setup: before=%d after=%d", setupCalls, len(stb.SeenSetups))
+	}
+	var conflicted infrav1alpha1.Template
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmpl.Name}, &conflicted); err != nil {
+		t.Fatalf("get conflicted template: %v", err)
+	}
+	if cond := findCondition(conflicted.Status.Conditions, infrav1alpha1.ConditionReady); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != infrav1alpha1.ReasonIdentityConflict {
+		t.Fatalf("identity conflict condition = %+v", cond)
+	}
+
+	// Deletion must still dispatch through the recorded stub backend and pass
+	// its original backend/CRD identity, despite the mutable fake update.
+	if err := r.Client.Delete(ctx, &conflicted); err != nil {
+		t.Fatalf("delete conflicted template: %v", err)
+	}
+	reconcileUntilSettled(t, r, tmpl.Name)
+	if len(stb.SeenTeardowns) == 0 {
+		t.Fatal("recorded backend did not receive teardown")
+	}
+	cleanup := stb.SeenTeardownTemplates[len(stb.SeenTeardownTemplates)-1]
+	if cleanup.Spec.Backend != stub.Name {
+		t.Fatalf("teardown backend = %q, want recorded %q", cleanup.Spec.Backend, stub.Name)
+	}
+	if cleanup.Spec.InstanceCRD != *provisioned.Status.InstanceCRD {
+		t.Fatalf("teardown instanceCRD = %+v, want recorded %+v", cleanup.Spec.InstanceCRD, *provisioned.Status.InstanceCRD)
+	}
+}
+
+func TestReconcileDeleteRetainsFinalizerWhenRecordedBackendMissing(t *testing.T) {
+	ctx := context.Background()
+	tmpl := newTestTemplate(t, "missing-cleanup")
+	r, _ := newTestReconciler(t, tmpl)
+	reconcileUntilSettled(t, r, tmpl.Name)
+
+	var provisioned infrav1alpha1.Template
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmpl.Name}, &provisioned); err != nil {
+		t.Fatalf("get provisioned template: %v", err)
+	}
+	if err := r.Client.Delete(ctx, &provisioned); err != nil {
+		t.Fatalf("delete template: %v", err)
+	}
+	// Simulate a provider restart/configuration where the recorded backend is
+	// unavailable. Cleanup must remain pending instead of releasing the
+	// finalizer and orphaning backend-owned resources.
+	r.Backends = backend.NewRegistry()
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: tmpl.Name}})
+	if err == nil {
+		t.Fatal("missing backend cleanup unexpectedly succeeded")
+	}
+	var pending infrav1alpha1.Template
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmpl.Name}, &pending); err != nil {
+		t.Fatalf("get pending template: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&pending, infrav1alpha1.FinalizerTemplateReconcile) {
+		t.Fatalf("missing backend cleanup released finalizer: %v", pending.Finalizers)
+	}
+	if cond := findCondition(pending.Status.Conditions, infrav1alpha1.ConditionReady); cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != infrav1alpha1.ReasonBackendNotFound {
+		t.Fatalf("missing backend condition = %+v", cond)
+	}
+}
+
+func TestReconcileDeleteWithoutRecordedIdentityUsesCurrentBackend(t *testing.T) {
+	ctx := context.Background()
+	tmpl := newTestTemplate(t, "unrecorded-cleanup")
+	tmpl.Finalizers = []string{infrav1alpha1.FinalizerTemplateReconcile}
+	r, stb := newTestReconciler(t, tmpl)
+
+	// Simulate a process that added its finalizer and then crashed before the
+	// first ownership status patch. Teardown is the conservative, idempotent
+	// recovery path for that ambiguous state.
+	if err := r.Client.Delete(ctx, tmpl); err != nil {
+		t.Fatalf("delete template: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: tmpl.Name}}); err != nil {
+		t.Fatalf("unrecorded cleanup reconcile: %v", err)
+	}
+	if len(stb.SeenTeardownTemplates) != 1 {
+		t.Fatalf("teardown calls = %d, want 1", len(stb.SeenTeardownTemplates))
+	}
+	if got := stb.SeenTeardownTemplates[0].Spec.Backend; got != stub.Name {
+		t.Fatalf("teardown backend = %q, want %q", got, stub.Name)
+	}
+	var gone infrav1alpha1.Template
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmpl.Name}, &gone); err == nil {
+		t.Fatal("template still exists after conservative cleanup")
+	}
+}
+
+func TestReconcileDeleteWithoutRecordedIdentityRetainsFinalizerWhenCurrentBackendMissing(t *testing.T) {
+	ctx := context.Background()
+	tmpl := newTestTemplate(t, "unrecorded-missing-cleanup")
+	tmpl.Finalizers = []string{infrav1alpha1.FinalizerTemplateReconcile}
+	r, _ := newTestReconciler(t, tmpl)
+	if err := r.Client.Delete(ctx, tmpl); err != nil {
+		t.Fatalf("delete template: %v", err)
+	}
+	r.Backends = backend.NewRegistry()
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: tmpl.Name}}); err == nil {
+		t.Fatal("missing current backend cleanup unexpectedly succeeded")
+	}
+	var pending infrav1alpha1.Template
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmpl.Name}, &pending); err != nil {
+		t.Fatalf("get pending template: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(&pending, infrav1alpha1.FinalizerTemplateReconcile) {
+		t.Fatalf("missing current backend cleanup released finalizer: %v", pending.Finalizers)
+	}
+}
+
+func TestReconcileRecordsIdentityBeforeBackendReady(t *testing.T) {
+	ctx := context.Background()
+	tmpl := newTestTemplate(t, "partial")
+	r, stb := newTestReconciler(t, tmpl)
+	stb.FailSetup = true
+
+	// The backend has accepted the handoff but is not ready. The controller
+	// must still record enough ownership for a later delete to dispatch the
+	// matching teardown instead of treating this as an unowned finalizer.
+	reconcileUntilSettled(t, r, tmpl.Name)
+	var pending infrav1alpha1.Template
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: tmpl.Name}, &pending); err != nil {
+		t.Fatalf("get partially setup template: %v", err)
+	}
+	if pending.Status.Backend.Name != stub.Name || pending.Status.InstanceCRD == nil {
+		t.Fatalf("partial setup lost identity: backend=%q instanceCRD=%+v", pending.Status.Backend.Name, pending.Status.InstanceCRD)
+	}
+	if cond := findCondition(pending.Status.Conditions, infrav1alpha1.ConditionReady); cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("partial setup Ready condition = %+v", cond)
+	}
+
+	stb.FailSetup = false
+	if err := r.Client.Delete(ctx, &pending); err != nil {
+		t.Fatalf("delete partially setup template: %v", err)
+	}
+	reconcileUntilSettled(t, r, tmpl.Name)
+	if len(stb.SeenTeardownTemplates) == 0 {
+		t.Fatal("partial setup cleanup did not call teardown")
+	}
+	cleanup := stb.SeenTeardownTemplates[len(stb.SeenTeardownTemplates)-1]
+	if cleanup.Spec.Backend != stub.Name || cleanup.Spec.InstanceCRD != *pending.Status.InstanceCRD {
+		t.Fatalf("partial setup teardown identity = backend %q, instanceCRD %+v; want backend %q, instanceCRD %+v",
+			cleanup.Spec.Backend, cleanup.Spec.InstanceCRD, stub.Name, *pending.Status.InstanceCRD)
 	}
 }
 

@@ -118,7 +118,7 @@ func (s *Server) invokeAgentRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sessionID := strings.TrimSpace(req.SessionID)
-	runID := s.startDetachedRun(r, c, id, agent, taskRun{
+	runID, err := s.startDetachedRun(r, c, id, agent, taskRun{
 		SessionID: sessionID, Task: req.Task,
 		Trigger:        agentsv1alpha1.RunTriggerAPI,
 		IdempotencyKey: req.IdempotencyKey,
@@ -127,6 +127,10 @@ func (s *Server) invokeAgentRun(w http.ResponseWriter, r *http.Request) {
 		// hub resolves the identity, so this is not self-asserted.
 		SourceName: apiRunSource(id),
 	})
+	if err != nil {
+		writeStatus(w, http.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+		return
+	}
 
 	// A caller that asked to wait gets the settled run inline; one that did not
 	// gets the id to poll. Either way the run is already going.

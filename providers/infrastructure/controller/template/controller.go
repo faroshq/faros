@@ -26,6 +26,7 @@ package template
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -125,6 +126,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil // the deletion event re-enters via finalize
 	}
 
+	// Backend and instanceCRD identify the runtime resources owned by this
+	// Template. The apiserver rejects updates to these fields on current CRDs,
+	// but keep the check here as well for older CRDs and fake clients. In
+	// particular, never hand an already-provisioned Template to a different
+	// backend after a mutable update.
+	if err := validateIdentity(&tmpl); err != nil {
+		setCondition(&tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
+			infrav1alpha1.ReasonIdentityConflict, err.Error())
+		return r.writeStatus(ctx, &tmpl, patchBase)
+	}
+
 	// Look up backend FIRST so a typo on spec.backend never results in a
 	// Ready template without a corresponding handler.
 	b, ok := r.Backends.Get(tmpl.Spec.Backend)
@@ -158,6 +170,25 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	setCondition(&tmpl, infrav1alpha1.ConditionSchemaValid, metav1.ConditionTrue,
 		infrav1alpha1.ReasonReady, "")
+
+	// Persist ownership before invoking the backend. SetupTemplate may create
+	// runtime resources and then fail, so a crash or status-write error must not
+	// leave cleanup with no durable backend/CRD identity to dispatch through.
+	if tmpl.Status.Backend.Name == "" {
+		tmpl.Status.Backend.Name = b.Name()
+	}
+	if tmpl.Status.InstanceCRD == nil {
+		instanceCRD := tmpl.Spec.InstanceCRD
+		tmpl.Status.InstanceCRD = &instanceCRD
+	}
+	if patchBase.Status.Backend.Name != tmpl.Status.Backend.Name ||
+		patchBase.Status.InstanceCRD == nil ||
+		*patchBase.Status.InstanceCRD != *tmpl.Status.InstanceCRD {
+		if err := r.Client.Status().Patch(ctx, &tmpl, client.MergeFrom(patchBase)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("record template ownership: %w", err)
+		}
+		patchBase = tmpl.DeepCopy()
+	}
 
 	// Backend handoff.
 	bs, berr := b.SetupTemplate(ctx, &tmpl)
@@ -199,13 +230,48 @@ func (r *Reconciler) finalize(ctx context.Context, tmpl, patchBase *infrav1alpha
 	logger := log.FromContext(ctx).WithValues("template", tmpl.Name, "phase", "finalize")
 
 	if controllerutil.ContainsFinalizer(tmpl, infrav1alpha1.FinalizerTemplateReconcile) {
-		if b, ok := r.Backends.Get(tmpl.Spec.Backend); ok {
-			if err := b.TeardownTemplate(ctx, tmpl); err != nil {
-				setCondition(tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
-					infrav1alpha1.ReasonBackendError, "teardown: "+err.Error())
-				_, _ = r.writeStatus(ctx, tmpl, patchBase)
-				return ctrl.Result{}, err
-			}
+		// A finalizer with no recorded handoff is ambiguous: a process could have
+		// created backend resources and crashed before the first status patch. Use
+		// the current spec backend for a conservative idempotent teardown, and
+		// retain the finalizer if that backend is unavailable. Once the handoff is
+		// recorded, cleanup must use that backend even if spec.backend was changed
+		// by an older API server.
+		recordedBackend := strings.TrimSpace(tmpl.Status.Backend.Name)
+		backendName := recordedBackend
+		if backendName == "" {
+			backendName = strings.TrimSpace(tmpl.Spec.Backend)
+		}
+		if backendName == "" {
+			msg := "no recorded or current backend is available to prove Template cleanup"
+			setCondition(tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
+				infrav1alpha1.ReasonBackendNotFound, msg)
+			_, _ = r.writeStatus(ctx, tmpl, patchBase)
+			return ctrl.Result{}, fmt.Errorf("template teardown: %s", msg)
+		}
+
+		b, ok := r.Backends.Get(backendName)
+		if !ok {
+			msg := fmt.Sprintf("backend %q is required to tear down the provisioned Template; registered=%v",
+				backendName, r.Backends.Names())
+			setCondition(tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
+				infrav1alpha1.ReasonBackendNotFound, msg)
+			_, _ = r.writeStatus(ctx, tmpl, patchBase)
+			return ctrl.Result{}, fmt.Errorf("template teardown: %s", msg)
+		}
+
+		// Teardown receives the recorded identity so a mutable spec cannot point
+		// cleanup at a newly named CRD. The backend field is restored as well,
+		// because concrete implementations may use it when deriving names.
+		cleanup := tmpl.DeepCopy()
+		cleanup.Spec.Backend = backendName
+		if tmpl.Status.InstanceCRD != nil {
+			cleanup.Spec.InstanceCRD = *tmpl.Status.InstanceCRD
+		}
+		if err := b.TeardownTemplate(ctx, cleanup); err != nil {
+			setCondition(tmpl, infrav1alpha1.ConditionReady, metav1.ConditionFalse,
+				infrav1alpha1.ReasonBackendError, "teardown: "+err.Error())
+			_, _ = r.writeStatus(ctx, tmpl, patchBase)
+			return ctrl.Result{}, err
 		}
 		controllerutil.RemoveFinalizer(tmpl, infrav1alpha1.FinalizerTemplateReconcile)
 		if err := r.Client.Update(ctx, tmpl); err != nil {
@@ -214,6 +280,20 @@ func (r *Reconciler) finalize(ctx context.Context, tmpl, patchBase *infrav1alpha
 	}
 	logger.V(1).Info("template finalized")
 	return ctrl.Result{}, nil
+}
+
+// validateIdentity rejects mutable identity changes in the reconcile path.
+// Current CRDs enforce the same rule with CEL, but this guard protects
+// resources created under an older schema and makes unit/fake-client behavior
+// match a live apiserver.
+func validateIdentity(tmpl *infrav1alpha1.Template) error {
+	if recorded := strings.TrimSpace(tmpl.Status.Backend.Name); recorded != "" && recorded != tmpl.Spec.Backend {
+		return fmt.Errorf("spec.backend changed from provisioned backend %q to %q; delete and recreate the Template", recorded, tmpl.Spec.Backend)
+	}
+	if recorded := tmpl.Status.InstanceCRD; recorded != nil && *recorded != tmpl.Spec.InstanceCRD {
+		return fmt.Errorf("spec.instanceCRD changed after provisioning; delete and recreate the Template")
+	}
+	return nil
 }
 
 // writeStatus persists status conditions. Uses a JSON-merge patch so

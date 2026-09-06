@@ -810,6 +810,11 @@ func (in *TemplateSpec) DeepCopy() *TemplateSpec {
 func (in *TemplateStatus) DeepCopyInto(out *TemplateStatus) {
 	*out = *in
 	out.Backend = in.Backend
+	if in.InstanceCRD != nil {
+		in, out := &in.InstanceCRD, &out.InstanceCRD
+		*out = new(TemplateInstanceCRD)
+		**out = **in
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

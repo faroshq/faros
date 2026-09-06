@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,10 @@ type Registry struct {
 
 	mu    sync.Mutex
 	cache map[string]registryCacheEntry
+
+	localMu       sync.RWMutex
+	localSequence uint64
+	local         map[string]localRegistration
 }
 
 type registryCacheEntry struct {
@@ -81,11 +86,25 @@ const (
 	// GET per key per interval, not one per request.
 	registryCacheTTL = 3 * time.Second
 
-	tunnelLeaseLabel    = "edges.faros.sh/tunnel-registry"
-	tunnelLeaseKeyAnno  = "edges.faros.sh/conn-key"
-	tunnelLeasePrefix   = "edge-tunnel-"
-	presenceLeasePrefix = "edge-replica-"
+	tunnelLeaseLabel          = "edges.faros.sh/tunnel-registry"
+	tunnelLeaseKeyAnno        = "edges.faros.sh/conn-key"
+	tunnelLeaseGenerationAnno = "edges.faros.sh/conn-generation"
+	tunnelLeasePrefix         = "edge-tunnel-"
+	presenceLeasePrefix       = "edge-replica-"
 )
+
+// tunnelRegistration identifies one local lifetime of a stable tunnel key.
+// Generations let a sweeper distinguish a replaced/closed local dialer from a
+// newer dialer using the same key. A zero generation is the legacy, unscoped
+// form used by direct Registry callers that do not have a ConnManager.
+type tunnelRegistration struct {
+	key        string
+	generation uint64
+}
+
+type localRegistration struct {
+	generation uint64
+}
 
 // NewRegistry builds the registry from the provider's workspace-scoped kcp
 // config. replicaID must be pickup-path- and lease-name-safe (SanitizeReplicaID);
@@ -101,6 +120,7 @@ func NewRegistry(cfg *rest.Config, replicaID, selfAddr string) (*Registry, error
 		selfAddr:  selfAddr,
 		now:       time.Now,
 		cache:     map[string]registryCacheEntry{},
+		local:     map[string]localRegistration{},
 	}, nil
 }
 
@@ -139,31 +159,118 @@ func tunnelLeaseName(key string) string {
 // a live agent socket on this replica is ground truth, so an existing claim
 // (a previous owner whose agent reconnected here) is overwritten.
 func (r *Registry) ClaimTunnel(ctx context.Context, key string) error {
-	err := r.upsertLease(ctx, tunnelLeaseName(key), func(lease *coordinationv1.Lease) {
-		if lease.Labels == nil {
-			lease.Labels = map[string]string{}
-		}
-		lease.Labels[tunnelLeaseLabel] = "true"
-		if lease.Annotations == nil {
-			lease.Annotations = map[string]string{}
-		}
-		lease.Annotations[tunnelLeaseKeyAnno] = key
-	})
+	return r.claimTunnel(ctx, tunnelRegistration{key: key})
+}
+
+// claimTunnel is the ConnManager-aware form of ClaimTunnel. The generation is
+// written into the lease so a stale disconnect cannot delete a replacement
+// claim held by this same replica.
+func (r *Registry) claimTunnel(ctx context.Context, registration tunnelRegistration) error {
+	key := registration.key
+	if !r.registrationActive(registration) {
+		return nil
+	}
+	err := r.upsertLeaseIf(ctx, tunnelLeaseName(key), func(lease *coordinationv1.Lease) {
+		decorateTunnelLease(lease, key, registration)
+	}, func() bool { return r.registrationActive(registration) })
 	r.invalidate(key)
+	if err == nil && !r.registrationActive(registration) {
+		// Store and ClaimTunnel run independently after the ConnManager map is
+		// updated. If a replacement registration won the map race while this
+		// write was in flight, retire only this generation's claim; the newer
+		// registration will publish its own claim (or has already done so).
+		r.releaseTunnel(ctx, registration)
+	}
 	return err
+}
+
+func decorateTunnelLease(lease *coordinationv1.Lease, key string, registration tunnelRegistration) {
+	if lease.Labels == nil {
+		lease.Labels = map[string]string{}
+	}
+	lease.Labels[tunnelLeaseLabel] = "true"
+	if lease.Annotations == nil {
+		lease.Annotations = map[string]string{}
+	}
+	lease.Annotations[tunnelLeaseKeyAnno] = key
+	if registration.generation == 0 {
+		// A direct Registry claim has no local lifetime to protect. Remove a
+		// prior generation marker so a stale ConnManager cleanup cannot mistake
+		// this unconditional live-socket claim for its own registration.
+		delete(lease.Annotations, tunnelLeaseGenerationAnno)
+		return
+	}
+	lease.Annotations[tunnelLeaseGenerationAnno] = strconv.FormatUint(registration.generation, 10)
+}
+
+func leaseGenerationMatches(lease *coordinationv1.Lease, registration tunnelRegistration) bool {
+	if registration.generation == 0 {
+		return true
+	}
+	return lease.Annotations != nil &&
+		lease.Annotations[tunnelLeaseGenerationAnno] == strconv.FormatUint(registration.generation, 10)
+}
+
+func (r *Registry) beginRegistration(key string) tunnelRegistration {
+	r.localMu.Lock()
+	defer r.localMu.Unlock()
+	r.localSequence++
+	registration := tunnelRegistration{key: key, generation: r.localSequence}
+	if r.local == nil {
+		r.local = map[string]localRegistration{}
+	}
+	r.local[key] = localRegistration{generation: registration.generation}
+	return registration
+}
+
+func (r *Registry) endRegistration(registration tunnelRegistration) bool {
+	if registration.generation == 0 {
+		return false
+	}
+	r.localMu.Lock()
+	defer r.localMu.Unlock()
+	current, ok := r.local[registration.key]
+	if !ok || current.generation != registration.generation {
+		return false
+	}
+	delete(r.local, registration.key)
+	return true
+}
+
+func (r *Registry) registrationActive(registration tunnelRegistration) bool {
+	if registration.generation == 0 {
+		return true
+	}
+	r.localMu.RLock()
+	defer r.localMu.RUnlock()
+	current, ok := r.local[registration.key]
+	return ok && current.generation == registration.generation
 }
 
 // ReleaseTunnel drops the claim if this replica still holds it — the holder
 // check keeps a slow disconnect cleanup from erasing a newer claim written by
 // the replica the agent reconnected to.
 func (r *Registry) ReleaseTunnel(ctx context.Context, key string) {
+	r.releaseTunnel(ctx, tunnelRegistration{key: key})
+}
+
+// releaseTunnel removes a claim only when it still belongs to this local
+// registration. UID and resource-version preconditions prevent a replacement
+// Store/Claim that races the read from being deleted by a stale cleanup.
+func (r *Registry) releaseTunnel(ctx context.Context, registration tunnelRegistration) {
+	key := registration.key
 	name := tunnelLeaseName(key)
 	lease, err := r.leases.Get(ctx, name, metav1.GetOptions{})
-	if err != nil || ptr.Deref(lease.Spec.HolderIdentity, "") != r.selfAddr {
+	if err != nil || ptr.Deref(lease.Spec.HolderIdentity, "") != r.selfAddr ||
+		!leaseGenerationMatches(lease, registration) {
 		return
 	}
+	preconditions := &metav1.Preconditions{UID: &lease.UID}
+	if lease.ResourceVersion != "" {
+		preconditions.ResourceVersion = &lease.ResourceVersion
+	}
 	_ = r.leases.Delete(ctx, name, metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &lease.UID},
+		Preconditions: preconditions,
 	})
 	r.invalidate(key)
 }
@@ -171,19 +278,80 @@ func (r *Registry) ReleaseTunnel(ctx context.Context, key string) {
 // RenewOwned refreshes this replica's presence lease and the tunnel leases
 // for the keys it still holds locally. Called from the ConnManager sweeper.
 func (r *Registry) RenewOwned(ctx context.Context, localKeys []string) {
-	_ = r.upsertLease(ctx, presenceLeasePrefix+r.replicaID, nil)
+	registrations := make([]tunnelRegistration, 0, len(localKeys))
 	for _, key := range localKeys {
+		registrations = append(registrations, tunnelRegistration{key: key})
+	}
+	r.renewOwned(ctx, registrations)
+}
+
+// renewOwned is the generation-aware sweeper path used by ConnManager. It
+// repairs a missing claim with a create-only operation, renews a self-held
+// claim, and skips foreign claims. The zero-generation registrations accepted
+// by RenewOwned preserve the direct Registry API used by older callers/tests.
+func (r *Registry) renewOwned(ctx context.Context, registrations []tunnelRegistration) {
+	_ = r.upsertLease(ctx, presenceLeasePrefix+r.replicaID, nil)
+	for _, registration := range registrations {
+		key := registration.key
+		if !r.registrationActive(registration) {
+			continue
+		}
 		name := tunnelLeaseName(key)
 		lease, err := r.leases.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			r.repairMissingTunnel(ctx, registration)
+			continue
+		}
 		if err != nil || ptr.Deref(lease.Spec.HolderIdentity, "") != r.selfAddr {
-			// Missing or foreign (agent reconnected elsewhere while our socket
-			// lingers): re-claiming here would fight the live owner. The local
-			// dialer dies on its own when the agent side closes.
+			// Foreign (agent reconnected elsewhere while our socket lingers)
+			// claims are never overwritten by this sweeper.
+			continue
+		}
+		if !r.registrationActive(registration) {
 			continue
 		}
 		now := metav1.NewMicroTime(r.now())
 		lease.Spec.RenewTime = &now
-		_, _ = r.leases.Update(ctx, lease, metav1.UpdateOptions{})
+		if registration.generation != 0 {
+			if lease.Annotations == nil {
+				lease.Annotations = map[string]string{}
+			}
+			lease.Annotations[tunnelLeaseGenerationAnno] = strconv.FormatUint(registration.generation, 10)
+		}
+		if _, updateErr := r.leases.Update(ctx, lease, metav1.UpdateOptions{}); updateErr == nil {
+			// If the local lifetime ended while the update was in flight, clean
+			// up only our still-current claim. A newer owner is protected by
+			// holder, UID, resource-version, and generation checks.
+			if !r.registrationActive(registration) {
+				r.releaseTunnel(ctx, registration)
+			}
+		}
+	}
+}
+
+func (r *Registry) repairMissingTunnel(ctx context.Context, registration tunnelRegistration) {
+	if !r.registrationActive(registration) {
+		return
+	}
+	now := metav1.NewMicroTime(r.now())
+	lease := &coordinationv1.Lease{
+		ObjectMeta: metav1.ObjectMeta{Name: tunnelLeaseName(registration.key)},
+		Spec: coordinationv1.LeaseSpec{
+			HolderIdentity:       ptr.To(r.selfAddr),
+			LeaseDurationSeconds: ptr.To(int32(registryLeaseTTL.Seconds())),
+			AcquireTime:          &now,
+			RenewTime:            &now,
+		},
+	}
+	decorateTunnelLease(lease, registration.key, registration)
+	if _, err := r.leases.Create(ctx, lease, metav1.CreateOptions{}); err != nil {
+		// AlreadyExists means another writer won the missing-claim race. Leave
+		// its ownership untouched; the next sweep will observe self vs foreign.
+		return
+	}
+	r.invalidate(registration.key)
+	if !r.registrationActive(registration) {
+		r.releaseTunnel(ctx, registration)
 	}
 }
 
@@ -263,7 +431,18 @@ func (r *Registry) invalidate(key string) {
 // decorate (labels/annotations) on the object before writing. One conflict
 // retry: the loser of a race re-reads and overwrites — last live socket wins.
 func (r *Registry) upsertLease(ctx context.Context, name string, decorate func(*coordinationv1.Lease)) error {
+	return r.upsertLeaseIf(ctx, name, decorate, nil)
+}
+
+// upsertLeaseIf is upsertLease with a local-lifetime guard. The guard is
+// checked before every read and again after each read, immediately before a
+// Create or Update. This closes the retry window where an older ConnManager
+// registration could otherwise overwrite a newer same-replica generation.
+func (r *Registry) upsertLeaseIf(ctx context.Context, name string, decorate func(*coordinationv1.Lease), allowed func() bool) error {
 	for attempt := 0; attempt < 2; attempt++ {
+		if allowed != nil && !allowed() {
+			return nil
+		}
 		now := metav1.NewMicroTime(r.now())
 		lease, err := r.leases.Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -278,6 +457,9 @@ func (r *Registry) upsertLease(ctx context.Context, name string, decorate func(*
 			}
 			if decorate != nil {
 				decorate(lease)
+			}
+			if allowed != nil && !allowed() {
+				return nil
 			}
 			if _, err := r.leases.Create(ctx, lease, metav1.CreateOptions{}); err != nil {
 				if apierrors.IsAlreadyExists(err) {
@@ -299,6 +481,9 @@ func (r *Registry) upsertLease(ctx context.Context, name string, decorate func(*
 		lease.Spec.RenewTime = &now
 		if decorate != nil {
 			decorate(lease)
+		}
+		if allowed != nil && !allowed() {
+			return nil
 		}
 		if _, err := r.leases.Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
 			if apierrors.IsConflict(err) {

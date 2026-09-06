@@ -59,7 +59,8 @@ const ConditionReady = "Ready"
 
 // Shared condition reasons.
 const (
-	ReasonReconciling = "Reconciling"
-	ReasonReady       = "Ready"
-	ReasonError       = "Error"
+	ReasonReconciling      = "Reconciling"
+	ReasonReady            = "Ready"
+	ReasonError            = "Error"
+	ReasonIdentityConflict = "IdentityConflict"
 )

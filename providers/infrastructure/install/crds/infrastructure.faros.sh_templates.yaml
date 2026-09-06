@@ -125,6 +125,9 @@ spec:
                 maxLength: 64
                 pattern: ^[a-z][a-z0-9-]*$
                 type: string
+                x-kubernetes-validations:
+                - message: spec.backend is immutable
+                  rule: self == oldSelf
               backendConfig:
                 description: |-
                   BackendConfig is opaque to the platform; only the named
@@ -627,6 +630,9 @@ spec:
                 - resource
                 - version
                 type: object
+                x-kubernetes-validations:
+                - message: spec.instanceCRD is immutable
+                  rule: self == oldSelf
               sampleValues:
                 description: |-
                   SampleValues is an optional example input payload the portal pre-fills
@@ -699,7 +705,7 @@ spec:
                   name:
                     description: |-
                       Name echoes spec.backend so consumers don't have to cross-
-                      reference. Helpful if a Template's backend changes mid-life.
+                      reference. It is also the recorded cleanup owner once setup is handed off.
                     type: string
                   ready:
                     description: |-
@@ -770,6 +776,48 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              instanceCRD:
+                description: |-
+                  InstanceCRD records the CRD identity used by the backend when this
+                  Template was first handed off. It is kept in status so teardown can use
+                  the provisioned identity even if an older API server accepted a mutable
+                  spec update before the immutable validation was installed.
+                properties:
+                  group:
+                    description: |-
+                      Group MUST be infrastructure.faros.sh. Pinned here so
+                      every per-template CRD lives under the same namespace and the
+                      portal can render them uniformly.
+                    pattern: ^infrastructure\.faros\.sh$
+                    type: string
+                  kind:
+                    description: Kind is the CamelCase singular tenants use in apiVersion
+                      + kind.
+                    maxLength: 64
+                    pattern: ^[A-Z][A-Za-z0-9]*$
+                    type: string
+                  resource:
+                    description: |-
+                      Resource is the lowercase plural the apiserver routes on
+                      (kubectl get <resource>). Must be unique across all Templates
+                      in the provider workspace.
+                    maxLength: 64
+                    pattern: ^[a-z][a-z0-9]*$
+                    type: string
+                  version:
+                    description: |-
+                      Version of the per-template CRD's served + storage schema.
+                      Templates can ship multiple Versions (a future Template can
+                      extend a previous one's set); the controller updates the CRD's
+                      spec.versions list rather than overwriting on conflict.
+                    pattern: ^v[0-9]+((alpha|beta)[0-9]+)?$
+                    type: string
+                required:
+                - group
+                - kind
+                - resource
+                - version
+                type: object
               observedGeneration:
                 description: |-
                   ObservedGeneration mirrors metadata.generation last reconciled.

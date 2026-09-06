@@ -11,11 +11,15 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
+	agentsv1alpha1 "github.com/faroshq/provider-agents/apis/v1alpha1"
 	"github.com/faroshq/provider-agents/engine"
 	"github.com/faroshq/provider-agents/llm"
 	"github.com/faroshq/provider-agents/store"
@@ -59,6 +63,11 @@ const (
 	// sweepBatch bounds one sweep pass so a large backlog is worked through over
 	// several ticks instead of in one burst.
 	sweepBatch = 50
+
+	// recoveryLaunchTimeout bounds the synchronous preflight handshake. The
+	// resumed model loop is detached after that handshake, but a database or VW
+	// outage must not block the scheduler loop for the full run timeout.
+	recoveryLaunchTimeout = 30 * time.Second
 )
 
 // turnContextBudget is the wire-conversation budget for one turn: a fraction of
@@ -83,6 +92,7 @@ const turnContextBudgetPct = 80
 func (s *Server) checkpointRecorder(ctx context.Context, run taskRun, sessionID string) func(engine.Checkpoint) {
 	scope, agentName := run.Scope, run.Agent.Name
 	runID := run.RunID
+	owner, epoch := run.ExecutionOwner, run.ExecutionEpoch
 	sourceName, notifyChannel := run.SourceName, run.NotifyChannel
 	return func(ck engine.Checkpoint) {
 		payload, err := json.Marshal(runCheckpoint{
@@ -101,8 +111,26 @@ func (s *Server) checkpointRecorder(ctx context.Context, run taskRun, sessionID 
 			return
 		}
 		stored.Checkpoint = payload
-		stored.UpdatedAt = time.Now().UTC()
-		if err := s.store.SaveRun(ctx, scope, stored); err != nil {
+		now := time.Now().UTC()
+		stored.UpdatedAt = now
+		lease := now.Add(store.RunLeaseDuration)
+		stored.LeaseUntil = &lease
+		if owner != "" && epoch > 0 {
+			if stored.ExecutionOwner != owner || stored.ExecutionEpoch != epoch {
+				return
+			}
+			err = s.store.SaveRunOwned(ctx, scope, stored, owner, epoch)
+		} else {
+			// Runs created before execution fencing was introduced have no local
+			// owner in the callback. Once a recovery claim assigns one, a late
+			// legacy callback must not use the unfenced SaveRun path to overwrite
+			// the recovered owner.
+			if stored.ExecutionOwner != "" || stored.ExecutionEpoch > 0 {
+				return
+			}
+			err = s.store.SaveRun(ctx, scope, stored)
+		}
+		if err != nil {
 			log.Printf("recovery: checkpointing run %s (agent %s, session %s): %v", runID, agentName, sessionID, err)
 		}
 	}
@@ -141,9 +169,10 @@ func (s *Server) sweepStaleRuns(ctx context.Context, resume recoveryRunner, noti
 		if s.liveRuns.has(sr.Run.ID) {
 			continue
 		}
-		if s.recoverRun(ctx, sr, resume, notify) {
+		switch s.recoverRun(ctx, sr, resume, notify) {
+		case recoveryAccepted:
 			resumed++
-		} else {
+		case recoveryFailed:
 			failed++
 		}
 	}
@@ -152,24 +181,88 @@ func (s *Server) sweepStaleRuns(ctx context.Context, resume recoveryRunner, noti
 	}
 }
 
+type recoveryDisposition uint8
+
+const (
+	recoverySkipped recoveryDisposition = iota
+	recoveryAccepted
+	recoveryFailed
+)
+
 // recoverRun resumes one stranded run, or fails it when it cannot be resumed.
-// Reports whether it was resumed.
-func (s *Server) recoverRun(ctx context.Context, sr store.ScopedRun, resume recoveryRunner, notify recoveryNotifier) bool {
+// It reports accepted only after the durable stale-run claim succeeds. A claim
+// race is skipped so a live/competing owner is never marked failed by this
+// replica.
+func (s *Server) recoverRun(ctx context.Context, sr store.ScopedRun, resume recoveryRunner, notify recoveryNotifier) recoveryDisposition {
 	run, scope := sr.Run, sr.Scope
-	fail := func(reason string) bool {
-		s.finishRun(ctx, scope, run.ID, runOutcome{Phase: store.RunPhaseFailed, Message: reason}, time.Now().UTC())
+	var claimed *store.Run
+	fail := func(reason string) recoveryDisposition {
+		end := time.Now().UTC()
+		var committed bool
+		if claimed != nil {
+			committed = s.finishRunOwned(ctx, scope, run.ID, claimed.ExecutionOwner, claimed.ExecutionEpoch,
+				runOutcome{Phase: store.RunPhaseFailed, Message: reason}, end)
+		} else {
+			committed = s.finishRun(ctx, scope, run.ID, runOutcome{Phase: store.RunPhaseFailed, Message: reason}, end)
+		}
+		if !committed {
+			// A failed persistence/fence write leaves the row for a later sweep.
+			// Publishing or notifying here would describe a failure that the store
+			// does not contain and could race the current owner.
+			return recoverySkipped
+		}
 		s.publishRunEvent(scope, runEvent{ID: run.ID, Agent: run.AgentName, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseFailed})
 		s.reportStrandedRun(ctx, sr, notify, reason)
-		return false
+		return recoveryFailed
+	}
+
+	if scope.OrgUUID == "" || scope.WorkspaceUUID == "" {
+		// A run whose scope was never recorded cannot be addressed again.
+		return fail("the provider restarted while this run was in progress, and its workspace could not be resolved to resume it")
+	}
+
+	// Scheduler-created Pending intents are the durable handoff for a schedule.
+	// They must stay Pending until a later scheduler tick can retry a rejected
+	// queue submission, so the recovery sweep must not consume them as stranded
+	// API detached runs.
+	if isScheduleDispatchIntent(run) {
+		return recoverySkipped
+	}
+
+	// Non-terminal rows must be fenced before deciding whether they can be
+	// resumed or failed. A row can be old enough to appear in this sweep while a
+	// worker on another replica is claiming it; the atomic claim settles that
+	// race. Running rows additionally require an expired lease and the listed
+	// updated-at version. All writes after this point use the new fence.
+	switch run.Phase {
+	case store.RunPhaseRunning:
+		owned, err := s.store.ClaimStaleRun(ctx, scope, run.ID, run.UpdatedAt, uuid.NewString(), time.Now().UTC())
+		if err != nil {
+			if !errors.Is(err, store.ErrRunNotStale) {
+				log.Printf("recovery: claiming run %s: %v", run.ID, err)
+			}
+			return recoverySkipped
+		}
+		claimed = &owned
+		run = owned
+		sr.Run = owned
+	case store.RunPhasePending:
+		owned, err := s.store.ClaimRun(ctx, scope, run.ID, uuid.NewString(), time.Now().UTC())
+		if err != nil {
+			if !errors.Is(err, store.ErrRunAlreadyClaimed) {
+				log.Printf("recovery: claiming pending run %s: %v", run.ID, err)
+			}
+			return recoverySkipped
+		}
+		claimed = &owned
+		run = owned
+		sr.Run = owned
 	}
 
 	switch {
-	case scope.OrgUUID == "" || scope.WorkspaceUUID == "":
-		// A run whose scope was never recorded cannot be addressed again.
-		return fail("the provider restarted while this run was in progress, and its workspace could not be resolved to resume it")
 	case len(run.Checkpoint) == 0:
 		return fail("the provider restarted while this run was in progress; it had not reached a checkpoint, so it could not be resumed")
-	case run.Attempt >= maxRecoveryAttempts:
+	case run.Attempt > maxRecoveryAttempts:
 		return fail("the provider restarted while this run was in progress; it has already been resumed " +
 			strconv.Itoa(run.Attempt) + " times without finishing, so it will not be retried again")
 	case resume == nil:
@@ -184,7 +277,19 @@ func (s *Server) recoverRun(ctx context.Context, sr store.ScopedRun, resume reco
 		log.Printf("recovery: resuming run %s (agent %s): %v", run.ID, run.AgentName, err)
 		return fail("the provider restarted while this run was in progress, and resuming it failed: " + err.Error())
 	}
-	return true
+	return recoveryAccepted
+}
+
+func isScheduleDispatchIntent(run store.Run) bool {
+	if run.Phase != store.RunPhasePending || strings.TrimSpace(run.IdempotencyKey) == "" {
+		return false
+	}
+	switch run.Trigger {
+	case agentsv1alpha1.RunTriggerSchedule, agentsv1alpha1.RunTriggerHeartbeat, agentsv1alpha1.RunTriggerWakeup:
+		return true
+	default:
+		return false
+	}
 }
 
 // reportStrandedRun tells the chat or channel a dead run was answering that it is

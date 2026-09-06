@@ -46,6 +46,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 
 	corev1 "k8s.io/api/core/v1"
@@ -494,24 +495,32 @@ func (b *background) resumeRecoveredRun(ctx context.Context, sr store.ScopedRun,
 	if err != nil {
 		return fmt.Errorf("workspace %s: %w", clusterID, err)
 	}
-	// Count the attempt before resuming, so a run that kills the provider on every
-	// resume still walks toward maxRecoveryAttempts instead of looping forever.
-	if stored, gerr := b.server.store.GetRun(ctx, sr.Scope, sr.Run.ID); gerr == nil {
-		stored.Attempt++
-		stored.UpdatedAt = time.Now().UTC()
-		if serr := b.server.store.SaveRun(ctx, sr.Scope, stored); serr != nil {
-			return fmt.Errorf("recording the resume attempt: %w", serr)
-		}
-	}
 	rd := resumeDeps{
 		Creds: vwSecrets{dyn}, CR: vwCR{dyn}, ClusterID: clusterID,
 		HubToken: b.agentToken(ctx, dyn, clusterID, sr.Run.AgentName),
 	}
-	// Detached: the resume outlives this tick, and its own timeout bounds it.
-	go b.server.resumeRun(context.WithoutCancel(ctx), sr.Scope, sr.Run.ID, rd, resumeIntent{
-		FromPhase: store.RunPhaseRunning,
-	})
-	return nil
+	// The sweep already acquired the durable owner lease and incremented Attempt.
+	// Pass that fence through rather than re-reading and rewriting the row: a stale
+	// owner returning after this point must not be able to clobber the recovery.
+	// Wait for resume preflight to finish before reporting acceptance. The actual
+	// model/tool loop remains detached, but a failed GetRun, checkpoint decode, or
+	// fence validation is returned to the sweep instead of being counted as a
+	// successful asynchronous launch.
+	launchCtx, stopLaunch := context.WithTimeout(context.WithoutCancel(ctx), recoveryLaunchTimeout)
+	ready := make(chan error, 1)
+	go b.server.resumeRunWithReady(launchCtx, sr.Scope, sr.Run.ID, rd, resumeIntent{
+		FromPhase:      store.RunPhaseRunning,
+		ExecutionOwner: sr.Run.ExecutionOwner,
+		ExecutionEpoch: sr.Run.ExecutionEpoch,
+	}, ready)
+	select {
+	case err := <-ready:
+		stopLaunch()
+		return err
+	case <-ctx.Done():
+		stopLaunch()
+		return ctx.Err()
+	}
 }
 
 func (b *background) tick(ctx context.Context) {
@@ -540,6 +549,20 @@ func (b *background) process(ctx context.Context, u *unstructured.Unstructured, 
 	}
 	if sched.Spec.Suspend || sched.Status.DisabledReason != "" {
 		return nil
+	}
+
+	// A successful status claim can be followed by a full queue. Keep retrying
+	// the durable intent named by LastRunID before evaluating the clock again;
+	// this covers one-shot schedules and recurring schedules alike.
+	if sched.Status.LastRunID != "" {
+		scope := b.scopeFor(ctx, clusterID, sched.Spec.AgentRef)
+		pending, err := b.server.store.GetRun(ctx, scope, sched.Status.LastRunID)
+		if err != nil {
+			return fmt.Errorf("loading pending schedule intent: %w", err)
+		}
+		if pending.Phase == store.RunPhasePending {
+			return b.submitScheduleJob(ctx, clusterID, sched, pending)
+		}
 	}
 
 	// A spec edit bumps metadata.generation. The stored nextRun was computed
@@ -575,22 +598,6 @@ func (b *background) process(ctx context.Context, u *unstructured.Unstructured, 
 		return nil
 	}
 
-	// Claim: advance lastRun/nextRun with the listed resourceVersion. A
-	// conflict means another replica claimed this fire — skip silently.
-	claim := map[string]any{"lastRun": now.Format(time.RFC3339)}
-	if genChanged {
-		claim["observedGeneration"] = u.GetGeneration()
-	}
-	if !next.IsZero() {
-		claim["nextRun"] = next.Format(time.RFC3339)
-	}
-	if err := b.updateStatus(ctx, clusterID, u, claim); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "conflict") {
-			return nil
-		}
-		return fmt.Errorf("claiming: %w", err)
-	}
-
 	trigger := agentsv1alpha1.RunTriggerSchedule
 	task := sched.Spec.Task
 	switch sched.Spec.Type {
@@ -604,16 +611,112 @@ func (b *background) process(ctx context.Context, u *unstructured.Unstructured, 
 		return b.updateStatus(ctx, clusterID, u, map[string]any{"disabledReason": "schedule has no task/checklist"})
 	}
 
+	occurrence := scheduleOccurrence(sched)
+	if occurrence.IsZero() {
+		// scheduleDue only reports fire=true when an occurrence exists. Keep this
+		// defensive branch explicit so a malformed status cannot create an
+		// unrepeatable intent keyed to an accidental zero timestamp.
+		return fmt.Errorf("schedule %s fired without an occurrence timestamp", sched.Name)
+	}
+	scope := b.scopeFor(ctx, clusterID, sched.Spec.AgentRef)
+	key := scheduleDispatchKey(clusterID, u, sched, occurrence)
+	intent := store.Run{
+		ID: scheduleRunID(key), AgentName: sched.Spec.AgentRef, SessionID: "schedule:" + sched.Name,
+		Trigger: string(trigger), IdempotencyKey: key, Phase: store.RunPhasePending, Input: task,
+		Delivery:  &store.RunDelivery{SourceName: sched.Name, NotifyChannel: sched.Spec.ChannelRef, Kind: string(executor.KindSchedule)},
+		CreatedAt: now.UTC(), UpdatedAt: now.UTC(),
+	}
+	pending, _, err := b.server.store.CreateRunIfAbsent(ctx, scope, intent)
+	if err != nil {
+		return fmt.Errorf("persisting schedule dispatch intent: %w", err)
+	}
+
+	// Claim the occurrence after the durable intent exists. A conflict means
+	// another replica claimed this fire; its intent remains the handoff owner.
+	claim := map[string]any{"lastRun": now.Format(time.RFC3339)}
+	if !occurrence.IsZero() {
+		claim["lastRun"] = occurrence.Format(time.RFC3339)
+	}
+	claim["lastRunID"] = pending.ID
+	if genChanged {
+		claim["observedGeneration"] = u.GetGeneration()
+	}
+	if !next.IsZero() {
+		claim["nextRun"] = next.Format(time.RFC3339)
+	}
+	if err := b.updateStatus(ctx, clusterID, u, claim); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "conflict") {
+			return nil
+		}
+		return fmt.Errorf("claiming: %w", err)
+	}
+	if pending.Phase != store.RunPhasePending {
+		// Another delivery already acquired or completed the intent while this
+		// replica was updating status. Its durable claim prevents duplicate work.
+		return nil
+	}
+	return b.submitScheduleJob(ctx, clusterID, sched, pending)
+}
+
+func scheduleOccurrence(sched *agentsv1alpha1.Schedule) time.Time {
+	switch sched.Spec.Type {
+	case agentsv1alpha1.ScheduleTypeCron, agentsv1alpha1.ScheduleTypeHeartbeat:
+		if sched.Status.NextRun != nil {
+			return sched.Status.NextRun.UTC()
+		}
+	case agentsv1alpha1.ScheduleTypeWakeup:
+		if sched.Spec.RunAt != nil {
+			return sched.Spec.RunAt.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func scheduleDispatchKey(clusterID string, u *unstructured.Unstructured, sched *agentsv1alpha1.Schedule, occurrence time.Time) string {
+	identity := string(u.GetUID())
+	if identity == "" {
+		identity = sched.Name
+	}
+	return fmt.Sprintf("schedule:%s:%s:%d:%s", clusterID, identity, u.GetGeneration(), occurrence.UTC().Format(time.RFC3339Nano))
+}
+
+func scheduleRunID(key string) string {
+	return "schedule-" + uuid.NewSHA1(uuid.NameSpaceURL, []byte(key)).String()
+}
+
+func (b *background) submitScheduleJob(ctx context.Context, clusterID string, sched *agentsv1alpha1.Schedule, run store.Run) error {
+	// The durable intent is the source of truth on every retry. A schedule may
+	// be edited after a queue rejection; dispatching the current spec under an
+	// old occurrence ID would run the new task while recording the old one.
+	trigger := run.Trigger
+	task := run.Input
+	sessionID := run.SessionID
+	sourceName := sched.Name
+	notifyChannel := sched.Spec.ChannelRef
+	if run.Delivery != nil {
+		if run.Delivery.SourceName != "" {
+			sourceName = run.Delivery.SourceName
+		}
+		notifyChannel = run.Delivery.NotifyChannel
+	}
+	if trigger == "" || task == "" {
+		trigger = agentsv1alpha1.RunTriggerSchedule
+		task = sched.Spec.Task
+		switch sched.Spec.Type {
+		case agentsv1alpha1.ScheduleTypeHeartbeat:
+			trigger = agentsv1alpha1.RunTriggerHeartbeat
+			task = heartbeatPrompt(sched.Spec.Checklist)
+		case agentsv1alpha1.ScheduleTypeWakeup:
+			trigger = agentsv1alpha1.RunTriggerWakeup
+		}
+	}
+	if sessionID == "" {
+		sessionID = "schedule:" + sourceName
+	}
 	return b.exec.Submit(ctx, executor.Job{
-		ID:            fmt.Sprintf("%s/%s/%d", clusterID, sched.Name, now.Unix()),
-		Kind:          executor.KindSchedule,
-		ClusterID:     clusterID,
-		SourceName:    sched.Name,
-		AgentRef:      sched.Spec.AgentRef,
-		Task:          task,
-		Trigger:       trigger,
-		SessionID:     "schedule:" + sched.Name,
-		NotifyChannel: sched.Spec.ChannelRef,
+		ID: run.ID, RunID: run.ID, Kind: executor.KindSchedule, ClusterID: clusterID,
+		SourceName: sourceName, AgentRef: run.AgentName, Task: task, Trigger: trigger,
+		SessionID: sessionID, NotifyChannel: notifyChannel,
 	})
 }
 
@@ -724,9 +827,10 @@ func (b *background) handle(ctx context.Context, job executor.Job) error {
 	}
 
 	scope := b.scopeFor(ctx, job.ClusterID, agent.Name)
-	res, runErr := b.server.executeTask(ctx, taskRun{
+	tr := taskRun{
 		Creds: vwSecrets{dyn}, CR: vwCR{dyn}, Scope: scope, Agent: agent,
 		SessionID: job.SessionID, Task: job.Task, Trigger: job.Trigger, SourceName: job.SourceName,
+		RunID: job.RunID, RunIDPersisted: job.RunID != "",
 		NotifyChannel: job.NotifyChannel,
 		// Recorded on the run so a crash mid-flight can still be reported to
 		// whoever is waiting — the goroutine that knows this is the thing a
@@ -739,7 +843,16 @@ func (b *background) handle(ctx context.Context, job executor.Job) error {
 		// losing a scheduled run over a search backend it may never touch.
 		ClusterID: job.ClusterID,
 		HubToken:  b.agentToken(ctx, dyn, job.ClusterID, agent.Name),
-	})
+	}
+	res, runErr := b.server.executeTask(ctx, tr)
+	if errors.Is(runErr, store.ErrRunAlreadyClaimed) || errors.Is(runErr, store.ErrRunLeaseLost) {
+		// A duplicate queue delivery raced the first worker. The durable Pending →
+		// Running claim is the idempotency boundary; no source status/error should
+		// be emitted for the losing delivery. Lease loss has the same rule: this
+		// worker's result is no longer authoritative after a recovery claim or a
+		// failed fenced write.
+		return nil
+	}
 
 	b.recordOutcome(ctx, job, res.RunID, runErr)
 

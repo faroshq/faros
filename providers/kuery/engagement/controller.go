@@ -47,7 +47,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +67,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/faroshq/provider-kuery/tenantindex"
 	"github.com/faroshq/provider-sdk/tenantaccess"
 
 	"github.com/kcp-dev/multicluster-provider/apiexport"
@@ -244,24 +244,7 @@ func (c *Controller) EngagedCount() int {
 // replica syncs each edge. The tenant key is the workspace PATH (matching the
 // X-Faros-Tenant the hub injects).
 func (c *Controller) TenantEdges(ctx context.Context, tenant string) ([]string, error) {
-	var rows []kuerystore.ClusterModel
-	if err := c.cfg.Store.RawDB().WithContext(ctx).
-		Where("status = ?", "active").
-		Find(&rows).Error; err != nil {
-		return nil, fmt.Errorf("listing engaged clusters: %w", err)
-	}
-	prefix := tenant + "/"
-	var edges []string
-	for _, row := range rows {
-		var labels map[string]string
-		_ = json.Unmarshal(row.Labels, &labels)
-		if labels[TenantLabel] != tenant || !strings.HasPrefix(row.Name, prefix) {
-			continue
-		}
-		edges = append(edges, strings.TrimPrefix(row.Name, prefix))
-	}
-	sort.Strings(edges)
-	return edges, nil
+	return tenantindex.EdgeNames(ctx, c.cfg.Store.RawDB(), tenant)
 }
 
 // Reconcile drives one enabled workspace: it resolves the workspace's

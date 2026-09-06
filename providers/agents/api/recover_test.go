@@ -128,6 +128,113 @@ func TestSweepResumesCheckpointedRuns(t *testing.T) {
 	}
 }
 
+func TestSweepClaimsBeforeResumeAndFencesThePreviousOwner(t *testing.T) {
+	ctx := context.Background()
+	f := newRecoverFixture(t)
+	old := time.Now().UTC().Add(-time.Hour)
+	oldLease := old.Add(time.Minute)
+	payload, err := json.Marshal(runCheckpoint{Engine: engine.Checkpoint{
+		Messages: []engine.CheckpointMessage{{Role: "user", Content: "do the thing"}}, Iter: 4,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.store.SaveRun(ctx, f.scope, store.Run{
+		ID: "stale", AgentName: f.scope.AgentName, SessionID: "chat", Trigger: agentsv1alpha1.RunTriggerChat,
+		Phase: store.RunPhaseRunning, Checkpoint: payload, CreatedAt: old, UpdatedAt: old,
+		ExecutionOwner: "previous-owner", ExecutionEpoch: 3, LeaseUntil: &oldLease,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	f.s.sweepStaleRuns(ctx, func(_ context.Context, sr store.ScopedRun, _ string) error {
+		called = true
+		if sr.Run.ExecutionOwner == "previous-owner" || sr.Run.ExecutionEpoch != 4 || sr.Run.Attempt != 1 {
+			t.Fatalf("resume callback received an unfenced run: %+v", sr.Run)
+		}
+		if _, err := f.s.store.ClaimStaleRun(ctx, sr.Scope, sr.Run.ID, sr.Run.UpdatedAt, "racer", time.Now().UTC()); !errors.Is(err, store.ErrRunNotStale) {
+			t.Fatalf("competing recovery claim = %v, want ErrRunNotStale", err)
+		}
+		stale := sr.Run
+		stale.Phase = store.RunPhaseSucceeded
+		if err := f.s.store.SaveRunOwned(ctx, sr.Scope, stale, "previous-owner", 3); !errors.Is(err, store.ErrRunLeaseLost) {
+			t.Fatalf("previous owner write = %v, want ErrRunLeaseLost", err)
+		}
+		return nil
+	}, nil)
+
+	if !called {
+		t.Fatal("stale checkpointed run was not handed to the resume callback")
+	}
+	got := f.phaseOf(t, "stale")
+	if got.Phase != store.RunPhaseRunning || got.ExecutionOwner == "previous-owner" || got.ExecutionEpoch != 4 {
+		t.Fatalf("post-claim run = %+v", got)
+	}
+}
+
+func TestSweepClaimsBeforeFailingStaleRun(t *testing.T) {
+	ctx := context.Background()
+	f := newRecoverFixture(t)
+	old := time.Now().UTC().Add(-time.Hour)
+	oldLease := old.Add(time.Minute)
+	if err := f.s.store.SaveRun(ctx, f.scope, store.Run{
+		ID: "uncheckpointed", AgentName: f.scope.AgentName, SessionID: "chat",
+		Trigger: agentsv1alpha1.RunTriggerChat, Phase: store.RunPhaseRunning,
+		CreatedAt: old, UpdatedAt: old, ExecutionOwner: "previous-owner",
+		ExecutionEpoch: 2, LeaseUntil: &oldLease,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.s.sweepStaleRuns(ctx, func(context.Context, store.ScopedRun, string) error {
+		t.Fatal("an uncheckpointed run must not be resumed")
+		return nil
+	}, nil)
+
+	got := f.phaseOf(t, "uncheckpointed")
+	if got.Phase != store.RunPhaseFailed || got.ExecutionOwner == "previous-owner" || got.ExecutionEpoch != 3 {
+		t.Fatalf("post-failure run = %+v", got)
+	}
+	if err := f.s.store.SaveRunOwned(ctx, f.scope, store.Run{ID: got.ID, Phase: store.RunPhaseSucceeded}, "previous-owner", 2); !errors.Is(err, store.ErrRunLeaseLost) {
+		t.Fatalf("previous owner save = %v, want ErrRunLeaseLost", err)
+	}
+}
+
+func TestSweepLeavesPendingScheduleIntentForDispatchRetry(t *testing.T) {
+	ctx := context.Background()
+	f := newRecoverFixture(t)
+	at := time.Now().UTC().Add(-time.Hour)
+	if err := f.s.store.SaveRun(ctx, f.scope, store.Run{
+		ID: "schedule-intent", AgentName: f.scope.AgentName,
+		Trigger: agentsv1alpha1.RunTriggerWakeup, Phase: store.RunPhasePending,
+		IdempotencyKey: "schedule:cluster:wakeup:occurrence", CreatedAt: at, UpdatedAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.s.sweepStaleRuns(ctx, nil, nil)
+	if got := f.phaseOf(t, "schedule-intent"); got.Phase != store.RunPhasePending {
+		t.Fatalf("schedule intent phase = %s, want Pending for scheduler retry", got.Phase)
+	}
+}
+
+func TestResumeRunWithReadyReportsPreflightFailure(t *testing.T) {
+	ctx := context.Background()
+	f := newRecoverFixture(t)
+	f.seedRun(t, "fenced", store.RunPhaseRunning, time.Hour, true, 0)
+	ready := make(chan error, 1)
+	f.s.resumeRunWithReady(ctx, f.scope, "fenced", resumeDeps{}, resumeIntent{
+		FromPhase: store.RunPhaseRunning, ExecutionOwner: "different-owner", ExecutionEpoch: 1,
+	}, ready)
+	if err := <-ready; err == nil || !strings.Contains(err.Error(), "fence") {
+		t.Fatalf("preflight result = %v, want recovery fence failure", err)
+	}
+	if got := f.phaseOf(t, "fenced"); got.Phase != store.RunPhaseRunning {
+		t.Fatalf("preflight changed run phase to %s", got.Phase)
+	}
+}
+
 func TestSweepLeavesFreshAndLiveRunsAlone(t *testing.T) {
 	ctx := context.Background()
 	f := newRecoverFixture(t)
@@ -266,8 +373,12 @@ func TestSweepFailsPendingRunsThatNeverStarted(t *testing.T) {
 		return nil
 	}, nil)
 
-	if got := f.phaseOf(t, "never"); got.Phase != store.RunPhaseFailed {
+	got := f.phaseOf(t, "never")
+	if got.Phase != store.RunPhaseFailed {
 		t.Fatalf("phase = %s, want Failed", got.Phase)
+	}
+	if got.ExecutionOwner == "" || got.ExecutionEpoch != 1 {
+		t.Fatalf("pending run was failed without an ownership claim: %q/%d", got.ExecutionOwner, got.ExecutionEpoch)
 	}
 }
 

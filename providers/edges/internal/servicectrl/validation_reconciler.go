@@ -125,6 +125,9 @@ func (r *ValidationReconciler) Reconcile(ctx context.Context, req mcreconcile.Re
 		return ctrl.Result{}, err
 	}
 
+	if err := ensureEdgeLabel(ctx, c, es); err != nil {
+		return ctrl.Result{}, err
+	}
 	orig := es.DeepCopy()
 
 	// The catalog tells us how to probe this type: the health path, the auth
