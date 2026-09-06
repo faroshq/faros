@@ -629,7 +629,7 @@ func TestTokenReviewAuthenticatorNegativeCacheRepeatRejectionKeepsOneSlot(t *tes
 	first := a.negative[garbage].until
 
 	// A repeat does not extend how long the token is remembered.
-	a.reject(garbage, now.Add(a.negativeTTL/2), ErrHeartbeatTokenRejected)
+	_ = a.reject(garbage, now.Add(a.negativeTTL/2), ErrHeartbeatTokenRejected)
 	if got := a.negative[garbage].until; !got.Equal(first) {
 		t.Fatalf("a repeat rejection moved the expiry from %v to %v", first, got)
 	}
@@ -639,7 +639,7 @@ func TestTokenReviewAuthenticatorNegativeCacheRepeatRejectionKeepsOneSlot(t *tes
 
 	// Once the entry lapses the token is recorded anew, again in one slot.
 	lapsed := first.Add(time.Nanosecond)
-	a.reject(garbage, lapsed, ErrHeartbeatTokenRejected)
+	_ = a.reject(garbage, lapsed, ErrHeartbeatTokenRejected)
 	if len(a.negative) != 1 || len(a.negativeOrder) != 1 {
 		t.Fatalf("after the entry lapsed: len(negative) = %d, len(negativeOrder) = %d, want 1 each", len(a.negative), len(a.negativeOrder))
 	}
@@ -650,8 +650,8 @@ func TestTokenReviewAuthenticatorNegativeCacheRepeatRejectionKeepsOneSlot(t *tes
 	// Interleaved with a flood of distinct tokens, the repeats still cost no
 	// slots and the queue never exceeds the cap.
 	for i := range 1000 {
-		a.reject(key(fmt.Sprintf("flood-%d", i)), lapsed, ErrHeartbeatTokenRejected)
-		a.reject(garbage, lapsed, ErrHeartbeatTokenRejected)
+		_ = a.reject(key(fmt.Sprintf("flood-%d", i)), lapsed, ErrHeartbeatTokenRejected)
+		_ = a.reject(garbage, lapsed, ErrHeartbeatTokenRejected)
 	}
 	if len(a.negative) > a.negativeMax || len(a.negativeOrder) > a.negativeMax {
 		t.Fatalf("after a flood with repeats: len(negative) = %d, len(negativeOrder) = %d, cap %d", len(a.negative), len(a.negativeOrder), a.negativeMax)
