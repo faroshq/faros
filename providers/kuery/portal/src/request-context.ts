@@ -15,6 +15,12 @@ export interface KueryRequestContext {
   basePath: string
   /** Host-owned transport (injects Authorization); falls back to fetch + token on older hosts. */
   fetch: ProviderFetch
+  /**
+   * True when `fetch` is the host's own transport rather than the token
+   * fallback. The host injects Authorization itself, so this is sufficient
+   * auth on its own and stays true after the deprecated token is removed.
+   */
+  hasHostFetch: boolean
   headers: Record<string, string>
   /** Includes the bearer token so token rotation fences an in-flight read. */
   identity: string
@@ -43,5 +49,13 @@ export function createKueryRequestContext(context: KueryRequestContextInput | nu
   const headers: Record<string, string> = {}
   if (orgUUID) headers['X-Faros-Org'] = orgUUID
   if (workspaceUUID) headers['X-Faros-Workspace'] = workspaceUUID
-  return { basePath, fetch: providerFetch(context), headers, identity, scopeIdentity, token }
+  return {
+    basePath,
+    fetch: providerFetch(context),
+    hasHostFetch: typeof context?.fetch === 'function',
+    headers,
+    identity,
+    scopeIdentity,
+    token,
+  }
 }
