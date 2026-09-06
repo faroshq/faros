@@ -20,8 +20,10 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
@@ -206,4 +208,111 @@ func TestHashProviderMainJSReadsEmbeddedAssets(t *testing.T) {
 	if _, err := hashProviderMainJS(context.Background(), nil, Provider{Name: "none"}); err == nil {
 		t.Fatal("expected an error for a provider without a hub-served UI")
 	}
+}
+
+// pinUIIntegrity drops the mutex across the network fetch, so its error path
+// must decide on the entry that is in the map when it re-locks, not on the
+// snapshot it took before fetching. A reconcile whose fetch fails must not
+// delete a pin another reconcile wrote while that fetch was in flight.
+//
+// The client blocks until the test has performed the concurrent write, so the
+// interleaving is forced rather than raced.
+func TestPinUIIntegrityErrorPathKeepsConcurrentlyWrittenPin(t *testing.T) {
+	ui, err := url.Parse("http://provider.invalid/ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := Provider{Name: "cost", UIURL: ui}
+	key := providerKey{Name: "cost"}
+	// The pin this reconcile set out to replace: an older version, so the
+	// version-changed branch of the error path is the one under test.
+	stale := uiIntegrityRecord{version: "1", integrity: "sha384-stale", hashedAt: time.Now()}
+	// What a concurrent reconcile pins while the fetch below is blocked.
+	concurrent := uiIntegrityRecord{version: "3", integrity: "sha384-concurrent", hashedAt: time.Now()}
+
+	fetchStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	r := &CatalogReconciler{
+		uiIntegrity: map[providerKey]uiIntegrityRecord{key: stale},
+		uiClient: httpDoerFunc(func(*http.Request) (*http.Response, error) {
+			close(fetchStarted)
+			<-releaseFetch
+			return nil, errors.New("upstream unreachable")
+		}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Version 2: neither the stale snapshot's version nor the concurrent
+		// writer's, so the error path cannot keep this call's own pin.
+		if got, ok := r.pinUIIntegrity(context.Background(), logr.Discard(), prov, "2"); ok || got != "" {
+			t.Errorf("pinUIIntegrity after a failed fetch = %q, %v; want \"\", false", got, ok)
+		}
+	}()
+
+	<-fetchStarted
+	r.uiIntegrityMu.Lock()
+	r.uiIntegrity[key] = concurrent
+	r.uiIntegrityMu.Unlock()
+	close(releaseFetch)
+	<-done
+
+	r.uiIntegrityMu.Lock()
+	got, ok := r.uiIntegrity[key]
+	r.uiIntegrityMu.Unlock()
+	if !ok {
+		t.Fatal("the concurrently written pin was deleted by the failing reconcile's error path")
+	}
+	if got != concurrent {
+		t.Fatalf("cache entry = %+v, want the concurrently written %+v", got, concurrent)
+	}
+}
+
+// The concurrency fix must not weaken the single-reconcile behaviour the error
+// path documents: an untouched pin for a superseded version is still dropped so
+// the portal loads the new bundle unpinned rather than with a stale hash, and a
+// failure at an unchanged version still keeps its pin.
+func TestPinUIIntegrityErrorPathUncontendedBehaviour(t *testing.T) {
+	ui, err := url.Parse("http://provider.invalid/ui")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := Provider{Name: "cost", UIURL: ui}
+	key := providerKey{Name: "cost"}
+	failing := httpDoerFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("upstream unreachable")
+	})
+
+	t.Run("drops an untouched pin for a superseded version", func(t *testing.T) {
+		r := &CatalogReconciler{
+			uiIntegrity: map[providerKey]uiIntegrityRecord{
+				key: {version: "1", integrity: "sha384-stale", hashedAt: time.Now()},
+			},
+			uiClient: failing,
+		}
+		if got, ok := r.pinUIIntegrity(context.Background(), logr.Discard(), prov, "2"); ok || got != "" {
+			t.Fatalf("pinUIIntegrity = %q, %v; want \"\", false", got, ok)
+		}
+		if _, ok := r.uiIntegrity[key]; ok {
+			t.Fatal("a stale pin for a superseded version was kept")
+		}
+	})
+
+	t.Run("keeps the pin when the version has not changed", func(t *testing.T) {
+		// hashedAt is old enough that the resync window has expired, so the
+		// call re-fetches rather than returning from cache.
+		kept := uiIntegrityRecord{version: "2", integrity: "sha384-kept", hashedAt: time.Now().Add(-2 * UIIntegrityResync)}
+		r := &CatalogReconciler{
+			uiIntegrity: map[providerKey]uiIntegrityRecord{key: kept},
+			uiClient:    failing,
+		}
+		got, ok := r.pinUIIntegrity(context.Background(), logr.Discard(), prov, "2")
+		if !ok || got != kept.integrity {
+			t.Fatalf("pinUIIntegrity = %q, %v; want %q, true", got, ok, kept.integrity)
+		}
+		if r.uiIntegrity[key] != kept {
+			t.Fatalf("cache entry = %+v, want it kept as %+v", r.uiIntegrity[key], kept)
+		}
+	})
 }

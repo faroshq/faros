@@ -113,12 +113,25 @@ func (r *CatalogReconciler) pinUIIntegrity(ctx context.Context, logger logr.Logg
 		logger.Info("WARNING could not pin provider UI bundle; portal loads it unpinned until the next successful reconcile", "err", err.Error(), "version", version)
 		r.uiIntegrityMu.Lock()
 		defer r.uiIntegrityMu.Unlock()
-		if ok && cached.version == version {
+		// Re-read the entry: the pre-fetch snapshot is stale by however long
+		// the fetch took, and another reconcile may have written a newer
+		// record meanwhile. Deciding on the snapshot would delete that record.
+		current, currentOK := r.uiIntegrity[key]
+		if currentOK && current.version == version {
 			// Keep the pin, but do not refresh hashedAt: the next reconcile
 			// retries the fetch instead of trusting this pin for another
 			// resync interval.
-			return cached.integrity, cached.integrity != ""
+			return current.integrity, current.integrity != ""
 		}
+		if currentOK != ok || current != cached {
+			// A concurrent reconcile wrote this entry while the fetch was in
+			// flight, so it is not the stale pin this call set out to replace.
+			// Leave it and report only this attempt's own failure.
+			return "", false
+		}
+		// The entry is unchanged since the snapshot: a pin for a superseded
+		// version. Drop it so the portal loads the new bundle unpinned rather
+		// than with a hash that cannot match it.
 		delete(r.uiIntegrity, key)
 		return "", false
 	}
