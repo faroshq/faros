@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -105,17 +106,41 @@ type Run struct {
 	// goroutine that knew is exactly what a crash destroys: without it, a run that
 	// dies mid-flight can never tell the person waiting in a channel that it is
 	// not coming, and they wait forever.
-	Delivery     *RunDelivery    `json:"delivery,omitempty"`
-	Message      string          `json:"message,omitempty"`
-	Checkpoint   json.RawMessage `json:"checkpoint,omitempty"`
-	InputTokens  int64           `json:"inputTokens,omitempty"`
-	OutputTokens int64           `json:"outputTokens,omitempty"`
-	USDMicros    int64           `json:"usdMicros,omitempty"` // cost in millionths of a USD
-	CreatedAt    time.Time       `json:"createdAt"`
-	UpdatedAt    time.Time       `json:"updatedAt"`
-	StartedAt    *time.Time      `json:"startedAt,omitempty"`
-	FinishedAt   *time.Time      `json:"finishedAt,omitempty"`
+	Delivery   *RunDelivery    `json:"delivery,omitempty"`
+	Message    string          `json:"message,omitempty"`
+	Checkpoint json.RawMessage `json:"checkpoint,omitempty"`
+	// ExecutionOwner and ExecutionEpoch fence every write made by a live
+	// executor. A recovery claim advances the epoch, so a previous owner that
+	// returns after a restart cannot overwrite the recovered run.
+	ExecutionOwner string `json:"executionOwner,omitempty"`
+	ExecutionEpoch int64  `json:"executionEpoch,omitempty"`
+	// LeaseUntil is the durable liveness boundary for ExecutionOwner. A stale
+	// sweep may acquire a run only after this lease expires (and the expected
+	// row version still matches).
+	LeaseUntil   *time.Time `json:"leaseUntil,omitempty"`
+	InputTokens  int64      `json:"inputTokens,omitempty"`
+	OutputTokens int64      `json:"outputTokens,omitempty"`
+	USDMicros    int64      `json:"usdMicros,omitempty"` // cost in millionths of a USD
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
+	StartedAt    *time.Time `json:"startedAt,omitempty"`
+	FinishedAt   *time.Time `json:"finishedAt,omitempty"`
 }
+
+// RunLeaseDuration is deliberately shorter than the recovery grace period. A
+// healthy worker renews it independently of checkpoint cadence; a crashed
+// worker therefore becomes reclaimable without making one slow tool call look
+// abandoned while its lease is still being renewed.
+const RunLeaseDuration = 5 * time.Minute
+
+// Store errors used to distinguish a benign ownership race from a persistence
+// failure. Callers should use errors.Is so the backend-specific wording stays
+// private.
+var (
+	ErrRunAlreadyClaimed = errors.New("run is already claimed or terminal")
+	ErrRunNotStale       = errors.New("run is not stale or has changed")
+	ErrRunLeaseLost      = errors.New("run execution lease was lost")
+)
 
 // RunDelivery is where a run's output goes: the connection to answer on, the
 // exact chat within it, and the agent-channel role for unattended runs.
@@ -319,10 +344,22 @@ type Store interface {
 
 	// Runs (durable, resumable).
 	SaveRun(ctx context.Context, scope Scope, run Run) error
+	// CreateRunIfAbsent persists a pending execution intent exactly once. It
+	// returns the existing row when the same ID or idempotency key was already
+	// created, so scheduler retries converge on one run.
+	CreateRunIfAbsent(ctx context.Context, scope Scope, run Run) (Run, bool, error)
 	GetRun(ctx context.Context, scope Scope, id string) (Run, error)
 	// ClaimRun atomically marks a resumable run as owned by requestID so only
 	// one replica resumes it.
 	ClaimRun(ctx context.Context, scope Scope, id, requestID string, now time.Time) (Run, error)
+	// ClaimStaleRun fences a checkpointed Running run after an atomic
+	// expected-updated-at and expired-lease check. It increments Attempt and
+	// ExecutionEpoch as part of the claim.
+	ClaimStaleRun(ctx context.Context, scope Scope, id string, expectedUpdatedAt time.Time, requestID string, now time.Time) (Run, error)
+	// SaveRunOwned and RenewRun are the only execution-path writes. They reject
+	// an owner whose epoch has been superseded by recovery.
+	SaveRunOwned(ctx context.Context, scope Scope, run Run, owner string, epoch int64) error
+	RenewRun(ctx context.Context, scope Scope, id, owner string, epoch int64, now time.Time) error
 	ListRuns(ctx context.Context, scope Scope, limit int) ([]Run, error)
 	// QueryRuns lists runs newest-first with filters and cursor pagination.
 	QueryRuns(ctx context.Context, scope Scope, q RunQuery) (RunPage, error)

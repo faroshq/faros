@@ -21,7 +21,7 @@ jobs:
     - name: Build
       run: make build
 
-  # Every Go module in the repo gets its own vet + race-test run. provider-sdk
+  # Every production Go module gets its own vet + race-test run. provider-sdk
   # and each provider under providers/ are standalone modules (AGENTS.md §2), so
   # the root `make test` never saw them — security fixes landing in
   # providers/edges, providers/agents or pkg/agent need this gate.
@@ -45,11 +45,9 @@ jobs:
           - { module: providers/app-studio, race: -race }
           - { module: providers/code, race: -race }
           - { module: providers/databricks, race: -race }
-          # edges: TestSSHSessionTeardown races on its own `serverConn`
-          # (internal/ssh/ssh_teardown_test.go:175 vs :191, a test-only bug).
-          # Re-enable -race once that test synchronises the handler write.
-          - { module: providers/edges, race: "" }
+          - { module: providers/edges, race: -race }
           - { module: providers/infrastructure, race: -race }
+          - { module: providers/infrastructure/dev-agent, race: -race }
           - { module: providers/kuery, race: -race }
           - { module: providers/quickstart, race: -race }
     steps:
@@ -65,7 +63,7 @@ jobs:
     # give the embed a target here instead of building every portal twice —
     # `all:` accepts a lone dotfile, an empty directory is a compile error.
     - name: Stub portal/dist for go:embed
-      if: startsWith(matrix.module, 'providers/')
+      if: startsWith(matrix.module, 'providers/') && matrix.module != 'providers/infrastructure/dev-agent'
       working-directory: ${{ matrix.module }}
       run: mkdir -p portal/dist && touch portal/dist/.gitkeep
 
@@ -82,6 +80,74 @@ jobs:
         else
           go test ${{ matrix.race }} -count=1 ./...
         fi
+
+  postgres-contracts:
+    name: PostgreSQL persistence contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: faros_test
+          POSTGRES_PASSWORD: faros_test
+          POSTGRES_DB: faros_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U faros_test -d faros_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: '**/go.sum'
+    - name: Run required database contracts without skips
+      env:
+        AGENTS_TEST_POSTGRES_DSN: postgres://faros_test:faros_test@127.0.0.1:5432/faros_test?sslmode=disable
+        APP_STUDIO_TEST_POSTGRES_DSN: postgres://faros_test:faros_test@127.0.0.1:5432/faros_test?sslmode=disable
+        KUERY_TEST_POSTGRES_DSN: postgres://faros_test:faros_test@127.0.0.1:5432/faros_test?sslmode=disable
+        FAROS_TEST_ARTIFACT_DIR: ${{ runner.temp }}/postgres-contracts
+      run: make test-postgres-contracts
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: postgres-contract-results
+        path: ${{ runner.temp }}/postgres-contracts/
+        if-no-files-found: ignore
+
+  edges-replica-contract:
+    name: Edges replica convergence (real Kubernetes API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: '**/go.sum'
+    # This bounded topology needs one API server, not the full multi-shard
+    # Tilt/operator stack. The two replica registries share real Lease storage.
+    - uses: helm/kind-action@v1
+      with:
+        cluster_name: faros-replica-contract
+        wait: 180s
+    - name: Export an explicit disposable-cluster kubeconfig
+      run: kind get kubeconfig --name faros-replica-contract > "${RUNNER_TEMP}/replica.kubeconfig"
+    - name: Verify recovery and takeover with two replica registries
+      env:
+        EDGES_REPLICA_TEST_KUBECONFIG: ${{ runner.temp }}/replica.kubeconfig
+        FAROS_TEST_ARTIFACT_DIR: ${{ runner.temp }}/edges-replica-contract
+      run: make test-edges-replica-contract
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: edges-replica-contract-results
+        path: ${{ runner.temp }}/edges-replica-contract/
+        if-no-files-found: ignore
 
   # govulncheck per module, blocking. hack/govulncheck.sh fails the job only on
   # vulnerabilities govulncheck traced to a *called* symbol and that are not

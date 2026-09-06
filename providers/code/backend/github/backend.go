@@ -76,6 +76,38 @@ func owner(conn *codev1alpha1.Connection, repo *codev1alpha1.Repository) string 
 	return conn.Spec.Owner
 }
 
+// validateRepositoryIdentity prevents callers that hold a previously
+// provisioned Repository from redirecting an operation to another host
+// object by mutating its desired fields (or the referenced Connection). The
+// controller performs the same check, but keeping the guard at the backend
+// boundary also protects commit/deploy-key/collaborator paths that reuse this
+// interface directly.
+func validateRepositoryIdentity(conn *codev1alpha1.Connection, repo *codev1alpha1.Repository) error {
+	if conn == nil || repo == nil {
+		return errors.New("github: connection and repository are required")
+	}
+	identity := repo.Status.Identity
+	if identity == nil {
+		return nil
+	}
+	if identity.Name != repo.Spec.Name {
+		return fmt.Errorf("repository identity conflict: name changed from %q to %q", identity.Name, repo.Spec.Name)
+	}
+	if identity.SpecOwner != repo.Spec.Owner {
+		return errors.New("github: repository identity conflict: owner changed")
+	}
+	if identity.Provider != "" && identity.Provider != conn.Spec.Provider {
+		return fmt.Errorf("repository identity conflict: provider changed from %q to %q", identity.Provider, conn.Spec.Provider)
+	}
+	if identity.BaseURL != conn.Spec.BaseURL {
+		return fmt.Errorf("repository identity conflict: baseURL changed from %q to %q", identity.BaseURL, conn.Spec.BaseURL)
+	}
+	if identity.Owner != owner(conn, repo) {
+		return fmt.Errorf("repository identity conflict: effective owner changed from %q to %q", identity.Owner, owner(conn, repo))
+	}
+	return nil
+}
+
 // ValidateConnection authenticates the token and returns the login + granted
 // scopes. GitHub reports token scopes on the X-OAuth-Scopes response header.
 func (b *Backend) ValidateConnection(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential) (string, []string, error) {
@@ -98,6 +130,9 @@ func (b *Backend) ValidateConnection(ctx context.Context, conn *codev1alpha1.Con
 // EnsureRepository creates the repository if absent and returns its host
 // identifiers. Idempotent: an existing repo returns its current identifiers.
 func (b *Backend) EnsureRepository(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository) (backend.RepositoryResult, error) {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return backend.RepositoryResult{}, err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.RepositoryResult{}, err
@@ -107,6 +142,23 @@ func (b *Backend) EnsureRepository(ctx context.Context, conn *codev1alpha1.Conne
 	// Look up first so the call is idempotent and we don't 422 on re-reconcile.
 	existing, resp, err := c.Repositories.Get(ctx, org, repo.Spec.Name)
 	if err == nil {
+		if err := validateObservedRepositoryID(repo, existing); err != nil {
+			return backend.RepositoryResult{}, err
+		}
+		// Description is a continuously reconciled field. Creation-only inputs
+		// (AutoInit and DefaultBranch) intentionally remain untouched once the
+		// repository exists.
+		if existing.GetDescription() != repo.Spec.Description {
+			updated, editResp, editErr := c.Repositories.Edit(ctx, org, repo.Spec.Name, &gogithub.Repository{
+				Description: gogithub.String(repo.Spec.Description),
+			})
+			if editErr != nil {
+				return backend.RepositoryResult{}, classify(editResp, editErr)
+			}
+			if updated != nil {
+				existing = updated
+			}
+		}
 		return repoResult(existing), nil
 	}
 	if resp == nil || resp.StatusCode != http.StatusNotFound {
@@ -145,11 +197,25 @@ func (b *Backend) EnsureRepository(ctx context.Context, conn *codev1alpha1.Conne
 
 // DeleteRepository removes the repository. Idempotent: a missing repo is success.
 func (b *Backend) DeleteRepository(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository) error {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return err
 	}
-	resp, err := c.Repositories.Delete(ctx, owner(conn, repo), repo.Spec.Name)
+	org := owner(conn, repo)
+	existing, getResp, getErr := c.Repositories.Get(ctx, org, repo.Spec.Name)
+	if getErr != nil {
+		if getResp != nil && getResp.StatusCode == http.StatusNotFound {
+			return nil
+		}
+		return classify(getResp, getErr)
+	}
+	if err := validateObservedRepositoryID(repo, existing); err != nil {
+		return err
+	}
+	resp, err := c.Repositories.Delete(ctx, org, repo.Spec.Name)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return nil
@@ -159,10 +225,31 @@ func (b *Backend) DeleteRepository(ctx context.Context, conn *codev1alpha1.Conne
 	return nil
 }
 
+// validateObservedRepositoryID refuses to operate on a host object whose
+// stable id cannot be proven to match the object recorded in status. GitHub's
+// repository response normally includes id; a missing id is unsafe once the
+// controller has already recorded one, because the same owner/name path may
+// have been deleted and recreated by someone else.
+func validateObservedRepositoryID(repo *codev1alpha1.Repository, existing *gogithub.Repository) error {
+	if repo == nil || existing == nil || repo.Status.RepoID == "" {
+		return nil
+	}
+	if existing.GetID() == 0 {
+		return fmt.Errorf("github: repository identity conflict: host repository id is missing; cannot verify recorded id %q", repo.Status.RepoID)
+	}
+	if repo.Status.RepoID != strconv.FormatInt(existing.GetID(), 10) {
+		return fmt.Errorf("github: repository identity conflict: host repository id changed from %q to %d", repo.Status.RepoID, existing.GetID())
+	}
+	return nil
+}
+
 // CommitFiles creates one commit containing all supplied text files and moves
 // the target branch. It uses GitHub's Git data API, so the provider never needs
 // a local clone or working tree.
 func (b *Backend) CommitFiles(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, input backend.RepositoryCommitInput) (backend.RepositoryCommitResult, error) {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return backend.RepositoryCommitResult{}, err
+	}
 	if len(input.Files) == 0 {
 		return backend.RepositoryCommitResult{}, errors.New("github: at least one file is required")
 	}
@@ -539,6 +626,9 @@ func commitURL(org string, repo *codev1alpha1.Repository, commit *gogithub.Commi
 // Idempotent on the key material: an already-registered identical key returns
 // its existing id rather than 422-ing.
 func (b *Backend) EnsureDeployKey(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, key *codev1alpha1.DeployKey, publicKey string) (backend.DeployKeyResult, error) {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return backend.DeployKeyResult{}, err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.DeployKeyResult{}, err
@@ -575,6 +665,9 @@ func (b *Backend) EnsureDeployKey(ctx context.Context, conn *codev1alpha1.Connec
 // DeleteDeployKey removes the key identified by keyID. Idempotent: an empty or
 // missing key is success.
 func (b *Backend) DeleteDeployKey(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, keyID string) error {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return err
+	}
 	if keyID == "" {
 		return nil
 	}
@@ -600,6 +693,9 @@ func (b *Backend) DeleteDeployKey(ctx context.Context, conn *codev1alpha1.Connec
 // Pending is true when GitHub created an invitation the user must still accept
 // (the usual case for someone who is not already a member/collaborator).
 func (b *Backend) EnsureCollaborator(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, collab *codev1alpha1.Collaborator) (backend.CollaboratorResult, error) {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return backend.CollaboratorResult{}, err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.CollaboratorResult{}, err
@@ -625,6 +721,9 @@ func (b *Backend) EnsureCollaborator(ctx context.Context, conn *codev1alpha1.Con
 // RemoveCollaborator revokes the grant and cancels any pending invitation.
 // Idempotent.
 func (b *Backend) RemoveCollaborator(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, collab *codev1alpha1.Collaborator) error {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return err
@@ -666,6 +765,9 @@ var packageTypes = []string{"container", "docker", "npm", "maven", "rubygems", "
 // endpoint when the owner is a user account) and filter by repository. Read-only
 // — packages are created by pushing artifacts, not through this call.
 func (b *Backend) ListPackages(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository) ([]backend.PackageInfo, error) {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return nil, err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return nil, err

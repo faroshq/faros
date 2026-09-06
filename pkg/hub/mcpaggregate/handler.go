@@ -24,9 +24,11 @@ limitations under the License.
 //
 // Per request the handler parses the tenant cluster + MCPServer name out of the
 // path, verifies the caller's bearer against that tenant (see BearerVerifier),
-// builds a fresh stateless mcp.Server, federates every Ready provider's own
-// /mcp endpoint into it, and serves the MCP protocol over streamable HTTP.
-// Nothing is federated for a bearer that fails verification.
+// builds a fresh stateless mcp.Server, and serves the MCP protocol over
+// streamable HTTP. Provider metadata is read through a bounded cache scoped to
+// the tenant and bearer digest; the provider set is still enumerated for every
+// request, and proxy calls use the current target URL. Nothing is federated for
+// a bearer that fails verification.
 package mcpaggregate
 
 import (
@@ -51,6 +53,16 @@ import (
 // DefaultVerifyCacheTTL is how long a successful bearer verification is
 // reused for the same (bearer, cluster, MCPServer) before it is re-checked.
 const DefaultVerifyCacheTTL = 60 * time.Second
+
+// DefaultCatalogCacheTTL is the maximum age of provider MCP metadata used by
+// ordinary aggregate requests. Provider target changes invalidate the entry
+// immediately; the TTL bounds how long an unchanged provider's metadata can be
+// reused before another discovery refresh.
+const DefaultCatalogCacheTTL = 30 * time.Second
+
+// DefaultCatalogCacheMaxEntries bounds the number of tenant/credential
+// metadata catalogs retained by one aggregate handler.
+const DefaultCatalogCacheMaxEntries = 256
 
 // RateLimiter admits or rejects a pre-authentication verification attempt
 // for one client address. The hub's token-login limiter satisfies it.
@@ -88,13 +100,30 @@ type Options struct {
 	// ClientIP derives the address the rate limiter keys on. Defaults to the
 	// host part of RemoteAddr; the hub passes its proxy-header-aware helper.
 	ClientIP func(*http.Request) string
+	// CatalogCacheTTL bounds how long provider MCP discovery metadata is reused
+	// for an unchanged tenant, credential, and target set. Defaults to
+	// DefaultCatalogCacheTTL.
+	CatalogCacheTTL time.Duration
+	// CatalogCacheMaxEntries bounds retained tenant/credential catalogs.
+	// Defaults to DefaultCatalogCacheMaxEntries.
+	CatalogCacheMaxEntries int
 }
 
 // New returns the http.Handler mounted at apiurl.PathPrefixMCPServer. The
 // handler expects the prefix to have been stripped, so it sees
 // /{cluster}/apis/faros.sh/v1alpha1/mcpservers/{name}/mcp.
 func New(opts Options) http.Handler {
-	h := &handler{opts: opts, verified: make(map[string]time.Time)}
+	if opts.CatalogCacheTTL <= 0 {
+		opts.CatalogCacheTTL = DefaultCatalogCacheTTL
+	}
+	if opts.CatalogCacheMaxEntries <= 0 {
+		opts.CatalogCacheMaxEntries = DefaultCatalogCacheMaxEntries
+	}
+	h := &handler{
+		opts:     opts,
+		verified: make(map[string]time.Time),
+		catalog:  newCatalogCache(opts.CatalogCacheTTL, opts.CatalogCacheMaxEntries),
+	}
 	if h.opts.VerifyCacheTTL <= 0 {
 		h.opts.VerifyCacheTTL = DefaultVerifyCacheTTL
 	}
@@ -109,6 +138,7 @@ type handler struct {
 
 	mu       sync.Mutex
 	verified map[string]time.Time // verification cache key -> expiry
+	catalog  *catalogCache
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +167,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				externalURL: h.opts.ExternalURL,
 				enumerate:   h.opts.Providers,
 				log:         h.opts.Logger,
+				catalog:     h.catalog,
 			})
 		},
 		&mcp.StreamableHTTPOptions{Stateless: true},
@@ -228,8 +259,15 @@ func (h *handler) remember(key string) {
 // verifyCacheKey never stores the bearer itself: only its digest, bound to
 // the cluster and MCPServer it was verified for.
 func verifyCacheKey(token, cluster, name string) string {
+	return credentialDigest(token) + "|" + cluster + "|" + name
+}
+
+// credentialDigest returns the only bearer-derived value retained by cache
+// keys. Callers must never put the bearer itself into logs, cache keys, or
+// retained request-scoped objects.
+func credentialDigest(token string) string {
 	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:]) + "|" + cluster + "|" + name
+	return hex.EncodeToString(sum[:])
 }
 
 // remoteHost is the default ClientIP: the connection's peer address with no
@@ -249,12 +287,15 @@ type buildParams struct {
 	externalURL string
 	enumerate   ProviderEnumerator
 	log         logr.Logger
+	catalog     *catalogCache
 }
 
 // buildServer constructs the aggregate mcp.Server for one request: generic
 // per-tenant metadata, the faros://about resource, and every Ready provider's
-// federated tools. It never fails — with no providers it serves an empty but
-// valid MCP server.
+// federated tools. Provider discovery is cached when a catalog cache is
+// supplied; direct callers without one retain the same fresh-discovery
+// behavior. It never fails — with no providers it serves an empty but valid
+// MCP server.
 func buildServer(ctx context.Context, p buildParams) *mcp.Server {
 	title := fmt.Sprintf("Faros — %s (tenant %s)", p.name, p.cluster)
 	instructions := fmt.Sprintf(
@@ -271,12 +312,19 @@ func buildServer(ctx context.Context, p buildParams) *mcp.Server {
 		targets = p.enumerate(ctx)
 	}
 
+	var catalog *providerCatalog
+	if p.catalog != nil {
+		catalog = p.catalog.get(ctx, targets, p.token, p.cluster)
+	} else {
+		catalog = discoverCatalog(ctx, targets, p.token, p.cluster)
+	}
+
 	// Merge each provider's own instructions (e.g. a Home Assistant Service's
 	// operator-authored entity/room guidance) into the aggregate's instructions,
 	// so that context reaches the model here — not only on the provider's direct
-	// endpoint. Fetched before the server is built (instructions are fixed at
-	// construction).
-	if extra := FederatedInstructions(ctx, targets, p.token, p.cluster); extra != "" {
+	// endpoint. The cache stores only this immutable metadata; the current
+	// target is applied while constructing the request server.
+	if extra := catalog.instructions(targets); extra != "" {
 		instructions += "\n\n--- Provider guidance ---\n\n" + extra
 	}
 
@@ -290,7 +338,7 @@ func buildServer(ctx context.Context, p buildParams) *mcp.Server {
 		EndpointURL: p.externalURL + apiurl.MCPServerPath(p.cluster, p.name),
 	})
 
-	registerProviderTools(ctx, srv, p.log, targets, p.token, p.cluster)
+	registerCatalogTools(srv, p.log, catalog, targets, p.token, p.cluster)
 	return srv
 }
 

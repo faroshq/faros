@@ -67,9 +67,17 @@ const (
 )
 
 // RepositorySpec is the desired state.
+//
+// The object-level rule keeps optional owner presence immutable as well as its
+// value. A field-level oldSelf rule is not evaluated for an omitted optional
+// field by every Kubernetes version, so it cannot reliably reject an
+// absent-to-present transition after handoff.
+// +kubebuilder:validation:XValidation:rule="has(self.owner) == has(oldSelf.owner) && (!has(self.owner) || self.owner == oldSelf.owner)",message="spec.owner is immutable"
 type RepositorySpec struct {
-	// ConnectionRef names the Connection (same workspace) whose credential
-	// + owner this repository is created under.
+	// ConnectionRef names the Connection (same workspace) whose credential and
+	// owner this repository is created under. After handoff it may be changed
+	// only to rotate credentials for the same provider, endpoint, and effective
+	// owner; retargeting a repository requires delete and recreate.
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
@@ -80,6 +88,7 @@ type RepositorySpec struct {
 	// +required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=100
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.name is immutable"
 	Name string `json:"name"`
 
 	// Owner overrides the Connection's owner for this single repository
@@ -117,6 +126,13 @@ type RepositoryStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
+	// Identity records the external repository identity that was handed to the
+	// backend. It is populated before the first ensure call so a later mutable
+	// update cannot redirect this object to another owner, host, or repository,
+	// and deletion can continue to target the original object.
+	// +optional
+	Identity *RepositoryIdentity `json:"identity,omitempty"`
+
 	// RepoID is the host-side numeric/opaque id of the repository.
 	// +optional
 	// +kubebuilder:validation:MaxLength=64
@@ -142,6 +158,32 @@ type RepositoryStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// RepositoryIdentity is the stable external identity of a managed
+// repository. Owner is the effective owner after applying spec.owner over the
+// referenced Connection's owner. Provider and BaseURL identify the remote
+// host; ConnectionRef identifies the credential anchor used to operate it.
+type RepositoryIdentity struct {
+	// ConnectionRef is the Connection currently supplying the credential. It may
+	// rotate to another connection only when the controller proves the external
+	// provider, endpoint, and effective owner are unchanged.
+	ConnectionRef string `json:"connectionRef"`
+	// Provider is the registered git backend used at handoff.
+	Provider GitProvider `json:"provider"`
+	// BaseURL identifies a GitHub Enterprise or other self-hosted endpoint.
+	// Empty means the provider's public endpoint.
+	// +optional
+	BaseURL string `json:"baseURL,omitempty"`
+	// Owner is the effective account or organization containing the repository.
+	Owner string `json:"owner"`
+	// SpecOwner preserves the raw spec.owner value so an older API server or a
+	// fake client cannot turn an inherited owner into a different explicit
+	// ownership contract without being rejected by the controller.
+	// +optional
+	SpecOwner string `json:"specOwner,omitempty"`
+	// Name is the repository name on the host.
+	Name string `json:"name"`
 }
 
 // FinalizerRepository is added by the RepositoryController so the host-side

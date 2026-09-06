@@ -89,7 +89,10 @@ var agentsSchema = []string{
 		created_at TIMESTAMPTZ NOT NULL,
 		updated_at TIMESTAMPTZ NOT NULL,
 		started_at TIMESTAMPTZ,
-		finished_at TIMESTAMPTZ
+		finished_at TIMESTAMPTZ,
+		execution_owner TEXT NOT NULL DEFAULT '',
+		execution_epoch BIGINT NOT NULL DEFAULT 0,
+		lease_until TIMESTAMPTZ
 	)`,
 	// Runs predating the result-on-the-run-record change carry neither column;
 	// migrate in place (idempotent).
@@ -97,6 +100,9 @@ var agentsSchema = []string{
 	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS sources JSONB`,
 	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS idempotency_key TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS delivery JSONB`,
+	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS execution_owner TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS execution_epoch BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE agents_runs ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ`,
 	// Partial unique index: at most one run per (tenant, agent, key), while the
 	// overwhelming majority of runs carry no key at all and are unconstrained.
 	`CREATE UNIQUE INDEX IF NOT EXISTS agents_runs_idempotency_idx
@@ -425,38 +431,89 @@ func (p *PostgresStore) SaveRun(ctx context.Context, scope Scope, run Run) error
 	if run.ID == "" {
 		return fmt.Errorf("run ID is required")
 	}
-	sources, err := marshalJSONB(run.Sources)
+	sources, delivery, err := runJSON(run)
 	if err != nil {
 		return err
 	}
-	var delivery any
-	if run.Delivery != nil {
-		if delivery, err = marshalJSONB(run.Delivery); err != nil {
-			return err
-		}
-	}
-	_, err = p.db.ExecContext(ctx, `
+	result, err := p.db.ExecContext(ctx, `
 		INSERT INTO agents_runs
 			(id, org_uuid, workspace_uuid, agent_name, session_id, trigger_kind, parent_run_id, phase, attempt,
-			 input, output, sources, idempotency_key, delivery, message, checkpoint, input_tokens, output_tokens, usd_micros, created_at, updated_at, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
-		ON CONFLICT (id) DO UPDATE SET
-			phase=EXCLUDED.phase, attempt=EXCLUDED.attempt, message=EXCLUDED.message,
-			output=EXCLUDED.output, sources=EXCLUDED.sources, delivery=EXCLUDED.delivery,
-			checkpoint=EXCLUDED.checkpoint, input_tokens=EXCLUDED.input_tokens,
-			output_tokens=EXCLUDED.output_tokens, usd_micros=EXCLUDED.usd_micros,
-			updated_at=EXCLUDED.updated_at, started_at=EXCLUDED.started_at, finished_at=EXCLUDED.finished_at`,
-		run.ID, scope.OrgUUID, scope.WorkspaceUUID, run.AgentName, run.SessionID, run.Trigger, run.ParentRunID,
-		string(run.Phase), run.Attempt, run.Input, run.Output, sources, run.IdempotencyKey, delivery, run.Message, nullBytes(run.Checkpoint),
-		run.InputTokens, run.OutputTokens, run.USDMicros,
-		run.CreatedAt.UTC(), run.UpdatedAt.UTC(), nullTime(run.StartedAt), nullTime(run.FinishedAt))
-	return err
+			 input, output, sources, idempotency_key, delivery, message, checkpoint, input_tokens, output_tokens, usd_micros,
+			 created_at, updated_at, started_at, finished_at, execution_owner, execution_epoch, lease_until)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+			ON CONFLICT (id) DO UPDATE SET
+				phase=EXCLUDED.phase, attempt=EXCLUDED.attempt, message=EXCLUDED.message,
+				output=EXCLUDED.output, sources=EXCLUDED.sources, delivery=EXCLUDED.delivery,
+				checkpoint=EXCLUDED.checkpoint, input_tokens=EXCLUDED.input_tokens,
+				output_tokens=EXCLUDED.output_tokens, usd_micros=EXCLUDED.usd_micros,
+				updated_at=EXCLUDED.updated_at, started_at=EXCLUDED.started_at, finished_at=EXCLUDED.finished_at,
+				execution_owner=EXCLUDED.execution_owner, execution_epoch=EXCLUDED.execution_epoch,
+				lease_until=EXCLUDED.lease_until
+			WHERE agents_runs.org_uuid=EXCLUDED.org_uuid AND agents_runs.workspace_uuid=EXCLUDED.workspace_uuid
+				AND agents_runs.execution_owner=EXCLUDED.execution_owner
+				AND agents_runs.execution_epoch=EXCLUDED.execution_epoch`,
+		runInsertArgs(scope, run, sources, delivery)...)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: run %q", ErrRunLeaseLost, run.ID)
+	}
+	return nil
+}
+
+// CreateRunIfAbsent is the durable handoff used by the scheduler. The insert
+// and conflict check are atomic in Postgres; a retry receives the row that won
+// the insert instead of replacing its phase or ownership.
+func (p *PostgresStore) CreateRunIfAbsent(ctx context.Context, scope Scope, run Run) (Run, bool, error) {
+	if err := scope.withAgent(); err != nil {
+		return Run{}, false, err
+	}
+	if run.ID == "" {
+		return Run{}, false, fmt.Errorf("run ID is required")
+	}
+	sources, delivery, err := runJSON(run)
+	if err != nil {
+		return Run{}, false, err
+	}
+	res, err := p.db.ExecContext(ctx, `
+		INSERT INTO agents_runs
+			(id, org_uuid, workspace_uuid, agent_name, session_id, trigger_kind, parent_run_id, phase, attempt,
+			 input, output, sources, idempotency_key, delivery, message, checkpoint, input_tokens, output_tokens, usd_micros,
+			 created_at, updated_at, started_at, finished_at, execution_owner, execution_epoch, lease_until)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+			ON CONFLICT (id) DO NOTHING`,
+		runInsertArgs(scope, run, sources, delivery)...)
+	if err != nil {
+		// A caller may have retried with the same idempotency key but a different
+		// generated ID. The unique index is still an idempotent acceptance path.
+		if run.IdempotencyKey != "" {
+			if existing, found, ferr := p.FindRunByIdempotencyKey(ctx, scope, run.IdempotencyKey); ferr == nil && found {
+				return existing, false, nil
+			}
+		}
+		return Run{}, false, err
+	}
+	created, _ := res.RowsAffected()
+	existing, err := p.GetRun(ctx, scope, run.ID)
+	if err == nil {
+		return existing, created > 0, nil
+	}
+	if run.IdempotencyKey != "" {
+		if existing, found, ferr := p.FindRunByIdempotencyKey(ctx, scope, run.IdempotencyKey); ferr == nil && found {
+			return existing, false, nil
+		} else if ferr != nil {
+			return Run{}, false, ferr
+		}
+	}
+	return Run{}, false, err
 }
 
 // runColumns is the run SELECT list, shared by every read path so a schema
 // change cannot drift one query out of step with scanRun.
 const runColumns = `id, agent_name, session_id, trigger_kind, parent_run_id, phase, attempt, input, output, sources, idempotency_key, delivery, message,
-		       checkpoint, input_tokens, output_tokens, usd_micros, created_at, updated_at, started_at, finished_at`
+		       checkpoint, input_tokens, output_tokens, usd_micros, created_at, updated_at, started_at, finished_at,
+		       execution_owner, execution_epoch, lease_until`
 
 func (p *PostgresStore) GetRun(ctx context.Context, scope Scope, id string) (Run, error) {
 	if err := scope.validate(); err != nil {
@@ -473,22 +530,109 @@ func (p *PostgresStore) GetRun(ctx context.Context, scope Scope, id string) (Run
 	return run, err
 }
 
-func (p *PostgresStore) ClaimRun(ctx context.Context, scope Scope, id, _ string, now time.Time) (Run, error) {
+func (p *PostgresStore) ClaimRun(ctx context.Context, scope Scope, id, requestID string, now time.Time) (Run, error) {
 	if err := scope.validate(); err != nil {
 		return Run{}, err
 	}
+	if strings.TrimSpace(requestID) == "" {
+		return Run{}, fmt.Errorf("request ID is required")
+	}
+	now = now.UTC()
+	lease := now.Add(RunLeaseDuration)
 	res, err := p.db.ExecContext(ctx, `
-		UPDATE agents_runs SET phase=$4, updated_at=$5, started_at=COALESCE(started_at, $5)
-		WHERE org_uuid=$1 AND workspace_uuid=$2 AND id=$3 AND phase <> $4`,
-		scope.OrgUUID, scope.WorkspaceUUID, id, string(RunPhaseRunning), now.UTC())
+		UPDATE agents_runs SET phase=$4, updated_at=$5, started_at=COALESCE(started_at, $5),
+			execution_owner=$6, execution_epoch=execution_epoch+1, lease_until=$7
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND id=$3 AND phase IN ($8,$9)`,
+		scope.OrgUUID, scope.WorkspaceUUID, id, string(RunPhaseRunning), now, requestID, lease,
+		string(RunPhasePending), string(RunPhasePendingApproval))
 	if err != nil {
 		return Run{}, err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return Run{}, fmt.Errorf("run %q not found or already claimed", id)
+		return Run{}, fmt.Errorf("%w: run %q", ErrRunAlreadyClaimed, id)
 	}
 	return p.GetRun(ctx, scope, id)
+}
+
+func (p *PostgresStore) ClaimStaleRun(ctx context.Context, scope Scope, id string, expectedUpdatedAt time.Time, requestID string, now time.Time) (Run, error) {
+	if err := scope.validate(); err != nil {
+		return Run{}, err
+	}
+	if strings.TrimSpace(requestID) == "" {
+		return Run{}, fmt.Errorf("request ID is required")
+	}
+	now = now.UTC()
+	lease := now.Add(RunLeaseDuration)
+	res, err := p.db.ExecContext(ctx, `
+		UPDATE agents_runs SET execution_owner=$4, execution_epoch=execution_epoch+1,
+			attempt=attempt+1, updated_at=$5, lease_until=$6
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND id=$3 AND phase=$7
+			AND updated_at=$8 AND (lease_until IS NULL OR lease_until <= $5)`,
+		scope.OrgUUID, scope.WorkspaceUUID, id, requestID, now, lease, string(RunPhaseRunning), expectedUpdatedAt.UTC())
+	if err != nil {
+		return Run{}, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return Run{}, fmt.Errorf("%w: run %q", ErrRunNotStale, id)
+	}
+	return p.GetRun(ctx, scope, id)
+}
+
+func (p *PostgresStore) SaveRunOwned(ctx context.Context, scope Scope, run Run, owner string, epoch int64) error {
+	if err := scope.validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner) == "" || epoch <= 0 {
+		return fmt.Errorf("owner and epoch are required")
+	}
+	sources, delivery, err := runJSON(run)
+	if err != nil {
+		return err
+	}
+	result, err := p.db.ExecContext(ctx, `
+		UPDATE agents_runs SET phase=$4, attempt=$5, input=$6, output=$7, sources=$8, idempotency_key=$9,
+			delivery=$10, message=$11, checkpoint=$12, input_tokens=$13, output_tokens=$14, usd_micros=$15,
+			updated_at=$16, started_at=$17, finished_at=$18, lease_until=$19
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND id=$3 AND execution_owner=$20 AND execution_epoch=$21
+			AND phase IN ($22,$23)`,
+		scope.OrgUUID, scope.WorkspaceUUID, run.ID, string(run.Phase), run.Attempt, run.Input, run.Output,
+		sources, run.IdempotencyKey, delivery, run.Message, nullBytes(run.Checkpoint), run.InputTokens,
+		run.OutputTokens, run.USDMicros, run.UpdatedAt.UTC(), nullTime(run.StartedAt), nullTime(run.FinishedAt),
+		nullTime(run.LeaseUntil), owner, epoch, string(RunPhaseRunning), string(RunPhasePendingApproval))
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("%w: run %q", ErrRunLeaseLost, run.ID)
+	}
+	return nil
+}
+
+func (p *PostgresStore) RenewRun(ctx context.Context, scope Scope, id, owner string, epoch int64, now time.Time) error {
+	if err := scope.validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner) == "" || epoch <= 0 {
+		return fmt.Errorf("owner and epoch are required")
+	}
+	now = now.UTC()
+	lease := now.Add(RunLeaseDuration)
+	result, err := p.db.ExecContext(ctx, `
+		UPDATE agents_runs SET updated_at=$4, lease_until=$5
+		WHERE org_uuid=$1 AND workspace_uuid=$2 AND id=$3 AND phase=$6
+			AND execution_owner=$7 AND execution_epoch=$8`,
+		scope.OrgUUID, scope.WorkspaceUUID, id, now, lease, string(RunPhaseRunning), owner, epoch)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("%w: run %q", ErrRunLeaseLost, id)
+	}
+	return nil
 }
 
 func (p *PostgresStore) ListRuns(ctx context.Context, scope Scope, limit int) ([]Run, error) {
@@ -596,19 +740,21 @@ func scanScopedRun(r rowScanner, sc *Scope) (Run, error) {
 	var run Run
 	var phase string
 	var checkpoint, sources, delivery []byte
-	var started, finished sql.NullTime
+	var started, finished, lease sql.NullTime
+	var owner string
 	dest := []any{}
 	if sc != nil {
 		dest = append(dest, &sc.OrgUUID, &sc.WorkspaceUUID)
 	}
 	dest = append(dest, &run.ID, &run.AgentName, &run.SessionID, &run.Trigger, &run.ParentRunID, &phase, &run.Attempt,
 		&run.Input, &run.Output, &sources, &run.IdempotencyKey, &delivery, &run.Message, &checkpoint, &run.InputTokens, &run.OutputTokens, &run.USDMicros,
-		&run.CreatedAt, &run.UpdatedAt, &started, &finished)
+		&run.CreatedAt, &run.UpdatedAt, &started, &finished, &owner, &run.ExecutionEpoch, &lease)
 	if err := r.Scan(dest...); err != nil {
 		return Run{}, err
 	}
 	run.Phase = RunPhase(phase)
 	run.Checkpoint = checkpoint
+	run.ExecutionOwner = owner
 	if len(sources) > 0 {
 		if err := json.Unmarshal(sources, &run.Sources); err != nil {
 			return Run{}, fmt.Errorf("decode run sources: %w", err)
@@ -626,6 +772,10 @@ func scanScopedRun(r rowScanner, sc *Scope) (Run, error) {
 	if finished.Valid {
 		t := finished.Time.UTC()
 		run.FinishedAt = &t
+	}
+	if lease.Valid {
+		t := lease.Time.UTC()
+		run.LeaseUntil = &t
 	}
 	run.CreatedAt, run.UpdatedAt = run.CreatedAt.UTC(), run.UpdatedAt.UTC()
 	return run, nil
@@ -1045,6 +1195,30 @@ func nullTime(t *time.Time) any {
 		return nil
 	}
 	return t.UTC()
+}
+
+func runJSON(run Run) (sources, delivery any, err error) {
+	sources, err = marshalJSONB(run.Sources)
+	if err != nil {
+		return nil, nil, err
+	}
+	if run.Delivery != nil {
+		delivery, err = marshalJSONB(run.Delivery)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return sources, delivery, nil
+}
+
+func runInsertArgs(scope Scope, run Run, sources, delivery any) []any {
+	return []any{
+		run.ID, scope.OrgUUID, scope.WorkspaceUUID, run.AgentName, run.SessionID, run.Trigger, run.ParentRunID,
+		string(run.Phase), run.Attempt, run.Input, run.Output, sources, run.IdempotencyKey, delivery, run.Message,
+		nullBytes(run.Checkpoint), run.InputTokens, run.OutputTokens, run.USDMicros,
+		run.CreatedAt.UTC(), run.UpdatedAt.UTC(), nullTime(run.StartedAt), nullTime(run.FinishedAt),
+		run.ExecutionOwner, run.ExecutionEpoch, nullTime(run.LeaseUntil),
+	}
 }
 
 // Compile-time interface check.

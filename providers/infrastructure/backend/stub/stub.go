@@ -40,8 +40,14 @@ type Backend struct {
 	// SeenSetups records every Template name passed through
 	// SetupTemplate, in arrival order. Reset()-able from tests.
 	SeenSetups []string
+	// SeenSetupTemplates records the complete Template values passed through
+	// SetupTemplate. It is useful for asserting identity handoff behavior.
+	SeenSetupTemplates []infrastructurev1alpha1.Template
 	// SeenTeardowns records the same for TeardownTemplate.
 	SeenTeardowns []string
+	// SeenTeardownTemplates records the complete Template values passed through
+	// TeardownTemplate. It is useful for asserting cleanup targets.
+	SeenTeardownTemplates []infrastructurev1alpha1.Template
 
 	// FailSetup, when true, makes SetupTemplate return an error.
 	// Lets tests assert the controller's failure-handling path.
@@ -63,6 +69,7 @@ func (b *Backend) SetupTemplate(_ context.Context, tmpl *infrastructurev1alpha1.
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.SeenSetups = append(b.SeenSetups, tmpl.Name)
+	b.SeenSetupTemplates = append(b.SeenSetupTemplates, *tmpl.DeepCopy())
 	if b.FailSetup {
 		return backend.TemplateStatus{Ready: false, Message: "stub: FailSetup=true"}, nil
 	}
@@ -74,6 +81,7 @@ func (b *Backend) TeardownTemplate(_ context.Context, tmpl *infrastructurev1alph
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.SeenTeardowns = append(b.SeenTeardowns, tmpl.Name)
+	b.SeenTeardownTemplates = append(b.SeenTeardownTemplates, *tmpl.DeepCopy())
 	if b.FailTeardown {
 		return errStubTeardown
 	}
@@ -95,7 +103,9 @@ func (b *Backend) Reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.SeenSetups = nil
+	b.SeenSetupTemplates = nil
 	b.SeenTeardowns = nil
+	b.SeenTeardownTemplates = nil
 }
 
 // errStubTeardown is a sentinel so tests can match on the exact

@@ -10,6 +10,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"testing"
@@ -166,6 +167,65 @@ func TestPostgres_RunSaveClaimAndUsage(t *testing.T) {
 	}
 	if got, err = ps.GetRun(ctx, sc, runID); err != nil || got.Sources != nil {
 		t.Fatalf("sources should clear to nil: %v %v", err, got.Sources)
+	}
+}
+
+func TestPostgres_RunOwnershipAndDurableIntent(t *testing.T) {
+	ps := openTestPostgres(t)
+	ctx := context.Background()
+	sc := pgScope(t, ps)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	old := now.Add(-time.Hour)
+	oldLease := old.Add(time.Minute)
+
+	if err := ps.SaveRun(ctx, sc, Run{
+		ID: "stale-" + uuid.NewString(), AgentName: sc.AgentName, Phase: RunPhaseRunning,
+		Checkpoint: []byte(`{"engine":{}}`), CreatedAt: old, UpdatedAt: old,
+		ExecutionOwner: "old-owner", ExecutionEpoch: 7, LeaseUntil: &oldLease,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := ps.ListRuns(ctx, sc, 10)
+	if err != nil || len(stale) != 1 || stale[0].ExecutionOwner != "old-owner" || stale[0].ExecutionEpoch != 7 {
+		t.Fatalf("stale run round-trip: %v %+v", err, stale)
+	}
+	runID := stale[0].ID
+	claimed, err := ps.ClaimStaleRun(ctx, sc, runID, old, "recovery-owner", now)
+	if err != nil {
+		t.Fatalf("claim stale: %v", err)
+	}
+	if claimed.ExecutionOwner != "recovery-owner" || claimed.ExecutionEpoch != 8 || claimed.Attempt != 1 || claimed.LeaseUntil == nil {
+		t.Fatalf("claimed run = %+v", claimed)
+	}
+	if _, err := ps.ClaimStaleRun(ctx, sc, runID, claimed.UpdatedAt, "live-racer", now); !errors.Is(err, ErrRunNotStale) {
+		t.Fatalf("active lease claim = %v, want ErrRunNotStale", err)
+	}
+	if _, err := ps.ClaimStaleRun(ctx, sc, runID, old, "racer", now); !errors.Is(err, ErrRunNotStale) {
+		t.Fatalf("second stale claim = %v, want ErrRunNotStale", err)
+	}
+	claimed.Output = "old owner must not win"
+	if err := ps.SaveRunOwned(ctx, sc, claimed, "old-owner", 7); !errors.Is(err, ErrRunLeaseLost) {
+		t.Fatalf("old owner save = %v, want ErrRunLeaseLost", err)
+	}
+
+	key := "schedule:" + uuid.NewString()
+	intent := Run{ID: "intent-" + uuid.NewString(), AgentName: sc.AgentName, Phase: RunPhasePending,
+		IdempotencyKey: key, CreatedAt: now, UpdatedAt: now}
+	first, created, err := ps.CreateRunIfAbsent(ctx, sc, intent)
+	if err != nil || !created {
+		t.Fatalf("first intent: created=%v err=%v", created, err)
+	}
+	retry := intent
+	retry.ID += "-retry"
+	second, created, err := ps.CreateRunIfAbsent(ctx, sc, retry)
+	if err != nil || created || second.ID != first.ID {
+		t.Fatalf("retry intent: run=%+v created=%v err=%v", second, created, err)
+	}
+	if _, err := ps.ClaimRun(ctx, sc, intent.ID, "worker", now); err != nil {
+		t.Fatalf("claim intent: %v", err)
+	}
+	if _, err := ps.ClaimRun(ctx, sc, intent.ID, "duplicate", now); !errors.Is(err, ErrRunAlreadyClaimed) {
+		t.Fatalf("duplicate claim = %v, want ErrRunAlreadyClaimed", err)
 	}
 }
 

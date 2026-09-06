@@ -296,9 +296,40 @@ func (m *MemoryStore) SaveRun(_ context.Context, scope Scope, run Run) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	key := tenantKey(scope) + "|" + run.ID
+	if current, ok := m.runs[key]; ok && (current.ExecutionOwner != "" || current.ExecutionEpoch > 0) &&
+		(current.ExecutionOwner != run.ExecutionOwner || current.ExecutionEpoch != run.ExecutionEpoch) {
+		return fmt.Errorf("%w: run %q", ErrRunLeaseLost, run.ID)
+	}
 	m.runs[key] = run
 	m.runScopes[key] = scope
 	return nil
+}
+
+func (m *MemoryStore) CreateRunIfAbsent(_ context.Context, scope Scope, run Run) (Run, bool, error) {
+	if err := scope.withAgent(); err != nil {
+		return Run{}, false, err
+	}
+	if run.ID == "" {
+		return Run{}, false, fmt.Errorf("run ID is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prefix := tenantKey(scope) + "|"
+	key := prefix + run.ID
+	if existing, ok := m.runs[key]; ok {
+		return existing, false, nil
+	}
+	if run.IdempotencyKey != "" {
+		for k, existing := range m.runs {
+			if !hasPrefix(k, prefix) || existing.AgentName != run.AgentName || existing.IdempotencyKey != run.IdempotencyKey {
+				continue
+			}
+			return existing, false, nil
+		}
+	}
+	m.runs[key] = run
+	m.runScopes[key] = scope
+	return run, true, nil
 }
 
 func (m *MemoryStore) GetRun(_ context.Context, scope Scope, id string) (Run, error) {
@@ -318,6 +349,9 @@ func (m *MemoryStore) ClaimRun(_ context.Context, scope Scope, id, requestID str
 	if err := scope.validate(); err != nil {
 		return Run{}, err
 	}
+	if strings.TrimSpace(requestID) == "" {
+		return Run{}, fmt.Errorf("request ID is required")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := tenantKey(scope) + "|" + id
@@ -325,17 +359,101 @@ func (m *MemoryStore) ClaimRun(_ context.Context, scope Scope, id, requestID str
 	if !ok {
 		return Run{}, fmt.Errorf("run %q not found", id)
 	}
-	if run.Phase == RunPhaseRunning {
-		return Run{}, fmt.Errorf("run %q already claimed", id)
+	if run.Phase != RunPhasePending && run.Phase != RunPhasePendingApproval {
+		return Run{}, fmt.Errorf("%w: run %q", ErrRunAlreadyClaimed, id)
 	}
 	run.Phase = RunPhaseRunning
 	run.UpdatedAt = now.UTC()
+	run.ExecutionOwner = requestID
+	run.ExecutionEpoch++
+	if run.ExecutionEpoch <= 0 {
+		run.ExecutionEpoch = 1
+	}
+	lease := now.UTC().Add(RunLeaseDuration)
+	run.LeaseUntil = &lease
 	if run.StartedAt == nil {
 		t := now.UTC()
 		run.StartedAt = &t
 	}
 	m.runs[k] = run
 	return run, nil
+}
+
+func (m *MemoryStore) ClaimStaleRun(_ context.Context, scope Scope, id string, expectedUpdatedAt time.Time, requestID string, now time.Time) (Run, error) {
+	if err := scope.validate(); err != nil {
+		return Run{}, err
+	}
+	if strings.TrimSpace(requestID) == "" {
+		return Run{}, fmt.Errorf("request ID is required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := tenantKey(scope) + "|" + id
+	run, ok := m.runs[k]
+	if !ok {
+		return Run{}, fmt.Errorf("%w: run %q not found", ErrRunNotStale, id)
+	}
+	if run.Phase != RunPhaseRunning || !run.UpdatedAt.Equal(expectedUpdatedAt) {
+		return Run{}, fmt.Errorf("%w: run %q", ErrRunNotStale, id)
+	}
+	if run.LeaseUntil != nil && run.LeaseUntil.After(now.UTC()) {
+		return Run{}, fmt.Errorf("%w: run %q lease is still active", ErrRunNotStale, id)
+	}
+	run.ExecutionOwner = requestID
+	run.ExecutionEpoch++
+	if run.ExecutionEpoch <= 0 {
+		run.ExecutionEpoch = 1
+	}
+	run.Attempt++
+	run.UpdatedAt = now.UTC()
+	lease := now.UTC().Add(RunLeaseDuration)
+	run.LeaseUntil = &lease
+	m.runs[k] = run
+	return run, nil
+}
+
+func (m *MemoryStore) SaveRunOwned(_ context.Context, scope Scope, run Run, owner string, epoch int64) error {
+	if err := scope.validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner) == "" || epoch <= 0 {
+		return fmt.Errorf("owner and epoch are required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := tenantKey(scope) + "|" + run.ID
+	current, ok := m.runs[k]
+	if !ok || (current.Phase != RunPhaseRunning && current.Phase != RunPhasePendingApproval) ||
+		current.ExecutionOwner != owner || current.ExecutionEpoch != epoch {
+		return fmt.Errorf("%w: run %q", ErrRunLeaseLost, run.ID)
+	}
+	run.ExecutionOwner = owner
+	run.ExecutionEpoch = epoch
+	m.runs[k] = run
+	m.runScopes[k] = scope
+	return nil
+}
+
+func (m *MemoryStore) RenewRun(_ context.Context, scope Scope, id, owner string, epoch int64, now time.Time) error {
+	if err := scope.validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner) == "" || epoch <= 0 {
+		return fmt.Errorf("owner and epoch are required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := tenantKey(scope) + "|" + id
+	run, ok := m.runs[k]
+	if !ok || run.Phase != RunPhaseRunning || run.ExecutionOwner != owner || run.ExecutionEpoch != epoch {
+		return fmt.Errorf("%w: run %q", ErrRunLeaseLost, id)
+	}
+	now = now.UTC()
+	lease := now.Add(RunLeaseDuration)
+	run.LeaseUntil = &lease
+	run.UpdatedAt = now
+	m.runs[k] = run
+	return nil
 }
 
 func (m *MemoryStore) ListRuns(_ context.Context, scope Scope, limit int) ([]Run, error) {

@@ -133,6 +133,7 @@ type TemplateSpec struct {
 	// +required
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9-]*$`
 	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.backend is immutable"
 	Backend string `json:"backend"`
 
 	// InstanceCRD declares the per-template CRD the platform
@@ -141,6 +142,7 @@ type TemplateSpec struct {
 	// plural) and kind (CamelCase singular) are operator-chosen but
 	// must be unique across all Templates.
 	// +required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.instanceCRD is immutable"
 	InstanceCRD TemplateInstanceCRD `json:"instanceCRD"`
 
 	// Schema is the JSON Schema applied to the per-template CRD's
@@ -284,13 +286,13 @@ const (
 	// Instance controller holds a new sandbox in setup until its runtime graph
 	// is Ready, then switches it to runtime. Templates use it only to select
 	// an explicit setup egress policy; tenants cannot choose the phase.
-	FarosNetworkPhaseField   = "farosNetworkPhase"
+	FarosNetworkPhaseField = "farosNetworkPhase"
 	// FarosNetworkPhaseStatusField is the controller-owned status mirror of
 	// FarosNetworkPhaseField. Tenant spec values are never authoritative for
 	// execution readiness.
 	FarosNetworkPhaseStatusField = "farosNetworkPhase"
-	FarosNetworkPhaseSetup   = "setup"
-	FarosNetworkPhaseRuntime = "runtime"
+	FarosNetworkPhaseSetup       = "setup"
+	FarosNetworkPhaseRuntime     = "runtime"
 	// FarosLastActivityAnnotation is written to a runtime Instance by the
 	// provider data plane after caller authorization. It is deliberately not
 	// stored in tenant-visible Instance status.
@@ -728,6 +730,13 @@ type TemplateStatus struct {
 	// +optional
 	Backend TemplateBackendStatus `json:"backend,omitempty"`
 
+	// InstanceCRD records the CRD identity used by the backend when this
+	// Template was first handed off. It is kept in status so teardown can use
+	// the provisioned identity even if an older API server accepted a mutable
+	// spec update before the immutable validation was installed.
+	// +optional
+	InstanceCRD *TemplateInstanceCRD `json:"instanceCRD,omitempty"`
+
 	// Conditions follows the standard Kubernetes conditions pattern.
 	// The aggregate Ready condition is True iff schema validation and
 	// the backend both succeed.
@@ -743,7 +752,7 @@ type TemplateStatus struct {
 // source of truth for failure context.
 type TemplateBackendStatus struct {
 	// Name echoes spec.backend so consumers don't have to cross-
-	// reference. Helpful if a Template's backend changes mid-life.
+	// reference. It is also the recorded cleanup owner once setup is handed off.
 	// +optional
 	Name string `json:"name,omitempty"`
 	// Ready is the backend's headline status; matches BackendTemplateStatus.Ready
@@ -776,6 +785,7 @@ const (
 	ReasonInvalidSpec           = "InvalidSpec"
 	ReasonBackendNotFound       = "BackendNotFound"
 	ReasonBackendError          = "BackendError"
+	ReasonIdentityConflict      = "IdentityConflict"
 	ReasonCodingSandboxDisabled = "CodingSandboxDisabled"
 )
 

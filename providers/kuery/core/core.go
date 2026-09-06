@@ -24,6 +24,7 @@ import (
 	"github.com/faroshq/kuery/pkg/gc"
 	"github.com/faroshq/kuery/pkg/store"
 	kuerysync "github.com/faroshq/kuery/pkg/sync"
+	"github.com/faroshq/provider-kuery/tenantindex"
 )
 
 // Config selects the store backend and the resources excluded from sync.
@@ -72,6 +73,10 @@ func New(cfg Config) (*Core, error) {
 	}
 	if err := s.AutoMigrate(); err != nil {
 		return nil, fmt.Errorf("migrating kuery store: %w", err)
+	}
+	if err := tenantindex.Ensure(s.RawDB()); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("migrating tenant edge index: %w", err)
 	}
 
 	blacklist, err := parseBlacklist(cfg.Blacklist)

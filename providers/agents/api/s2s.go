@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -373,13 +374,17 @@ func (s *Server) s2sInvoke(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	runID := s.startDetachedVWRun(r, dyn, clusterID, scope, agent, taskRun{
+	runID, err := s.startDetachedVWRun(r, dyn, clusterID, scope, agent, taskRun{
 		SessionID: strings.TrimSpace(req.SessionID), Task: req.Task,
 		Trigger:        agentsv1alpha1.RunTriggerAPI,
 		IdempotencyKey: strings.TrimSpace(req.IdempotencyKey),
 		Callback:       req.Callback,
 		SourceName:     "s2s:" + caller,
 	})
+	if err != nil {
+		writeStatus(w, http.StatusServiceUnavailable, "ServiceUnavailable", err.Error())
+		return
+	}
 	log.Printf("s2s: %s started run %s on agent %s in %s", caller, runID, name, clusterID)
 
 	if req.Wait > 0 {
@@ -459,10 +464,11 @@ func (s *Server) writeS2SAuthError(w http.ResponseWriter, err error) {
 // agent's own identity. The sibling of startDetachedRun for callers that are not
 // a signed-in user: same detachment and same pre-written record, different
 // credentials.
-func (s *Server) startDetachedVWRun(r *http.Request, dyn dynamic.Interface, clusterID string, scope store.Scope, agent *agentsv1alpha1.Agent, tr taskRun) string {
+func (s *Server) startDetachedVWRun(r *http.Request, dyn dynamic.Interface, clusterID string, scope store.Scope, agent *agentsv1alpha1.Agent, tr taskRun) (string, error) {
 	runID := uuid.NewString()
 	now := time.Now().UTC()
 	tr.RunID = runID
+	tr.RunIDPersisted = true
 	tr.Creds = vwSecrets{dyn}
 	tr.CR = vwCR{dyn}
 	tr.Scope = scope
@@ -474,16 +480,24 @@ func (s *Server) startDetachedVWRun(r *http.Request, dyn dynamic.Interface, clus
 	tr.HubToken = s.bg.agentToken(r.Context(), dyn, clusterID, agent.Name)
 
 	ctx := context.WithoutCancel(r.Context())
-	_ = s.store.SaveRun(ctx, scope, store.Run{
+	if err := s.store.SaveRun(ctx, scope, store.Run{
 		ID: runID, AgentName: agent.Name, SessionID: tr.SessionID, Trigger: tr.Trigger,
 		IdempotencyKey: tr.IdempotencyKey,
 		Phase:          store.RunPhasePending, Input: tr.Task, CreatedAt: now, UpdatedAt: now,
-	})
+	}); err != nil {
+		return "", fmt.Errorf("persisting run intent: %w", err)
+	}
 	go func() {
 		if _, err := s.executeTask(ctx, tr); err != nil {
 			log.Printf("s2s: run %s on agent %s failed: %v", runID, agent.Name, err)
+			if errors.Is(err, store.ErrRunLeaseLost) {
+				// The result was superseded or could not be durably fenced. The
+				// callback must reflect the current owner's row, not this worker's
+				// stale in-memory outcome.
+				return
+			}
 		}
 		s.deliverRunCallback(ctx, scope, runID, tr.Callback)
 	}()
-	return runID
+	return runID, nil
 }

@@ -65,8 +65,9 @@ type closable interface {
 // handler (reads). Local entries are live revdial dialers; with a Registry
 // wired, reads fall through to the fleet-wide ownership map.
 type ConnManager struct {
-	mu    sync.RWMutex
-	dials map[string]Dialer
+	mu            sync.RWMutex
+	dials         map[string]Dialer
+	registrations map[string]tunnelRegistration
 
 	registry   *Registry // nil = single-replica mode
 	relayToken string
@@ -75,7 +76,8 @@ type ConnManager struct {
 // NewConnManager creates a new, empty ConnManager.
 func NewConnManager() *ConnManager {
 	return &ConnManager{
-		dials: make(map[string]Dialer),
+		dials:         make(map[string]Dialer),
+		registrations: make(map[string]tunnelRegistration),
 	}
 }
 
@@ -85,8 +87,23 @@ func NewConnManager() *ConnManager {
 func (c *ConnManager) SetRegistry(reg *Registry, relayToken string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.registry != nil {
+		for _, registration := range c.registrations {
+			if registration.generation != 0 {
+				c.registry.endRegistration(registration)
+			}
+		}
+	}
 	c.registry = reg
 	c.relayToken = relayToken
+	if reg == nil {
+		c.registrations = make(map[string]tunnelRegistration)
+		return
+	}
+	c.registrations = make(map[string]tunnelRegistration, len(c.dials))
+	for key := range c.dials {
+		c.registrations[key] = reg.beginRegistration(key)
+	}
 }
 
 func (c *ConnManager) getRegistry() (*Registry, string) {
@@ -112,7 +129,7 @@ func (c *ConnManager) StartSweeper(stop <-chan struct{}) {
 				c.sweepClosed(logger)
 				if reg, _ := c.getRegistry(); reg != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), registryWriteTimeout)
-					reg.RenewOwned(ctx, c.LocalKeys())
+					reg.renewOwned(ctx, c.localRegistrations())
 					cancel()
 				}
 			}
@@ -123,13 +140,24 @@ func (c *ConnManager) StartSweeper(stop <-chan struct{}) {
 // sweepClosed removes entries whose Dialer has been closed but whose cleanup
 // goroutine (waiting on <-dialer.Done()) may not have run yet.
 func (c *ConnManager) sweepClosed(logger klog.Logger) {
+	var stale []tunnelRegistration
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for key, d := range c.dials {
 		if cl, ok := d.(closable); ok && cl.IsClosed() {
 			logger.Info("Evicting stale tunnel entry", "key", key)
 			delete(c.dials, key)
+			if registration, registered := c.registrations[key]; registered {
+				delete(c.registrations, key)
+				if c.registry != nil && (registration.generation == 0 || c.registry.endRegistration(registration)) {
+					stale = append(stale, registration)
+				}
+			}
 		}
+	}
+	reg := c.registry
+	c.mu.Unlock()
+	for _, registration := range stale {
+		c.releaseClaim(reg, registration)
 	}
 }
 
@@ -145,6 +173,12 @@ func (c *ConnManager) sweepClosed(logger klog.Logger) {
 func (c *ConnManager) Store(key string, d *revdial.Dialer) {
 	c.mu.Lock()
 	prev := c.dials[key]
+	reg := c.registry
+	var registration tunnelRegistration
+	if reg != nil {
+		registration = reg.beginRegistration(key)
+		c.registrations[key] = registration
+	}
 	c.dials[key] = d
 	c.mu.Unlock()
 
@@ -154,10 +188,10 @@ func (c *ConnManager) Store(key string, d *revdial.Dialer) {
 		_ = old.Close()
 	}
 
-	if reg, _ := c.getRegistry(); reg != nil {
+	if reg != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), registryWriteTimeout)
 		defer cancel()
-		if err := reg.ClaimTunnel(ctx, key); err != nil {
+		if err := reg.claimTunnel(ctx, registration); err != nil {
 			klog.Background().Error(err, "claiming tunnel lease; peers cannot route to this edge until the sweeper retries", "key", key)
 		}
 	}
@@ -200,12 +234,26 @@ func (c *ConnManager) LoadLocal(key string) (Dialer, bool) {
 	// remove it and report not-found so callers get a clean 502 immediately
 	// rather than a confusing dial error.
 	if cl, isClosable := d.(closable); isClosable && cl.IsClosed() {
+		var reg *Registry
+		var registration tunnelRegistration
+		ended := false
+		removed := false
 		c.mu.Lock()
 		// Re-check under write lock in case another goroutine already replaced it.
 		if current, exists := c.dials[key]; exists && current == d {
 			delete(c.dials, key)
+			reg = c.registry
+			registration = c.registrations[key]
+			delete(c.registrations, key)
+			if reg != nil && registration.generation != 0 {
+				ended = reg.endRegistration(registration)
+			}
+			removed = true
 		}
 		c.mu.Unlock()
+		if removed && reg != nil && (registration.generation == 0 || ended) {
+			c.releaseClaim(reg, registration)
+		}
 		return nil, false
 	}
 	return d, true
@@ -223,6 +271,9 @@ func (c *ConnManager) LoadLocal(key string) (Dialer, bool) {
 // while the agent, whose socket is genuinely fine, sees no error and so never
 // reconnects. Only the sweeper's IsClosed check or an agent restart clears it.
 func (c *ConnManager) DeleteIf(key string, d Dialer) bool {
+	var reg *Registry
+	var registration tunnelRegistration
+	var ended bool
 	c.mu.Lock()
 	current, exists := c.dials[key]
 	if !exists || current != d {
@@ -230,14 +281,36 @@ func (c *ConnManager) DeleteIf(key string, d Dialer) bool {
 		return false
 	}
 	delete(c.dials, key)
+	reg = c.registry
+	registration = c.registrations[key]
+	delete(c.registrations, key)
+	if reg != nil && registration.generation != 0 {
+		ended = reg.endRegistration(registration)
+	}
 	c.mu.Unlock()
 
-	if reg, _ := c.getRegistry(); reg != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), registryWriteTimeout)
-		defer cancel()
-		reg.ReleaseTunnel(ctx, key)
+	if reg != nil && (registration.generation == 0 || ended) {
+		c.releaseClaim(reg, registration)
 	}
 	return true
+}
+
+func (c *ConnManager) localRegistrations() []tunnelRegistration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	registrations := make([]tunnelRegistration, 0, len(c.dials))
+	for key := range c.dials {
+		if registration, ok := c.registrations[key]; ok {
+			registrations = append(registrations, registration)
+		}
+	}
+	return registrations
+}
+
+func (c *ConnManager) releaseClaim(reg *Registry, registration tunnelRegistration) {
+	ctx, cancel := context.WithTimeout(context.Background(), registryWriteTimeout)
+	defer cancel()
+	reg.releaseTunnel(ctx, registration)
 }
 
 // HasConnection returns true if ANY replica holds an active tunnel for key.

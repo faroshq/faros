@@ -36,8 +36,12 @@ const (
 // (no closures, no clients) so a durable-execution backend can persist and
 // replay it.
 type Job struct {
-	// ID is unique per submission (used for dedup/idempotency by durable backends).
+	// ID identifies this submission. Scheduler occurrences use a stable value so
+	// retries and duplicate queue deliveries refer to the same durable intent.
 	ID string `json:"id"`
+	// RunID links a queue delivery to a pre-created durable run. Empty for
+	// channel/trigger jobs that create their run when the handler starts.
+	RunID string `json:"runID,omitempty"`
 	// Kind is what fired this job.
 	Kind JobKind `json:"kind"`
 	// ClusterID is the tenant workspace's logical-cluster ID the job acts in.

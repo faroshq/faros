@@ -40,6 +40,9 @@ const (
 // recent run of the named workflow (optionally pinned to a commit), each job's
 // status/conclusion, and a log tail for any failed job.
 func (b *Backend) LatestWorkflowRun(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, query backend.WorkflowRunQuery) (backend.WorkflowRunStatus, error) {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return backend.WorkflowRunStatus{}, err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.WorkflowRunStatus{}, err
@@ -89,6 +92,9 @@ func (b *Backend) LatestWorkflowRun(ctx context.Context, conn *codev1alpha1.Conn
 // DispatchWorkflow implements backend.WorkflowDispatcher: it fires a
 // workflow_dispatch event so the workflow re-runs on ref without a code change.
 func (b *Backend) DispatchWorkflow(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, workflowFileName, ref string) error {
+	if err := validateRepositoryIdentity(conn, repo); err != nil {
+		return err
+	}
 	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return err

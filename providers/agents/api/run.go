@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -116,8 +117,19 @@ type taskRun struct {
 	Agent *agentsv1alpha1.Agent
 
 	// RunID pre-assigns the run's ID (async run-now, chat's SSE start event,
-	// resume). Empty → generated.
+	// resume). Empty → generated. A caller that persisted a Pending intent must
+	// set RunIDPersisted; streaming chat supplies an ID to its start event before
+	// executeTask creates the Running row.
 	RunID string
+	// RunIDPersisted distinguishes a durable queue handoff from a caller-owned
+	// stable ID. Keeping this explicit prevents the streaming HTTP path from
+	// treating its pre-announcement ID as an already-existing store row.
+	RunIDPersisted bool
+	// ExecutionOwner/ExecutionEpoch fence durable writes for this execution. A
+	// scheduler intent starts Pending and receives these values when it is
+	// claimed; a recovered run receives them from ClaimStaleRun.
+	ExecutionOwner string
+	ExecutionEpoch int64
 
 	SessionID   string
 	Task        string
@@ -189,6 +201,58 @@ func (r taskRun) delivery() *store.RunDelivery {
 	}
 }
 
+// prepareTaskRun establishes durable ownership before any model or tool work
+// starts. Background jobs already have a Pending intent and must atomically
+// claim it; direct runs create their Running row with the first fence epoch.
+func (s *Server) prepareTaskRun(ctx context.Context, run taskRun, now time.Time) (taskRun, store.Run, error) {
+	now = now.UTC()
+	preassigned := run.RunID != "" && run.RunIDPersisted
+	if run.RunID == "" {
+		run.RunID = uuid.NewString()
+	}
+	if run.ExecutionOwner == "" {
+		run.ExecutionOwner = uuid.NewString()
+	}
+	if preassigned {
+		stored, err := s.store.GetRun(ctx, run.Scope, run.RunID)
+		if err != nil {
+			return run, store.Run{}, fmt.Errorf("loading pending run %s: %w", run.RunID, err)
+		}
+		if stored.Phase != store.RunPhasePending {
+			return run, store.Run{}, fmt.Errorf("%w: run %s is %s", store.ErrRunAlreadyClaimed, run.RunID, stored.Phase)
+		}
+		claimed, err := s.store.ClaimRun(ctx, run.Scope, run.RunID, run.ExecutionOwner, now)
+		if err != nil {
+			return run, store.Run{}, err
+		}
+		run.ExecutionOwner, run.ExecutionEpoch = claimed.ExecutionOwner, claimed.ExecutionEpoch
+		// The intent owns the stable identity. Refresh mutable delivery/input fields
+		// from the job before entering the model loop, while the claim fence is held.
+		claimed.SessionID, claimed.Trigger, claimed.Input = run.SessionID, run.Trigger, run.Task
+		claimed.Delivery = run.delivery()
+		claimed.UpdatedAt = now
+		lease := now.Add(store.RunLeaseDuration)
+		claimed.LeaseUntil = &lease
+		if err := s.store.SaveRunOwned(ctx, run.Scope, claimed, run.ExecutionOwner, run.ExecutionEpoch); err != nil {
+			return run, store.Run{}, fmt.Errorf("persisting claimed run %s: %w", run.RunID, err)
+		}
+		return run, claimed, nil
+	}
+
+	lease := now.Add(store.RunLeaseDuration)
+	record := store.Run{
+		ID: run.RunID, AgentName: run.Agent.Name, SessionID: run.SessionID, Trigger: run.Trigger,
+		ParentRunID: run.ParentRunID, IdempotencyKey: run.IdempotencyKey, Delivery: run.delivery(),
+		Phase: store.RunPhaseRunning, Input: run.Task, CreatedAt: now, UpdatedAt: now, StartedAt: &now,
+		ExecutionOwner: run.ExecutionOwner, ExecutionEpoch: 1, LeaseUntil: &lease,
+	}
+	if err := s.store.SaveRun(ctx, run.Scope, record); err != nil {
+		return run, store.Run{}, fmt.Errorf("creating run %s: %w", run.RunID, err)
+	}
+	run.ExecutionEpoch = record.ExecutionEpoch
+	return run, record, nil
+}
+
 // executeTask runs one agent turn against a task prompt, persisting the
 // transcript (including tool steps) and run record. It is the shared execution
 // path for chat, run-now, background fires, channel messages, and delegation.
@@ -197,8 +261,37 @@ func (r taskRun) delivery() *store.RunDelivery {
 func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error) {
 	scope, agent := run.Scope, run.Agent
 	now := time.Now().UTC()
+	var record store.Run
+	var err error
+	run, record, err = s.prepareTaskRun(ctx, run, now)
+	if err != nil {
+		return runResult{RunID: run.RunID}, err
+	}
+	runID := record.ID
+	// Establish the run timeout, live registry entry, and durable lease before
+	// model/tool setup. Credential or tool discovery can block for a while; a
+	// lease that starts only once the engine is entered could expire and let a
+	// recovery worker steal work that is still being prepared.
+	timeout := time.Hour
+	if v := agent.Spec.Limits.TimeoutSeconds; v > 0 {
+		timeout = time.Duration(v) * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	s.liveRuns.register(runID, cancel)
+	defer s.liveRuns.unregister(runID)
+	stopLease := s.startRunLease(ctx, run, cancel)
+	defer stopLease()
+
+	finishFailure := func(err error) (runResult, error) {
+		if !s.finishRunOwned(ctx, scope, runID, run.ExecutionOwner, run.ExecutionEpoch,
+			runOutcome{Phase: store.RunPhaseFailed, Message: err.Error()}, time.Now().UTC()) {
+			return runResult{RunID: runID}, runOutcomeNotCommitted(runID, err)
+		}
+		return runResult{RunID: runID}, err
+	}
 	if err := s.checkBudget(ctx, scope, agent, now); err != nil {
-		return runResult{}, err
+		return finishFailure(err)
 	}
 
 	// Workers resolve the "background" model purpose (falling back to chat), so a
@@ -210,29 +303,12 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 	}
 	model, err := s.buildModelForPurpose(ctx, run.Creds, agent, purpose)
 	if err != nil {
-		return runResult{}, err
+		return finishFailure(err)
 	}
 	sessionID := run.SessionID
 	if sessionID == "" {
 		sessionID = run.Trigger // e.g. schedules share a per-trigger session
 	}
-
-	runID := run.RunID
-	if runID == "" {
-		runID = uuid.NewString()
-	}
-	run.RunID = runID
-
-	// spec.limits.timeoutSeconds bounds the run's wall clock (default 1h).
-	timeout := time.Hour
-	if v := agent.Spec.Limits.TimeoutSeconds; v > 0 {
-		timeout = time.Duration(v) * time.Second
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	// Register for POST /api/runs/{id}/cancel.
-	s.liveRuns.register(runID, cancel)
-	defer s.liveRuns.unregister(runID)
 
 	// Assemble the agent's tools for this trigger class (policy + approvals +
 	// audit + delegation); MCP sessions are released when the run ends.
@@ -271,12 +347,6 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 		ID: uuid.NewString(), AgentName: agent.Name, SessionID: sessionID, RunID: runID,
 		Role: "user", Content: run.Task, CreatedAt: now,
 	})
-	_ = s.store.SaveRun(ctx, scope, store.Run{
-		ID: runID, AgentName: agent.Name, SessionID: sessionID, Trigger: run.Trigger,
-		ParentRunID: run.ParentRunID, IdempotencyKey: run.IdempotencyKey,
-		Delivery: run.delivery(),
-		Phase:    store.RunPhaseRunning, Input: run.Task, CreatedAt: now, UpdatedAt: now, StartedAt: &now,
-	})
 	s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseRunning})
 
 	cb := s.runCallbacks(ctx, run, sessionID)
@@ -288,6 +358,12 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 		ContextBudgetTokens: turnContextBudget(modelName),
 		CheckpointEvery:     checkpointEveryIterations,
 	}, cb)
+	// An engine is allowed to finish a response after cancellation has raced its
+	// final read. The cancellation is still the caller's decision, so do not let
+	// a late nil error publish a successful result after the run was stopped.
+	if err == nil {
+		err = ctx.Err()
+	}
 	end := time.Now().UTC()
 	if err != nil {
 		phase := store.RunPhaseFailed
@@ -296,7 +372,9 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 		if ctx.Err() != nil {
 			phase = store.RunPhaseAborted
 		}
-		s.finishRun(ctx, scope, runID, runOutcome{Phase: phase, Message: err.Error()}, end)
+		if !s.finishRunOwned(ctx, scope, runID, run.ExecutionOwner, run.ExecutionEpoch, runOutcome{Phase: phase, Message: err.Error()}, end) {
+			return runResult{RunID: runID}, runOutcomeNotCommitted(runID, err)
+		}
 		s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: phase})
 		return runResult{RunID: runID}, err
 	}
@@ -317,14 +395,18 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 			InboxID: res.Interrupt.RequestID, SourceName: run.SourceName, NotifyChannel: run.NotifyChannel,
 		}
 		ckJSON, _ := json.Marshal(ck)
-		if stored, gerr := s.store.GetRun(ctx, scope, runID); gerr == nil {
-			stored.Phase = store.RunPhasePendingApproval
-			stored.Checkpoint = ckJSON
-			stored.InputTokens = res.Usage.InputTokens
-			stored.OutputTokens = res.Usage.OutputTokens
-			stored.USDMicros = costMicros
-			stored.UpdatedAt = end
-			_ = s.store.SaveRun(ctx, scope, stored)
+		stored, gerr := s.store.GetRun(ctx, scope, runID)
+		if gerr != nil {
+			return runResult{RunID: runID}, runOutcomeNotCommitted(runID, gerr)
+		}
+		stored.Phase = store.RunPhasePendingApproval
+		stored.Checkpoint = ckJSON
+		stored.InputTokens = res.Usage.InputTokens
+		stored.OutputTokens = res.Usage.OutputTokens
+		stored.USDMicros = costMicros
+		stored.UpdatedAt = end
+		if err := s.store.SaveRunOwned(ctx, scope, stored, run.ExecutionOwner, run.ExecutionEpoch); err != nil {
+			return runResult{RunID: runID}, runOutcomeNotCommitted(runID, err)
 		}
 		s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhasePendingApproval})
 		out := runResult{RunID: runID, Content: res.Content,
@@ -335,10 +417,6 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 		return out, nil
 	}
 
-	_ = s.store.AppendMessage(ctx, scope, store.Message{
-		ID: uuid.NewString(), AgentName: agent.Name, SessionID: sessionID, RunID: runID,
-		Role: "assistant", Content: res.Content, CreatedAt: end,
-	})
 	// The answer goes on the run record too, so a programmatic reader (the parent
 	// of a spawned worker, GET /api/runs/{id}) finds the result where it found the
 	// phase instead of having to locate the session and dig out its last message.
@@ -347,7 +425,16 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 		Phase: store.RunPhaseSucceeded, Usage: res.Usage, CostMicros: costMicros,
 		Output: body, Sources: sources,
 	}
-	s.finishRun(ctx, scope, runID, fin, end)
+	if !s.finishRunOwned(ctx, scope, runID, run.ExecutionOwner, run.ExecutionEpoch, fin, end) {
+		// Do not append a transcript answer or publish/deliver a success after a
+		// recovery claim superseded this executor's fence. The durable owner is the
+		// only authority allowed to announce the terminal result.
+		return runResult{RunID: runID}, runOutcomeNotCommitted(runID, nil)
+	}
+	_ = s.store.AppendMessage(ctx, scope, store.Message{
+		ID: uuid.NewString(), AgentName: agent.Name, SessionID: sessionID, RunID: runID,
+		Role: "assistant", Content: res.Content, CreatedAt: end,
+	})
 	s.publishRunEvent(scope, runEvent{ID: runID, Agent: agent.Name, Trigger: run.Trigger, ParentRunID: run.ParentRunID, Phase: store.RunPhaseSucceeded})
 
 	out := runResult{RunID: runID, Content: res.Content}
@@ -362,11 +449,12 @@ func (s *Server) executeTask(ctx context.Context, run taskRun) (runResult, error
 // a runID immediately instead of blocking the HTTP request on the whole agent
 // loop. Output is delivered to the run's notify channel when it finishes, like
 // a real background fire.
-func (s *Server) startDetachedRun(r *http.Request, c *agentsclient.Client, id identity, agent *agentsv1alpha1.Agent, tr taskRun) string {
+func (s *Server) startDetachedRun(r *http.Request, c *agentsclient.Client, id identity, agent *agentsv1alpha1.Agent, tr taskRun) (string, error) {
 	runID := uuid.NewString()
 	now := time.Now().UTC()
 	scope := id.scope(agent.Name)
 	tr.RunID = runID
+	tr.RunIDPersisted = true
 	tr.Creds = c
 	tr.CR = clientCR{c}
 	tr.Scope = scope
@@ -379,14 +467,22 @@ func (s *Server) startDetachedRun(r *http.Request, c *agentsclient.Client, id id
 	// Detach from the request context: the response returns immediately while
 	// the run continues (executeTask applies the agent's own timeout).
 	ctx := context.WithoutCancel(r.Context())
-	_ = s.store.SaveRun(ctx, scope, store.Run{
+	if err := s.store.SaveRun(ctx, scope, store.Run{
 		ID: runID, AgentName: agent.Name, SessionID: tr.SessionID, Trigger: tr.Trigger,
 		IdempotencyKey: tr.IdempotencyKey,
 		Phase:          store.RunPhasePending, Input: tr.Task, CreatedAt: now, UpdatedAt: now,
-	})
+	}); err != nil {
+		return "", fmt.Errorf("persisting run intent: %w", err)
+	}
 	go func() {
 		res, err := s.executeTask(ctx, tr)
 		if err != nil || res.Pending != nil {
+			if errors.Is(err, store.ErrRunLeaseLost) {
+				// A recovery/cancellation fence superseded this executor. Its
+				// in-memory result is not an outcome for the current owner, so it
+				// must not trigger a callback that re-reads and reports this run.
+				return
+			}
 			// The outcome is on the run record (approvals resume separately), but a
 			// caller that asked to be told must hear about a failure or a pause too —
 			// otherwise it waits forever for a callback that never comes.
@@ -403,7 +499,7 @@ func (s *Server) startDetachedRun(r *http.Request, c *agentsclient.Client, id id
 		}
 		s.deliverToNotifyChannel(ctx, c, agent, tr.NotifyChannel, tr.SourceName, res.Content)
 	}()
-	return runID
+	return runID, nil
 }
 
 // dataPlaneFor describes how instance-backed tools reach tenant workloads for
@@ -456,11 +552,67 @@ type runOutcome struct {
 
 // finishRun stamps a run's terminal phase, result, usage, and timestamps, and
 // clears any checkpoint.
-func (s *Server) finishRun(ctx context.Context, scope store.Scope, runID string, out runOutcome, end time.Time) {
-	stored, err := s.store.GetRun(ctx, scope, runID)
+func (s *Server) finishRun(ctx context.Context, scope store.Scope, runID string, out runOutcome, end time.Time) bool {
+	writeCtx, cancel := runWriteContext(ctx)
+	defer cancel()
+	stored, err := s.store.GetRun(writeCtx, scope, runID)
 	if err != nil {
-		return
+		return false
 	}
+	applyRunOutcome(&stored, out, end)
+	if stored.ExecutionOwner != "" && stored.ExecutionEpoch > 0 {
+		return s.store.SaveRunOwned(writeCtx, scope, stored, stored.ExecutionOwner, stored.ExecutionEpoch) == nil
+	}
+	return s.store.SaveRun(writeCtx, scope, stored) == nil
+}
+
+// finishRunOwned stamps a terminal result only while the supplied execution
+// fence still owns the run. A previous owner that returns after recovery gets a
+// fenced no-op instead of replacing the recovered result.
+func (s *Server) finishRunOwned(ctx context.Context, scope store.Scope, runID, owner string, epoch int64, out runOutcome, end time.Time) bool {
+	if owner == "" || epoch <= 0 {
+		return s.finishRun(ctx, scope, runID, out, end)
+	}
+	writeCtx, cancel := runWriteContext(ctx)
+	defer cancel()
+	stored, err := s.store.GetRun(writeCtx, scope, runID)
+	if err != nil || stored.ExecutionOwner != owner || stored.ExecutionEpoch != epoch {
+		if err != nil {
+			log.Printf("run: loading %s to finish: %v", runID, err)
+		}
+		return false
+	}
+	applyRunOutcome(&stored, out, end)
+	if err := s.store.SaveRunOwned(writeCtx, scope, stored, owner, epoch); err != nil {
+		log.Printf("run: finishing %s lost ownership: %v", runID, err)
+		return false
+	}
+	return true
+}
+
+const runPersistTimeout = 10 * time.Second
+
+// runWriteContext keeps terminal bookkeeping alive after a model request was
+// canceled or the HTTP caller disconnected. Without detaching here, the
+// cancellation that stops execution also cancels the only write that records
+// Aborted/Failed, leaving a run indistinguishable from a crashed owner.
+func runWriteContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), runPersistTimeout)
+}
+
+// runOutcomeNotCommitted tells callers that the model result is not theirs to
+// publish. A recovery claim, an explicit cancellation, or a transient store
+// failure can invalidate the execution fence between model completion and the
+// terminal write. Treating that as an ordinary model error would emit a stale
+// notification and cause a queue worker to record a false failure.
+func runOutcomeNotCommitted(runID string, cause error) error {
+	if cause == nil {
+		return fmt.Errorf("%w: terminal outcome for run %s was not persisted", store.ErrRunLeaseLost, runID)
+	}
+	return fmt.Errorf("%w: terminal outcome for run %s was not persisted: %v", store.ErrRunLeaseLost, runID, cause)
+}
+
+func applyRunOutcome(stored *store.Run, out runOutcome, end time.Time) {
 	stored.Phase = out.Phase
 	stored.Message = out.Message
 	stored.Checkpoint = nil
@@ -479,7 +631,6 @@ func (s *Server) finishRun(ctx context.Context, scope store.Scope, runID string,
 	}
 	stored.UpdatedAt = end
 	stored.FinishedAt = &end
-	_ = s.store.SaveRun(ctx, scope, stored)
 }
 
 // runEvent is one run lifecycle change pushed to /api/events subscribers. A

@@ -72,7 +72,7 @@ describe('cursor list pages', () => {
 
     const first = await listServicesPage({ limit: 1 })
     expect(first).toMatchObject({ items: [{ name: 'alpha' }], continue: 'page-2', remainingItemCount: 1, resourceVersion: 'rv-1' })
-    expect(calls[0]?.query).toContain('Services(limit: $limit, continue: $continue)')
+    expect(calls[0]?.query).toContain('Services(limit: $limit, continue: $continue, labelselector: $labelSelector)')
     expect(calls[0]?.query).toContain('continue remainingItemCount resourceVersion')
     expect(calls[0]?.variables).toEqual({ limit: 1 })
 
@@ -235,8 +235,10 @@ describe('unchanged edge fleet and CRUD contracts', () => {
   })
 
   it('retains edge joins when listing only one edge', async () => {
+    const calls: Array<{ query: string; variables: Record<string, unknown> }> = []
     vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       const call = request(init)
+      calls.push(call)
       return call.variables.continue
         ? page('Services', [service('other')], { continue: null, remainingItemCount: 0 })
         : page('Services', [
@@ -246,6 +248,53 @@ describe('unchanged edge fleet and CRUD contracts', () => {
     }))
 
     await expect(listEdgeServices('edge-target')).resolves.toMatchObject([{ name: 'target', edgeName: 'edge-target' }])
+    expect(calls).toHaveLength(2)
+    expect(calls.every(call => call.query.includes('labelselector: $labelSelector'))).toBe(true)
+    expect(calls.map(call => call.variables)).toEqual([
+      { limit: 100, labelSelector: 'edges.faros.sh/edge=edge-target' },
+      { limit: 100, continue: 'next', labelSelector: 'edges.faros.sh/edge=edge-target' },
+    ])
+  })
+
+  it('does not walk unrelated service pages to read one edge', async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const call = request(init)
+      // An unscoped request would require another 99 pages of unrelated rows.
+      return call.variables.labelSelector === 'edges.faros.sh/edge=edge-a'
+        ? page('Services', [service('target')], { remainingItemCount: 0 })
+        : page('Services', Array.from({ length: 100 }, (_, i) => service(`other-${i}`)), { continue: 'unrelated' })
+    })
+    vi.stubGlobal('fetch', fetch)
+    await expect(listEdgeServices('edge-a')).resolves.toMatchObject([{ name: 'target' }])
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the controller-compatible label for long edge names in creation and reads', async () => {
+    const edgeName = `edge-${'a'.repeat(70)}`
+    const label = 'sha256-3f579909109053617b5284437ee86c91aa928373b4fd858936a97268'
+    const calls: Array<{ query: string; variables: Record<string, unknown> }> = []
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const call = request(init)
+      calls.push(call)
+      return call.query.includes('createService')
+        ? response({ data: {} })
+        : page('Services', [{ ...service('target'), spec: { ...service('target').spec, edgeRef: { name: edgeName, kind: 'LinuxServer' } } }])
+    }))
+    await createKubeEdgeService({ name: 'target', edgeName, serviceType: 'generic', port: 80, targetNamespace: '', targetName: '' })
+    await expect(listEdgeServices(edgeName)).resolves.toMatchObject([{ name: 'target', edgeName }])
+    expect(calls[0]?.variables.object).toMatchObject({ metadata: { labels: { 'edges.faros.sh/edge': label } } })
+    expect(calls[1]?.variables.labelSelector).toBe(`edges.faros.sh/edge=${label}`)
+  })
+
+  it('fences a workspace switch during edge-label preparation before sending a request', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const read = listEdgeServices('edge-a')
+    const create = createKubeEdgeService({ name: 'target', edgeName: 'edge-a', serviceType: 'generic', port: 80, targetNamespace: '', targetName: '' })
+    setTenant('different-workspace')
+    await expect(read).rejects.toMatchObject({ reason: 'ContextChanged' })
+    await expect(create).rejects.toMatchObject({ reason: 'ContextChanged' })
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('keeps service and workload mutations on their existing GraphQL fields and joins', async () => {
