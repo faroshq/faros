@@ -505,10 +505,19 @@ Content-Type: application/json
 { "version": "1.2.0", "buildTime": "...", "status": "healthy" }
 ```
 
+- **Platform providers only.** The endpoint addresses providers by bare name
+  with no org context, so it resolves `{name}` to the *platform* workspace
+  `root:faros:providers:{name}`. An org-owned (BYO) provider lives at
+  `root:faros:tenants:{orgUUID}:providers:{name}` and cannot beat here; that
+  is deliberate, since otherwise one org could keep a platform provider of the
+  same name looking alive. Org-owned providers never set `HeartbeatRequired`
+  and their readiness rests on endpoint validity alone
+  (`Registry.Heartbeat`). In `enforce` they receive the same generic 401 as
+  any unregistered name, so do not read that 401 as a credential problem.
 - Authenticates the bearer token as the provider's own service account
   (`system:serviceaccount:default:provider`) by TokenReview in the provider's
-  workspace `root:faros:providers:{name}` — the same SA and token the hub
-  minted into the provider kubeconfig. Any other identity is rejected with
+  platform workspace `root:faros:providers:{name}` — the same SA and token the
+  hub minted into the provider kubeconfig. Any other identity is rejected with
   403, a missing or unrecognised token with 401. The endpoint has no auth
   middleware in front of it; this check is the whole of its authentication.
   `--provider-heartbeat-auth=warn` (this release's default) logs failures
@@ -958,10 +967,13 @@ Secret* differ.
 
 A provider's backend (if it declares one) MUST:
 
-- Heartbeat: `POST /api/providers/{name}/heartbeat` to the hub every 30s,
-  authenticated as the provider's own service account (token from
-  `provider-sdk/hubclient.ResolveHubToken`: `FAROS_HUB_TOKEN`, else the
-  provider kubeconfig's bearer).
+- Heartbeat, **platform providers only**: `POST /api/providers/{name}/heartbeat`
+  to the hub every 30s, authenticated as the provider's own service account
+  (token from `provider-sdk/hubclient.ResolveHubToken`: `FAROS_HUB_TOKEN`, else
+  the provider kubeconfig's bearer). An org-owned (BYO) provider MUST NOT beat:
+  the endpoint is keyed by bare name and resolves only platform providers, so
+  the beat is rejected and would in any case never mark it Ready. Its readiness
+  comes from endpoint validity instead — see the heartbeat endpoint section.
 - `GET /healthz` → 200 when ready (used by hub for `BackendHealthy`).
 
 A provider's controller (the kcp-talking part) MUST:
