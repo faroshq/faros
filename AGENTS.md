@@ -218,9 +218,12 @@ APIExport, schemas) and registers routing/heartbeat state.
 >
 > Reachability: a `Service` on a `LinuxServer` edge hits the agent host loopback by
 > default; `spec.host` points it at another device on the edge's LAN (e.g. a UniFi
-> console) — the agent's svc proxy (`pkg/agent/tunnel/svc.go`) currently allows any
-> host (see `isAllowedSvcHost`, `TODO(security)`). A `Service` on a
-> `KubernetesCluster` edge uses `spec.targetRef` (a cluster-DNS Service) instead.
+> console) — the agent's svc proxy (`pkg/agent/tunnel/svc.go`) dials loopback
+> always, cluster DNS in kubernetes mode, and any other host only inside the
+> agent's `--svc-allow-cidr` ranges (link-local never), with `--svc-policy`
+> `warn` (this release's default: dial + log) or `enforce` (403) deciding what a
+> denial does. A `Service` on a `KubernetesCluster` edge uses `spec.targetRef`
+> (a cluster-DNS Service) instead.
 > The portal create form (`Services.vue`) branches on the selected edge's kind.
 
 ### 5.2 Hub-side provider integration (`pkg/hub/providers/`)
@@ -232,9 +235,19 @@ APIExport, schemas) and registers routing/heartbeat state.
 | registry / controller / heartbeat | In-memory routing table, catalog reconcile, `POST /api/providers/{name}/heartbeat` liveness (TTL ~90s) |
 | `pkg/hub/provider_tenant_resolver.go` | Resolves caller identity → tenant workspace path; injects `X-Faros-User` / `X-Faros-Tenant`, strips spoofed inbound copies |
 
-Heartbeat: standalone providers POST every ~30s with `FAROS_HUB_URL`,
-`FAROS_HUB_TOKEN`, `FAROS_PROVIDER_NAME`. A provider is "Ready" only when its
-endpoints are valid and (once heartbeats have started) not stale.
+Heartbeat: standalone providers POST every ~30s through the one shared
+client in `provider-sdk/hubclient` (`ConfigFromEnv` + `RunHeartbeat`), which
+reads `FAROS_HUB_URL`, `FAROS_PROVIDER_NAME`, `FAROS_HUB_INSECURE` and
+`FAROS_PROVIDER_VERSION`. Do not copy the loop into a provider: TLS, token
+and retry behaviour must change in one place. The beat is authenticated as
+the provider's own service account: the bearer is `FAROS_HUB_TOKEN` if set,
+otherwise the token inside `FAROS_PROVIDER_KUBECONFIG`
+(`hubclient.ResolveHubToken`), and the hub verifies it by TokenReview in the
+provider's workspace (`heartbeat_auth.go`). `--provider-heartbeat-auth=warn|enforce`
+picks whether a failed check is logged or rejected (default `warn` this
+release, `enforce` next); the client logs a 401/403 with what to fix. A
+provider is "Ready" only when its endpoints are valid and (once heartbeats
+have started) not stale.
 
 ### 5.3 Provider portal micro-frontends
 
@@ -356,7 +369,10 @@ cannot capture a platform provider's proxy or heartbeat route by name. See
 3. Write `manifest.yaml` (CatalogEntry): displayName, ui/backend URLs, health
    path, apiExport name + permission claims + schema bodies.
 4. Build the portal (`providers/{name}/portal/`, embedded via `assets.go`).
-5. Implement heartbeat + tenant-scoped client if it talks to kcp.
+5. Wire the heartbeat with `provider-sdk/hubclient` (`ConfigFromEnv` +
+   `go RunHeartbeat`; set `CanSend` if a required controller gates
+   liveness) — never a local copy — plus a tenant-scoped client if it talks
+   to kcp.
 6. Add Makefile `build-{name}-provider[-portal]` + `run/install/uninstall`
    targets if standalone; add the module to `go.work`.
 7. Add an e2e suite under `test/e2e/suites/` if it has tenant-isolation or

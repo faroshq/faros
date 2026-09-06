@@ -84,6 +84,13 @@ const (
 	// and authorization-code records. Readers already refuse expired entries,
 	// so this cadence only affects storage, never correctness.
 	sharedStoreGCInterval = 10 * time.Minute
+
+	// mcpVerifyBurst is how many uncached aggregate-MCP bearer verifications
+	// one client address may start before the bucket (refilled one per second)
+	// throttles it. Verified bearers are cached and never counted, and
+	// providers such as app-studio call the aggregate for many users from one
+	// pod address, so this is deliberately looser than token-login.
+	mcpVerifyBurst = 60
 )
 
 // Server is the faros hub server orchestrator.
@@ -431,14 +438,33 @@ func (s *Server) Run(ctx context.Context) error {
 	// traffic, so the recorder persists it to CatalogEntry.status and the catalog
 	// watch fans it back out. Without that, replicas that never saw the beat
 	// would time a healthy provider out and start refusing to proxy to it.
-	var heartbeatRecorder providers.HeartbeatRecorder
+	//
+	// The endpoint sits on the root router with no auth middleware, so the
+	// handler verifies the bearer itself: it must be the provider's own
+	// service-account token, checked by TokenReview in the provider's
+	// workspace. --provider-heartbeat-auth picks warn (log, accept) or enforce
+	// (reject); warn is this release's default, enforce the next one's.
+	heartbeatAuthMode, err := providers.ParseHeartbeatAuthMode(s.opts.ProviderHeartbeatAuth)
+	if err != nil {
+		return fmt.Errorf("--provider-heartbeat-auth: %w", err)
+	}
+	var (
+		heartbeatRecorder      providers.HeartbeatRecorder
+		heartbeatAuthenticator providers.HeartbeatAuthenticator
+	)
 	if kcpConfig != nil {
 		heartbeatRecorder, err = providers.NewCatalogHeartbeatRecorder(kcpConfig, providerRegistry)
 		if err != nil {
 			return fmt.Errorf("creating provider heartbeat recorder: %w", err)
 		}
+		heartbeatAuthenticator, err = providers.NewTokenReviewHeartbeatAuthenticator(kcpConfig, providerRegistry)
+		if err != nil {
+			return fmt.Errorf("creating provider heartbeat authenticator: %w", err)
+		}
+	} else {
+		logger.Info("no kcp configured; provider heartbeats cannot be authenticated", "mode", heartbeatAuthMode)
 	}
-	router.PathPrefix(providers.PathProviderHeartbeat + "/").Handler(providers.NewHeartbeatHandler(providerRegistry, heartbeatRecorder, logger)).Methods("POST")
+	router.PathPrefix(providers.PathProviderHeartbeat + "/").Handler(providers.NewHeartbeatHandler(providerRegistry, heartbeatRecorder, heartbeatAuthenticator, heartbeatAuthMode, logger)).Methods("POST")
 	// Background sweeper marks providers stale when heartbeats stop. Every
 	// replica runs one: it only reads timestamps the registry already holds, so
 	// all replicas reach the same verdict without coordinating.
@@ -480,10 +506,31 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return out
 	}
+	// Every aggregate request is verified against the tenant cluster named in
+	// its path before anything is federated: a TokenReview must prove the
+	// bearer is that MCPServer's own ServiceAccount, or (wired below once the
+	// kcp proxy exists) a hub user who is a member of that tenant. Uncached
+	// verifications share the token-login limiter's per-address bucket;
+	// dev mode skips it for the same reason token-login does.
+	mcpVerifier := mcpaggregate.NewVerifier(func(cluster string) *rest.Config {
+		if kcpConfig == nil {
+			return nil
+		}
+		cfg := rest.CopyConfig(kcpConfig)
+		cfg.Host = apiurl.KCPClusterURL(kcpConfig.Host, cluster)
+		return cfg
+	})
+	var mcpRateLimiter mcpaggregate.RateLimiter
+	if !s.opts.DevMode {
+		mcpRateLimiter = proxy.NewIPRateLimiter(time.Second, mcpVerifyBurst)
+	}
 	mcpAggregate := mcpaggregate.New(mcpaggregate.Options{
 		ExternalURL: s.opts.HubExternalURL,
 		Logger:      logger,
 		Providers:   mcpProviderEnumerator,
+		Verifier:    mcpVerifier,
+		RateLimiter: mcpRateLimiter,
+		ClientIP:    proxy.ClientIP,
 	})
 	router.PathPrefix(apiurl.PathPrefixMCPServer + "/").Handler(
 		http.StripPrefix(apiurl.PathPrefixMCPServer, mcpAggregate))
@@ -657,6 +704,9 @@ func (s *Server) Run(ctx context.Context) error {
 			membershipLookup := tenant.MembershipLookupFunc(func(ctx context.Context, userName string) (*tenancyv1alpha1.UserMembershipIndex, error) {
 				return userClient.UserMembershipIndices().Get(ctx, userName, metav1.GetOptions{})
 			})
+			// Let hub users (CLI `faros mcp`, e2e) reach the aggregate MCP
+			// endpoint with their own bearer, gated on tenant membership.
+			mcpVerifier.SetUserIdentity(kcpProxy.IdentifyUser, membershipLookup.GetUserMembershipIndex)
 
 			// GET /api/providers: authenticated, Org optional. The catalog
 			// describes what this deployment runs, so it is not enumerable
