@@ -136,7 +136,8 @@ type tokenReviewAuthenticator struct {
 	now         func() time.Time
 	cacheTTL    time.Duration
 	negativeTTL time.Duration
-	// negativeMax caps len(negative); zero means heartbeatAuthNegativeCacheMax.
+	// negativeMax caps len(negativeOrder) and, through it, len(negative);
+	// zero means heartbeatAuthNegativeCacheMax.
 	negativeMax int
 
 	mu    sync.Mutex
@@ -147,8 +148,9 @@ type tokenReviewAuthenticator struct {
 	// negativeOrder lists negative's entries oldest first. The TTL is a
 	// constant, so insertion order is expiry order: pruning pops expired
 	// entries off the front and eviction at capacity pops the oldest, and
-	// neither visits an entry that is still live. A key rejected again after
-	// its entry lapsed is appended anew; the stale front entry is skipped
+	// neither visits an entry that is still live. A key rejected again while
+	// its entry is live keeps the slot it has; one rejected again after its
+	// entry lapsed is appended anew, and the stale front entry is skipped
 	// when its recorded expiry no longer matches the map's.
 	negativeOrder []heartbeatAuthNegativeEntry
 	// negativeVisited counts the queue entries pruning and eviction examined.
@@ -284,10 +286,11 @@ func (a *tokenReviewAuthenticator) rejected(key heartbeatAuthCacheKey, now time.
 
 // reject records a definitive rejection for key and returns err. It is only
 // reached after a TokenReview, so kcp's round trip already paces it. Before
-// inserting it drops the entries that have expired and, if the cache is still
-// at heartbeatAuthNegativeCacheMax, the oldest live ones; both come off the
-// front of negativeOrder, so each entry is examined once in its lifetime and
-// the cost is amortised O(1) per rejection.
+// inserting it drops the entries that have expired and, if negativeOrder is
+// still at heartbeatAuthNegativeCacheMax, the oldest live ones; both come off
+// the front, so each entry is examined once in its lifetime and the cost is
+// amortised O(1) per rejection. The slice is the bound: every map key has a
+// slot in it, so capping the slice caps the map.
 func (a *tokenReviewAuthenticator) reject(key heartbeatAuthCacheKey, now time.Time, err error) error {
 	if a.negativeTTL <= 0 {
 		return err
@@ -297,6 +300,15 @@ func (a *tokenReviewAuthenticator) reject(key heartbeatAuthCacheKey, now time.Ti
 	if a.negative == nil {
 		a.negative = map[heartbeatAuthCacheKey]heartbeatAuthRejection{}
 	}
+	// Two beats with the same bad token can both miss the negative cache and
+	// both go to kcp before either records the answer. The one that arrives
+	// here second finds a live entry and must not take a second slot for it;
+	// otherwise a flood of one token, at high enough concurrency, would grow
+	// negativeOrder by its in-flight count every TTL. The earlier expiry is
+	// kept: a repeat rejection does not extend how long the token is remembered.
+	if r, ok := a.negative[key]; ok && now.Before(r.until) {
+		return err
+	}
 	for len(a.negativeOrder) > 0 && !now.Before(a.negativeOrder[0].until) {
 		a.popNegativeLocked()
 	}
@@ -304,7 +316,7 @@ func (a *tokenReviewAuthenticator) reject(key heartbeatAuthCacheKey, now time.Ti
 	if limit <= 0 {
 		limit = heartbeatAuthNegativeCacheMax
 	}
-	for len(a.negative) >= limit && len(a.negativeOrder) > 0 {
+	for len(a.negativeOrder) >= limit {
 		a.popNegativeLocked()
 	}
 	until := now.Add(a.negativeTTL)

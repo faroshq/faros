@@ -599,6 +599,65 @@ func TestTokenReviewAuthenticatorNegativeCacheIsBounded(t *testing.T) {
 	}
 }
 
+// Two beats with the same bad token can both miss the negative cache while
+// the first TokenReview is in flight, and both then record the rejection. The
+// second must not take a second order slot: the slice is the bound, and a
+// flood of one token at high concurrency must not grow it by the in-flight
+// count every TTL.
+func TestTokenReviewAuthenticatorNegativeCacheRepeatRejectionKeepsOneSlot(t *testing.T) {
+	reg := NewRegistry()
+	reg.Upsert(Provider{Name: "code", EndpointsValid: true, CatalogEntryCluster: "code-cluster"})
+	f := &tokenReviewFake{status: authnv1.TokenReviewStatus{Authenticated: false}}
+	now := time.Now()
+	a := newTestTokenReviewAuthenticator(reg, f, &now)
+	a.negativeMax = 8
+	key := func(token string) heartbeatAuthCacheKey {
+		return heartbeatAuthCacheKey{tokenHash: sha256.Sum256([]byte(token)), provider: "code"}
+	}
+	garbage := key("garbage")
+
+	// A hundred beats that all saw no cached rejection and all came back
+	// from kcp with the same answer.
+	for range 100 {
+		if err := a.reject(garbage, now, ErrHeartbeatTokenRejected); !errors.Is(err, ErrHeartbeatTokenRejected) {
+			t.Fatalf("reject: err = %v, want ErrHeartbeatTokenRejected", err)
+		}
+	}
+	if len(a.negative) != 1 || len(a.negativeOrder) != 1 {
+		t.Fatalf("after 100 in-flight rejections of one token: len(negative) = %d, len(negativeOrder) = %d, want 1 each", len(a.negative), len(a.negativeOrder))
+	}
+	first := a.negative[garbage].until
+
+	// A repeat does not extend how long the token is remembered.
+	a.reject(garbage, now.Add(a.negativeTTL/2), ErrHeartbeatTokenRejected)
+	if got := a.negative[garbage].until; !got.Equal(first) {
+		t.Fatalf("a repeat rejection moved the expiry from %v to %v", first, got)
+	}
+	if len(a.negativeOrder) != 1 {
+		t.Fatalf("a repeat rejection took a slot: len(negativeOrder) = %d, want 1", len(a.negativeOrder))
+	}
+
+	// Once the entry lapses the token is recorded anew, again in one slot.
+	lapsed := first.Add(time.Nanosecond)
+	a.reject(garbage, lapsed, ErrHeartbeatTokenRejected)
+	if len(a.negative) != 1 || len(a.negativeOrder) != 1 {
+		t.Fatalf("after the entry lapsed: len(negative) = %d, len(negativeOrder) = %d, want 1 each", len(a.negative), len(a.negativeOrder))
+	}
+	if got := a.negative[garbage].until; !got.After(first) {
+		t.Fatalf("a rejection after the entry lapsed kept the old expiry %v", got)
+	}
+
+	// Interleaved with a flood of distinct tokens, the repeats still cost no
+	// slots and the queue never exceeds the cap.
+	for i := range 1000 {
+		a.reject(key(fmt.Sprintf("flood-%d", i)), lapsed, ErrHeartbeatTokenRejected)
+		a.reject(garbage, lapsed, ErrHeartbeatTokenRejected)
+	}
+	if len(a.negative) > a.negativeMax || len(a.negativeOrder) > a.negativeMax {
+		t.Fatalf("after a flood with repeats: len(negative) = %d, len(negativeOrder) = %d, cap %d", len(a.negative), len(a.negativeOrder), a.negativeMax)
+	}
+}
+
 // A lookup must not pay for the cache's size: after a flood of distinct
 // rejections, a beat must be a map lookup, not a sweep of the flood. Expired
 // entries are dropped when a rejection is recorded, off the front of the
