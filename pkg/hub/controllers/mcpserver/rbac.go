@@ -19,6 +19,7 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -394,19 +395,27 @@ func catalogActionGrants(kcpConfig *rest.Config) ActionGrantSource {
 	}
 }
 
+// actionIDPattern is the documented action ID shape, "<name>/vN". It mirrors
+// the kubebuilder Pattern on ProviderActionSpec.ID character for character;
+// keep the two in step. The CRD rejects new objects that break it, but pattern
+// validation never retro-validates objects that predate the marker, so the
+// parser enforces the shape itself rather than trusting what is in storage.
+var actionIDPattern = regexp.MustCompile(`^([a-z][a-z0-9_-]{0,62})/v[1-9][0-9]{0,7}$`)
+
 // actionGrantsFromSpec maps catalog action declarations to RBAC coordinates.
-// Action IDs are "<name>/<version>"; the provider reviews the unversioned
-// name as the subresource. An ID that does not carry a version segment does
-// not match the documented format, so it is skipped rather than granted:
-// a malformed catalog entry must not widen the role.
+// Action IDs are "<name>/vN"; the provider reviews the unversioned name as the
+// subresource. An ID that does not match the documented shape is skipped
+// rather than granted: a malformed catalog entry must not widen the role, and
+// "has a slash" is not the documented shape.
 func actionGrantsFromSpec(actions []providersv1alpha1.ProviderActionSpec) []ActionGrant {
 	out := make([]ActionGrant, 0, len(actions))
 	for _, a := range actions {
-		name, version, ok := strings.Cut(strings.TrimSpace(a.ID), "/")
-		if !ok || strings.TrimSpace(version) == "" {
+		m := actionIDPattern.FindStringSubmatch(strings.TrimSpace(a.ID))
+		if m == nil {
 			continue
 		}
-		if name == "" || a.BoundResource.Resource == "" {
+		name := m[1]
+		if a.BoundResource.Resource == "" {
 			continue
 		}
 		gv, err := schema.ParseGroupVersion(a.BoundResource.APIVersion)

@@ -269,17 +269,34 @@ func TestActionGrantsFromSpec(t *testing.T) {
 // Action IDs are documented as "<name>/<version>". An ID without a version
 // segment is malformed, and granting it would put a subresource in the role
 // that no provider ever reviews.
+// The parser enforces the documented "<name>/vN" shape itself, mirroring the
+// CRD pattern, because pattern validation does not retro-validate objects
+// that predate the marker: a legacy entry must not be granted just because
+// it is stored.
 func TestActionGrantsFromSpec_SkipsIDsWithoutAVersion(t *testing.T) {
 	res := providersv1alpha1.ProviderActionBoundResource{APIVersion: "infrastructure.faros.sh/v1alpha1", Resource: "instances"}
-	for _, id := range []string{"restart", "restart/", "  restart  ", "/v1", ""} {
+	for _, id := range []string{
+		"restart", "restart/", "  restart  ", "/v1", "",
+		// A slash with something after it is not enough: the version must be
+		// v followed by a non-zero-led number, exactly as the CRD requires.
+		"restart/latest", "restart/1", "restart/v0", "restart/v01", "restart/v1alpha1",
+		"restart/v123456789", // nine digits, one past the CRD bound
+		"Restart/v1",         // name must be lowercase
+		"restart/v1/v2",
+	} {
 		got := actionGrantsFromSpec([]providersv1alpha1.ProviderActionSpec{{ID: id, BoundResource: res}})
 		if len(got) != 0 {
 			t.Fatalf("ID %q granted %+v, want skipped", id, got)
 		}
 	}
-	got := actionGrantsFromSpec([]providersv1alpha1.ProviderActionSpec{{ID: "restart/v1", BoundResource: res}})
-	if len(got) != 1 || got[0].Name != "restart" {
-		t.Fatalf("well-formed ID = %+v, want one restart grant", got)
+	for _, id := range []string{"restart/v1", "restart/v12345678", "query_table/v2", "a/v1", "  restart/v1  "} {
+		got := actionGrantsFromSpec([]providersv1alpha1.ProviderActionSpec{{ID: id, BoundResource: res}})
+		if len(got) != 1 {
+			t.Fatalf("well-formed ID %q = %+v, want exactly one grant", id, got)
+		}
+		if want := strings.TrimSpace(id)[:strings.Index(strings.TrimSpace(id), "/")]; got[0].Name != want {
+			t.Fatalf("ID %q granted name %q, want %q", id, got[0].Name, want)
+		}
 	}
 }
 
