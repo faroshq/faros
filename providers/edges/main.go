@@ -34,10 +34,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -84,18 +86,69 @@ func main() {
 		case "serve":
 			// fall through
 		default:
-			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\nusage: edges-provider [init|serve]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown subcommand: %s\nusage: edges-provider [init|serve [--allow-unverified-ssh-host-key]]\n", os.Args[1])
 			os.Exit(2)
 		}
 	}
-	if err := runServe(); err != nil {
+	var serveArgs []string
+	if len(os.Args) > 2 {
+		serveArgs = os.Args[2:]
+	}
+	opts, err := parseServeOptions(serveArgs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "serve:", err)
+		os.Exit(2)
+	}
+	if err := runServe(opts); err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)
 		os.Exit(1)
 	}
 }
 
-func runServe() error {
+// serveOptions are the serve-time switches. Each has a flag and an env form
+// (the chart sets the env); either enables it.
+type serveOptions struct {
+	// allowUnverifiedSSHHostKey is the legacy escape hatch for LinuxServers
+	// whose agents never reported an sshd host key: SSH sessions to them are
+	// opened without verifying the server. Edges with a known or pinned key
+	// are always verified regardless.
+	allowUnverifiedSSHHostKey bool
+}
+
+// allowUnverifiedEnvVar is the env form of --allow-unverified-ssh-host-key
+// (the chart sets it).
+const allowUnverifiedEnvVar = "FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY"
+
+func parseServeOptions(args []string) (serveOptions, error) {
+	var opts serveOptions
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.BoolVar(&opts.allowUnverifiedSSHHostKey, "allow-unverified-ssh-host-key", false,
+		"open SSH sessions to LinuxServers with no known host key without verifying the server (legacy escape hatch; env "+allowUnverifiedEnvVar+"=true)")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	// A malformed value is refused rather than silently read as false: this
+	// switch decides whether SSH sessions verify the server at all, and a typo
+	// ("treu") must not quietly land on a different security posture than the
+	// operator asked for — in either direction.
+	if raw, set := os.LookupEnv(allowUnverifiedEnvVar); set && raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return opts, fmt.Errorf("%s=%q is not a boolean: %w (use true or false)", allowUnverifiedEnvVar, raw, err)
+		}
+		if v {
+			opts.allowUnverifiedSSHHostKey = true
+		}
+	}
+	return opts, nil
+}
+
+func runServe(opts serveOptions) error {
 	log := klog.Background().WithName("edges")
+
+	if opts.allowUnverifiedSSHHostKey {
+		log.Info("WARNING: --allow-unverified-ssh-host-key is set: SSH sessions to LinuxServers with no known host key will NOT verify the server (MITM risk); pin spec.sshHostKey or let agents report keys, then remove the flag")
+	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -119,6 +172,22 @@ func runServe() error {
 	kcpConfig := loadKCPConfig(log)
 	hubExternalURL := os.Getenv("FAROS_HUB_EXTERNAL_URL")
 
+	// FAROS_STATIC_TOKENS used to let listed bearers skip TokenReview/SAR on
+	// every data-plane path. The bypass is gone: kcp validates every token, and
+	// hub static-token users are ordinary kcp identities that pass that check.
+	// A set value with a kcp credential present is a misconfiguration that
+	// would silently expect the old behaviour, so refuse to start rather than
+	// run with a different security posture than the operator assumed.
+	if v := os.Getenv("FAROS_STATIC_TOKENS"); v != "" {
+		if kcpConfig != nil {
+			err := errors.New("FAROS_STATIC_TOKENS is set but the static-token authorization bypass has been removed; every token is validated by kcp, so unset the variable")
+			log.Error(err, "refusing to start")
+			return err
+		}
+		log.Info("static-token authorization bypass has been removed; the environment variable is ignored",
+			"envVar", "FAROS_STATIC_TOKENS", "ignored", true, "severity", "warning")
+	}
+
 	// Tunnel plane. The provider owns the ConnManager and terminates agent
 	// reverse tunnels in-process; with replica routing enabled below, peer
 	// replicas relay to whichever replica holds a tunnel. Both prefixes sit
@@ -128,13 +197,13 @@ func runServe() error {
 			{GVR: edgesv1alpha1.KubernetesClusterGVR, Kind: "KubernetesCluster"},
 			{GVR: edgesv1alpha1.LinuxServerGVR, Kind: "LinuxServer"},
 		},
-		AgentPickupPath:     agentPickupPath,
-		EdgeProxyPublicPath: edgeProxyPublicPath,
-		KCPConfig:           kcpConfig,
-		StaticTokens:        splitEnv(os.Getenv("FAROS_STATIC_TOKENS")),
-		HubExternalURL:      hubExternalURL,
-		HubInternalURL:      os.Getenv("FAROS_HUB_INTERNAL_URL"),
-		Logger:              log,
+		AgentPickupPath:           agentPickupPath,
+		EdgeProxyPublicPath:       edgeProxyPublicPath,
+		KCPConfig:                 kcpConfig,
+		HubExternalURL:            hubExternalURL,
+		HubInternalURL:            os.Getenv("FAROS_HUB_INTERNAL_URL"),
+		AllowUnverifiedSSHHostKey: opts.allowUnverifiedSSHHostKey,
+		Logger:                    log,
 	})
 	if err != nil {
 		return fmt.Errorf("build tunnel server: %w", err)
@@ -290,7 +359,14 @@ func runServe() error {
 // kubeconfig) for token validation and Edge reads/writes. Best-effort: returns
 // nil (with a warning) when no kubeconfig is available, so the binary still
 // serves /healthz in environments where kcp isn't wired yet. Resolution order:
-// FAROS_PROVIDER_KUBECONFIG, KUBECONFIG, in-cluster.
+// FAROS_PROVIDER_KUBECONFIG, KUBECONFIG, in-cluster; note that a
+// FAROS_PROVIDER_KUBECONFIG that is set but unusable falls through the same
+// chain and can end in nil.
+//
+// A nil result does NOT unmount the data plane: the tunnel handlers are always
+// mounted and instead refuse every consumer-egress request with 503, because
+// there is no kcp credential to authorize bearers against (see
+// tunnel.Server.denyIfAuthorizationUnavailable).
 func loadKCPConfig(log logr.Logger) *rest.Config {
 	if p := os.Getenv("FAROS_PROVIDER_KUBECONFIG"); p != "" {
 		if c, err := clientcmd.BuildConfigFromFlags("", p); err == nil {
@@ -307,7 +383,7 @@ func loadKCPConfig(log logr.Logger) *rest.Config {
 	if c, err := rest.InClusterConfig(); err == nil {
 		return c
 	}
-	log.Info("no kcp kubeconfig available; tunnel token validation + Edge reads disabled (healthz only)")
+	log.Info("no kcp kubeconfig available; edge controllers are disabled and the tunnel data plane refuses every request with 503 (delegated authorization unavailable) - only /healthz and the static portal serve")
 	return nil
 }
 
@@ -327,21 +403,6 @@ func hubCAData(log logr.Logger) []byte {
 		return []byte(d)
 	}
 	return nil
-}
-
-// splitEnv splits a comma-separated env value into a trimmed, non-empty slice.
-func splitEnv(v string) []string {
-	if v == "" {
-		return nil
-	}
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // envOrHostname returns the named env var (the chart sets POD_NAME via the

@@ -105,12 +105,12 @@ spec:
             {{- end }}
             - name: FAROS_PROVIDER_KUBECONFIG
               value: /var/run/secrets/faros/kubeconfig
-            {{- if .Values.staticTokens }}
-            - name: FAROS_STATIC_TOKENS
-              value: {{ .Values.staticTokens | quote }}
-            {{- end }}
             {{- if .Values.devMode }}
             - name: FAROS_DEV_MODE
+              value: "true"
+            {{- end }}
+            {{- if .Values.allowUnverifiedSSHHostKey }}
+            - name: FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY
               value: "true"
             {{- end }}
             {{- if .Values.hub.insecure }}
