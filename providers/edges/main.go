@@ -115,16 +115,30 @@ type serveOptions struct {
 	allowUnverifiedSSHHostKey bool
 }
 
+// allowUnverifiedEnvVar is the env form of --allow-unverified-ssh-host-key
+// (the chart sets it).
+const allowUnverifiedEnvVar = "FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY"
+
 func parseServeOptions(args []string) (serveOptions, error) {
 	var opts serveOptions
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.BoolVar(&opts.allowUnverifiedSSHHostKey, "allow-unverified-ssh-host-key", false,
-		"open SSH sessions to LinuxServers with no known host key without verifying the server (legacy escape hatch; env FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY=true)")
+		"open SSH sessions to LinuxServers with no known host key without verifying the server (legacy escape hatch; env "+allowUnverifiedEnvVar+"=true)")
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
-	if v, _ := strconv.ParseBool(os.Getenv("FAROS_EDGES_ALLOW_UNVERIFIED_SSH_HOST_KEY")); v {
-		opts.allowUnverifiedSSHHostKey = true
+	// A malformed value is refused rather than silently read as false: this
+	// switch decides whether SSH sessions verify the server at all, and a typo
+	// ("treu") must not quietly land on a different security posture than the
+	// operator asked for — in either direction.
+	if raw, set := os.LookupEnv(allowUnverifiedEnvVar); set && raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return opts, fmt.Errorf("%s=%q is not a boolean: %w (use true or false)", allowUnverifiedEnvVar, raw, err)
+		}
+		if v {
+			opts.allowUnverifiedSSHHostKey = true
+		}
 	}
 	return opts, nil
 }

@@ -208,7 +208,10 @@ func setStatusCondition(status map[string]interface{}, cond metav1.Condition) {
 	if existing := findStatusCondition(status, cond.Type); existing != nil {
 		if existing["status"] == string(cond.Status) {
 			if ltt, ok := existing["lastTransitionTime"].(string); ok && ltt != "" {
-				if t, err := time.Parse(time.RFC3339, ltt); err == nil {
+				// RFC3339Nano parses the seconds-precision form as well, so it
+				// also tolerates a fractional-seconds value that reached the
+				// object by some other route than a metav1.Time marshal.
+				if t, err := time.Parse(time.RFC3339Nano, ltt); err == nil {
 					cond.LastTransitionTime = metav1.NewTime(t)
 				}
 			}
