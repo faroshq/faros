@@ -183,11 +183,16 @@ func (s *Server) webhookChannel(w http.ResponseWriter, r *http.Request) {
 		SessionID:  session,
 	}); err != nil {
 		s.bg.seen.release(key) // let the platform's retry through
+		// The caller is Slack or Telegram, not an operator. The submit error
+		// names queue depth and capacity, the job kind and source, and the
+		// context error — useful in the log, none of the platform's business,
+		// and nothing it needs in order to redeliver. Log it; answer with a
+		// fixed body.
+		log.Printf("channel inbound %s/%s: submit failed: %v", cluster, name, err)
 		if errors.Is(err, executor.ErrQueueFull) {
-			log.Printf("channel inbound %s/%s: %v", cluster, name, err)
 			w.Header().Set("Retry-After", "5")
 		}
-		writeStatus(w, http.StatusServiceUnavailable, "Unavailable", err.Error())
+		writeStatus(w, http.StatusServiceUnavailable, "Unavailable", inboundSubmitUnavailableMessage)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -196,6 +201,12 @@ func (s *Server) webhookChannel(w http.ResponseWriter, r *http.Request) {
 // channelSubmitWait bounds how long the inbound handler waits for executor
 // queue space — under Slack's 3s redelivery timer.
 const channelSubmitWait = 2500 * time.Millisecond
+
+// inboundSubmitUnavailableMessage is the whole of what an external platform
+// learns when a verified delivery could not be queued. It is deliberately
+// fixed: the underlying error is logged for the operator, and the platform
+// only needs the 503 (plus Retry-After when the queue was full) to redeliver.
+const inboundSubmitUnavailableMessage = "temporarily unable to accept the delivery; retry later"
 
 // verifyInbound applies the platform's per-delivery proof for a connection
 // type. Both platforms are checked over the raw body, before any parsing.

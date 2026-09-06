@@ -602,6 +602,44 @@ func TestSlackInboundQueueFullAsksForRetry(t *testing.T) {
 	}
 }
 
+// The 503 goes to Slack or Telegram, not to an operator. The executor's error
+// names queue depth and capacity, the job kind and source, and the context
+// error — all of it belongs in the log and none of it in the response.
+func TestInboundSubmitFailureDoesNotDescribeTheExecutorToTheCaller(t *testing.T) {
+	// Shaped exactly like executor.InProcess.Submit's timeout error.
+	queueFull := fmt.Errorf("%w (64/64 queued) — job channel/slack-main not accepted: %v", executor.ErrQueueFull, context.DeadlineExceeded)
+	for name, tc := range map[string]struct {
+		err        error
+		retryAfter bool
+	}{
+		"queue full": {err: queueFull, retryAfter: true},
+		"stopped":    {err: executor.ErrStopped, retryAfter: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ex := &captureExec{err: tc.err}
+			s, token := inboundServer(t, ex, slackObjects(map[string]string{signingSecretKey: testSlackSecret})...)
+			body := slackMessage("Ev-leak", "busy")
+
+			w := postChannel(s, token, body, slackHeaders(testSlackSecret, body, time.Now()))
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status %d, want 503", w.Code)
+			}
+			if got := w.Header().Get("Retry-After") != ""; got != tc.retryAfter {
+				t.Fatalf("Retry-After present = %v, want %v", got, tc.retryAfter)
+			}
+			resp := w.Body.String()
+			for _, leak := range []string{"64/64", "queued", "channel/slack-main", "not accepted", "deadline", "executor", "not running"} {
+				if strings.Contains(resp, leak) {
+					t.Fatalf("response leaks %q to the platform: %s", leak, resp)
+				}
+			}
+			if !strings.Contains(resp, inboundSubmitUnavailableMessage) {
+				t.Fatalf("response should carry the fixed message, got: %s", resp)
+			}
+		})
+	}
+}
+
 func TestSlackInboundIgnoresUnconfiguredChannel(t *testing.T) {
 	ex := &captureExec{}
 	s, token := inboundServer(t, ex, slackObjects(map[string]string{signingSecretKey: testSlackSecret})...)
