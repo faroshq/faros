@@ -45,12 +45,13 @@ type OrganizationSpendDelta struct {
 // OrganizationSpendStore accumulates per-organization model spend so the
 // assistant can enforce a monthly USD cap before each model call.
 //
-// Both methods take at, any instant inside the accounting period — typically
-// just time.Now() — not a pre-normalized boundary. The implementation resolves
-// it to the containing UTC calendar month with OrganizationSpendPeriodStart,
-// so every instant in one month addresses one bucket and callers never have to
-// agree on how the boundary is computed. The returned OrganizationSpend
-// carries the resolved PeriodStart.
+// Both methods accept the at timestamp, which may be any instant within the
+// accounting period — typically just time.Now() — rather than a pre-normalized
+// boundary. The store normalizes it to the period start, the containing UTC
+// calendar month per OrganizationSpendPeriodStart, so every instant in one
+// month addresses one bucket and callers never have to agree on how the
+// boundary is computed. The returned OrganizationSpend carries the resolved
+// PeriodStart.
 type OrganizationSpendStore interface {
 	// AddOrganizationSpend atomically adds delta to the bucket containing at
 	// and returns the updated totals.

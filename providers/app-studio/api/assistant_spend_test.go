@@ -82,8 +82,11 @@ func TestProjectAssistantModelCostMicros(t *testing.T) {
 			}
 		})
 	}
-	// Unknown models must be priced at least as high as every catalog entry
-	// so an unpriced model exhausts the cap earlier, never later.
+	// The unknown-model fallback must be a frontier-tier rate: no catalog entry
+	// may exceed it on either input or output, except the premium o1* and
+	// claude-opus-4* tiers, which are knowingly priced above it. Adding a
+	// cheaper-than-fallback entry is fine; adding a pricier one outside those
+	// families means the fallback (or this exemption) needs revisiting.
 	for id, price := range projectAssistantModelPrices {
 		if price.InputPer1M > projectAssistantUnknownModelPrice.InputPer1M || price.OutputPer1M > projectAssistantUnknownModelPrice.OutputPer1M {
 			if !strings.HasPrefix(id, "o1") && !strings.HasPrefix(id, "claude-opus-4") {

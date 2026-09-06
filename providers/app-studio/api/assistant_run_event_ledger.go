@@ -217,9 +217,6 @@ func newProjectAssistantRunEventLedger(
 	}
 }
 
-// RecordToolRequest durably captures the model-authored call before argument,
-// policy, or permission validation. It does not authorize backend dispatch;
-// BeginToolCall records that separate admission boundary after validation.
 // RecordSpendCapReached appends the durable notice that the organization's
 // monthly spend cap was reached during this run. It is a plain ledger event:
 // replay treats unknown types as sequence advances, so it never perturbs tool
@@ -253,6 +250,9 @@ func (l *projectAssistantRunEventLedger) RecordSpendCapReached(ctx context.Conte
 	}
 }
 
+// RecordToolRequest durably captures the model-authored call before argument,
+// policy, or permission validation. It does not authorize backend dispatch;
+// BeginToolCall records that separate admission boundary after validation.
 func (l *projectAssistantRunEventLedger) RecordToolRequest(
 	ctx context.Context,
 	callID string,
