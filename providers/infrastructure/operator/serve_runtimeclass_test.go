@@ -28,21 +28,24 @@ import (
 
 func TestEnsureProviderServePropagatesSandboxRuntimeClass(t *testing.T) {
 	for _, tt := range []struct {
-		name             string
-		runtimeClassName string
-		want             string
-		wantPresent      bool
+		name        string
+		sandbox     *v1alpha1.SandboxSpec
+		want        string
+		wantPresent bool
 	}{
-		{name: "set", runtimeClassName: "gvisor", want: "gvisor", wantPresent: true},
-		{name: "trimmed", runtimeClassName: "  kata  ", want: "kata", wantPresent: true},
-		{name: "empty keeps cluster default", runtimeClassName: "", wantPresent: false},
+		{name: "set", sandbox: &v1alpha1.SandboxSpec{RuntimeClassName: "gvisor"}, want: "gvisor", wantPresent: true},
+		{name: "trimmed", sandbox: &v1alpha1.SandboxSpec{RuntimeClassName: "  kata  "}, want: "kata", wantPresent: true},
+		{name: "empty keeps cluster default", sandbox: &v1alpha1.SandboxSpec{RuntimeClassName: ""}, wantPresent: false},
+		{name: "whitespace only keeps cluster default", sandbox: &v1alpha1.SandboxSpec{RuntimeClassName: "   "}, wantPresent: false},
+		{name: "tabs and newlines only keep cluster default", sandbox: &v1alpha1.SandboxSpec{RuntimeClassName: "\t\n "}, wantPresent: false},
+		{name: "absent block keeps cluster default", sandbox: nil, wantPresent: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
 			provider := &v1alpha1.InfrastructureProvider{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-infrastructure"},
 				Spec: v1alpha1.InfrastructureProviderSpec{
-					Sandbox: v1alpha1.SandboxSpec{RuntimeClassName: tt.runtimeClassName},
+					Sandbox: tt.sandbox,
 					Provider: v1alpha1.ProviderServeSpec{
 						Image: v1alpha1.ImageSpec{Repository: "example.test/infrastructure", Tag: "test"},
 					},

@@ -351,6 +351,7 @@ spec:
                 description: |-
                   Sandbox configures runtime isolation for every development-mode pod the
                   provider synthesizes (dev instances and the universal coding sandbox).
+                  Absent keeps the runtime cluster's default runtime.
                 properties:
                   runtimeClassName:
                     description: |-

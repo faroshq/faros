@@ -115,10 +115,17 @@ type InfrastructureProviderSpec struct {
 	// +optional
 	CodingSandbox CodingSandboxSpec `json:"codingSandbox,omitempty"`
 
+	// A pointer, not a value struct: `omitempty` does not omit a struct, so a
+	// value type would always serialize as `sandbox: {}` and server-side apply
+	// would read that as an applier claiming ownership of a block it never
+	// set. This paragraph is deliberately detached from the doc comment below
+	// so it stays out of the generated CRD description.
+
 	// Sandbox configures runtime isolation for every development-mode pod the
 	// provider synthesizes (dev instances and the universal coding sandbox).
+	// Absent keeps the runtime cluster's default runtime.
 	// +optional
-	Sandbox SandboxSpec `json:"sandbox,omitempty"`
+	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
 }
 
 // SandboxSpec is operator-owned isolation policy for development pods. The
