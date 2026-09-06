@@ -94,6 +94,12 @@ var ErrQueueFull = errors.New("executor queue full")
 // (Slack retries a webhook after 3s) pass a shorter deadline on ctx.
 const SubmitWait = 5 * time.Second
 
+// submitSlowWait is how long a job must sit waiting for a queue slot before
+// Submit says so. Below it the queue drained as fast as it filled and the job
+// was not meaningfully delayed; above it the pool is saturated, which is a
+// capacity signal an operator can act on.
+const submitSlowWait = 250 * time.Millisecond
+
 // InProcess is the small in-house implementation: a bounded worker pool with
 // per-job timeout and panic isolation. No durability — a restart drops queued
 // jobs (the scheduling policy re-derives them from CR state on the next tick),
@@ -156,9 +162,19 @@ func (e *InProcess) Submit(ctx context.Context, job Job) error {
 	}
 	wait, cancel := context.WithTimeout(ctx, SubmitWait)
 	defer cancel()
-	log.Printf("executor: queue full (%d/%d), job %s/%s waiting for a slot", len(e.jobs), cap(e.jobs), job.Kind, job.SourceName)
+	// Log the wait, not the attempt. A momentarily full channel is ordinary
+	// under burst load — a worker frees a slot microseconds later and nothing
+	// was delayed — so a line per overflow is noise that buries the case worth
+	// seeing: a queue that stayed full long enough to hold the job up. The
+	// timeout path needs no line of its own; it returns ErrQueueFull, which the
+	// caller reports.
+	start := time.Now()
 	select {
 	case e.jobs <- job:
+		if waited := time.Since(start); waited >= submitSlowWait {
+			log.Printf("executor: queue full (%d/%d), job %s/%s waited %s for a slot",
+				len(e.jobs), cap(e.jobs), job.Kind, job.SourceName, waited.Round(time.Millisecond))
+		}
 		return nil
 	case <-wait.Done():
 		return fmt.Errorf("%w (%d/%d queued) — job %s/%s not accepted: %v", ErrQueueFull, len(e.jobs), cap(e.jobs), job.Kind, job.SourceName, wait.Err())
