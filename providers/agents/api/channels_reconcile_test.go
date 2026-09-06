@@ -27,7 +27,7 @@ import (
 
 // reconcileBackground returns a background whose single shard and tenant
 // workspace are the same fake client, holding objs.
-func reconcileBackground(t *testing.T, objs ...runtime.Object) (*background, dynamic.Interface) {
+func reconcileBackground(t *testing.T, objs ...runtime.Object) (*background, *dynamicfake.FakeDynamicClient) {
 	t.Helper()
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(inboundScheme(), map[schema.GroupVersionResource]string{
 		agentsclient.ConnectionGVR: "ConnectionList",
@@ -113,7 +113,10 @@ func TestReconcileAdoptsTelegramSecretAndReRegisters(t *testing.T) {
 	)
 	b.reconcileChannelSecrets(context.Background())
 
-	stored := connectionSigningSecret(context.Background(), dyn, testConn)
+	stored, err := connectionSigningSecret(context.Background(), dyn, testConn)
+	if err != nil {
+		t.Fatalf("reading the stored secret: %v", err)
+	}
 	if len(stored) != 64 {
 		t.Fatalf("a 32-byte hex secret should have been stored, got %q", stored)
 	}
@@ -130,7 +133,7 @@ func TestReconcileAdoptsTelegramSecretAndReRegisters(t *testing.T) {
 	if setForm != nil {
 		t.Fatal("reconcile must be idempotent once the secret is stored")
 	}
-	if again := connectionSigningSecret(context.Background(), dyn, testConn); again != stored {
+	if again, _ := connectionSigningSecret(context.Background(), dyn, testConn); again != stored {
 		t.Fatal("the stored secret must not be rotated on every pass")
 	}
 }
@@ -154,7 +157,7 @@ func TestReconcileReportsTelegramWebhookGone(t *testing.T) {
 		t.Fatalf("a bot with no registered webhook should tell the user to re-enable inbound, got %q/%q", phase, msg)
 	}
 	// The secret is stored regardless so Enable inbound registers a verified hook.
-	if connectionSigningSecret(context.Background(), dyn, testConn) == "" {
+	if stored, _ := connectionSigningSecret(context.Background(), dyn, testConn); stored == "" {
 		t.Fatal("secret should be stored even when re-registration failed")
 	}
 }

@@ -69,7 +69,14 @@ func (b *background) reconcileChannelSecrets(ctx context.Context) {
 			log.Printf("channels: connection %s/%s: addressing its workspace: %v", cluster, conn.Name, err)
 			continue
 		}
-		secret := connectionSigningSecret(ctx, dyn, conn.Name)
+		// A read we could not complete says nothing about whether the secret
+		// exists, so leave the status alone rather than flagging a healthy
+		// connection as broken; the next sweep re-reads it.
+		secret, serr := connectionSigningSecret(ctx, dyn, conn.Name)
+		if serr != nil {
+			log.Printf("channels: connection %s/%s: reading its verification secret: %v — leaving status unchanged", cluster, conn.Name, serr)
+			continue
+		}
 		switch conn.Spec.Type {
 		case agentsv1alpha1.ConnectionTypeSlack:
 			b.reconcileSlackSecret(ctx, dyn, cluster, u, conn, secret)

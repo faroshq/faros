@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/faroshq/provider-agents/llm"
@@ -122,13 +123,23 @@ func verifyTelegramSecret(secret, header string) error {
 
 // connectionSigningSecret reads a connection's signing secret through the
 // APIExport virtual workspace (the inbound path has no user; it acts as the
-// provider). Returns "" when the Secret or the key is absent.
-func connectionSigningSecret(ctx context.Context, dyn dynamic.Interface, connName string) string {
+// provider).
+//
+// It returns ("", nil) only when the secret is genuinely absent — no Secret, or
+// no such key in it — and a non-nil error when the read itself failed. The
+// distinction matters because "" is what callers act on: collapsing a failed
+// read into it answers a verifiable delivery with 401 "no verification secret",
+// telling the user to fix a secret that is already there, and parks a healthy
+// Slack connection in Error.
+func connectionSigningSecret(ctx context.Context, dyn dynamic.Interface, connName string) (string, error) {
 	sec, err := vwSecrets{dyn}.GetSecret(ctx, llm.SecretNamespace, connectionSecretName(connName))
-	if err != nil {
-		return ""
+	switch {
+	case apierrors.IsNotFound(err):
+		return "", nil
+	case err != nil:
+		return "", err
 	}
-	return strings.TrimSpace(string(sec.Data[signingSecretKey]))
+	return strings.TrimSpace(string(sec.Data[signingSecretKey])), nil
 }
 
 // inboundDedup is a bounded in-memory set of recently accepted event keys, so

@@ -25,11 +25,13 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	agentsclient "github.com/faroshq/provider-agents/client"
 	"github.com/faroshq/provider-agents/executor"
@@ -236,6 +238,52 @@ func TestSigningSecretMissingWordingIsSharedAndNeutral(t *testing.T) {
 	}
 }
 
+// A workspace read that failed says nothing about whether the connection has a
+// verification secret, so it must not be answered as 401 "no verification
+// secret": that sends the user after a setting which is already correct, and
+// for Slack it burns the delivery. 503 is also what makes both platforms
+// redeliver once the blip clears.
+func TestInboundSecretReadFailureIsRetryableNotUnauthorized(t *testing.T) {
+	ex := &captureExec{}
+	s, token, dyn := inboundServerFake(t, ex,
+		slackObjects(map[string]string{"token": "xoxb-1", signingSecretKey: testSlackSecret})...)
+	dyn.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("virtual workspace is unavailable")
+	})
+
+	body := slackMessage("Ev1", "deploy status?")
+	w := postChannel(s, token, body, slackHeaders(testSlackSecret, body, time.Now()))
+
+	if w.Code == http.StatusUnauthorized {
+		t.Fatalf("a failed secret read must not be reported as a verification failure: %s", w.Body.String())
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("want 503 so the platform redelivers, got %d: %s", w.Code, w.Body.String())
+	}
+	if ex.count() != 0 {
+		t.Fatal("no agent run may start from a delivery that was never verified")
+	}
+}
+
+// The reconcile loop must not park a healthy Slack connection in Error because
+// it could not read the Secret this pass.
+func TestReconcileLeavesStatusAloneWhenTheSecretCannotBeRead(t *testing.T) {
+	b, dyn := reconcileBackground(t,
+		withCluster(inboundConnection("slack", testSlackChan)),
+		inboundSecret(map[string]string{"token": "xoxb-1", signingSecretKey: testSlackSecret}),
+	)
+	dyn.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("virtual workspace is unavailable")
+	})
+
+	b.reconcileChannelSecrets(context.Background())
+
+	phase, msg := connectionStatus(t, dyn)
+	if phase == "Error" || msg == connectionSigningSecretMissingMessage {
+		t.Fatalf("an unreadable Secret must not flag the connection as missing one, got %q/%q", phase, msg)
+	}
+}
+
 // A body that is not the Bot API's JSON envelope — an HTML error page from a
 // proxy, a truncated response — used to fall through as ok=false with no
 // description and surface as a bare "HTTP 200", which names neither the problem
@@ -347,6 +395,14 @@ func inboundAgent() *unstructured.Unstructured {
 // tenant workspace is the given fake dynamic client.
 func inboundServer(t *testing.T, ex executor.Executor, objs ...runtime.Object) (*Server, string) {
 	t.Helper()
+	s, token, _ := inboundServerFake(t, ex, objs...)
+	return s, token
+}
+
+// inboundServerFake is inboundServer, also handing back the fake dynamic client
+// so a test can make the workspace fail a read.
+func inboundServerFake(t *testing.T, ex executor.Executor, objs ...runtime.Object) (*Server, string, *dynamicfake.FakeDynamicClient) {
+	t.Helper()
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(inboundScheme(), map[schema.GroupVersionResource]string{
 		agentsclient.ConnectionGVR: "ConnectionList",
 		agentsclient.AgentGVR:      "AgentList",
@@ -361,7 +417,7 @@ func inboundServer(t *testing.T, ex executor.Executor, objs ...runtime.Object) (
 			return dyn, nil
 		},
 	}
-	return s, s.webhookToken(testCluster, channelWebhookName(testConn))
+	return s, s.webhookToken(testCluster, channelWebhookName(testConn)), dyn
 }
 
 func postChannel(s *Server, token string, body string, headers map[string]string) *httptest.ResponseRecorder {

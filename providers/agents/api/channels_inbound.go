@@ -88,7 +88,17 @@ func (s *Server) webhookChannel(w http.ResponseWriter, r *http.Request) {
 	// authentication (the URL is displayed in the portal). A connection with no
 	// signing secret stored is rejected outright — the reconcile loop flags it
 	// in status; there is no unverified grace mode.
-	secret := connectionSigningSecret(r.Context(), dyn, name)
+	secret, serr := connectionSigningSecret(r.Context(), dyn, name)
+	if serr != nil {
+		// Not a 401: the connection may well have a secret we simply could not
+		// read, and saying "no verification secret" would send the user after a
+		// setting that is already correct. 503 is also what makes the platforms
+		// redeliver — Slack retries a non-2xx, Telegram resends until it sees a
+		// 2xx — so the message survives the blip instead of being dropped.
+		log.Printf("channel inbound %s/%s: reading the verification secret: %v", cluster, name, serr)
+		writeStatus(w, http.StatusServiceUnavailable, "Unavailable", "could not read the connection's verification secret — retry")
+		return
+	}
 	if err := verifyInbound(conn.Spec.Type, secret, r, body, time.Now()); err != nil {
 		log.Printf("channel inbound %s/%s: rejected %s delivery: %v", cluster, name, conn.Spec.Type, err)
 		writeStatus(w, http.StatusUnauthorized, "Unauthorized", err.Error())
