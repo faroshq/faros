@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	kcpfake "github.com/kcp-dev/sdk/client/clientset/versioned/fake"
@@ -474,6 +475,47 @@ func TestEnsureMCPRBAC_ReconcilesClusterRoleOwnership(t *testing.T) {
 	}
 	if len(role.OwnerReferences) != 1 || role.OwnerReferences[0].UID != srv.UID {
 		t.Fatalf("foreign owner not replaced: %+v", role.OwnerReferences)
+	}
+}
+
+func TestCachedActionGrants_ReusesResultWithinTTL(t *testing.T) {
+	ctx := context.Background()
+	var calls int
+	grant := ActionGrant{Group: "infrastructure.faros.sh", Resource: "instances", Name: "restart"}
+	src := cachedActionGrants(func(context.Context) ([]ActionGrant, error) {
+		calls++
+		return []ActionGrant{grant}, nil
+	}, time.Hour)
+
+	for range 3 {
+		got, err := src(ctx)
+		if err != nil {
+			t.Fatalf("cached source: %v", err)
+		}
+		if !slices.Equal(got, []ActionGrant{grant}) {
+			t.Fatalf("grants = %+v", got)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("upstream called %d times, want 1", calls)
+	}
+
+	// Expired entries refresh, and failures are never cached.
+	var failed int
+	failing := cachedActionGrants(func(context.Context) ([]ActionGrant, error) {
+		failed++
+		return nil, context.DeadlineExceeded
+	}, time.Hour)
+	for range 2 {
+		if _, err := failing(ctx); err == nil {
+			t.Fatal("expected the upstream error")
+		}
+	}
+	if failed != 2 {
+		t.Fatalf("errors were cached: upstream called %d times, want 2", failed)
+	}
+	if src := cachedActionGrants(nil, time.Hour); src != nil {
+		t.Fatal("a nil source must stay nil")
 	}
 }
 
