@@ -208,8 +208,10 @@ func (m *Manager) EnsureWorkloadIdentity(ctx context.Context, orgUUID, wsUUID st
 // selected child workspace and verifies that the reviewed ServiceAccount is a
 // hub-managed workload identity bound to expectedTenantPath. JWT signatures
 // and claims are intentionally never trusted offline.
+// It accepts workload identities only: a delegated user identity is rejected,
+// because this entry point has no proof key with which to establish one.
 func VerifyWorkloadServiceAccount(ctx context.Context, cfg *rest.Config, token, expectedTenantPath string) (string, error) {
-	username, _, err := VerifyWorkloadServiceAccountDetails(ctx, cfg, token, expectedTenantPath)
+	username, _, err := VerifyWorkloadServiceAccountDetails(ctx, cfg, token, expectedTenantPath, nil)
 	return username, err
 }
 
@@ -217,7 +219,12 @@ func VerifyWorkloadServiceAccount(ctx context.Context, cfg *rest.Config, token, 
 // verifier used by both tenant resolution and action-grant authorization. It
 // returns the reviewed ServiceAccount only after TokenReview, audience,
 // subject, label, tenant, and required identity annotations have all passed.
-func VerifyWorkloadServiceAccountDetails(ctx context.Context, cfg *rest.Config, token, expectedTenantPath string) (string, *corev1.ServiceAccount, error) {
+//
+// proofKeys is consulted only for delegated user identities, whose annotations
+// are tenant-writable and therefore mean nothing without the hub's keyed proof
+// (see delegated_user_proof.go). A nil source rejects them outright; that is
+// the right answer for any caller that is not the delegated-token path.
+func VerifyWorkloadServiceAccountDetails(ctx context.Context, cfg *rest.Config, token, expectedTenantPath string, proofKeys ProofKeySource) (string, *corev1.ServiceAccount, error) {
 	if cfg == nil || strings.TrimSpace(token) == "" || strings.TrimSpace(expectedTenantPath) == "" {
 		return "", nil, fmt.Errorf("workload token, tenant path, and workspace config are required")
 	}
@@ -243,7 +250,7 @@ func VerifyWorkloadServiceAccountDetails(ctx context.Context, cfg *rest.Config, 
 	if err != nil {
 		return "", nil, fmt.Errorf("getting workload ServiceAccount: %w", err)
 	}
-	if err := verifyWorkloadServiceAccountAnnotations(sa, expectedTenantPath); err != nil {
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, sa, expectedTenantPath, proofKeys); err != nil {
 		return "", nil, err
 	}
 	return review.Status.User.Username, sa, nil
@@ -334,7 +341,7 @@ func workloadIdentityAnnotations(scope WorkloadIdentityScope) map[string]string 
 	}
 }
 
-func verifyWorkloadServiceAccountAnnotations(sa *corev1.ServiceAccount, expectedTenantPath string) error {
+func verifyWorkloadServiceAccountAnnotations(ctx context.Context, sa *corev1.ServiceAccount, expectedTenantPath string, proofKeys ProofKeySource) error {
 	if sa == nil || sa.Labels[LabelWorkloadIdentity] != "true" || sa.Annotations[AnnotationWorkloadIdentityTenantPath] != expectedTenantPath {
 		return fmt.Errorf("workload ServiceAccount is not bound to selected tenant")
 	}
@@ -343,8 +350,17 @@ func verifyWorkloadServiceAccountAnnotations(sa *corev1.ServiceAccount, expected
 	// It never has a scope marker, so an action-grant check comparing markers
 	// fails closed on it — which is right: delegation reaches a provider's
 	// data plane as the user, not the action runtime.
+	//
+	// Note the label alone is tenant-writable, so this branch is reachable by
+	// anyone; it is also terminal, so a hand-made object cannot fall through
+	// to the workload-identity checks below and be read as some other
+	// identity. Without a valid hub proof it is rejected outright.
 	if IsDelegatedUserServiceAccount(sa) {
-		return verifyDelegatedUserAnnotations(sa)
+		key, err := delegatedProofKey(ctx, proofKeys)
+		if err != nil {
+			return err
+		}
+		return verifyDelegatedUserAnnotations(key, sa)
 	}
 	for _, key := range []string{
 		AnnotationWorkloadIdentityScope,

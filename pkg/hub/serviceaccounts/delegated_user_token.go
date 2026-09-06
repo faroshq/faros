@@ -52,6 +52,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	corev1typed "k8s.io/client-go/kubernetes/typed/core/v1"
 
 	"github.com/faroshq/faros/pkg/kcppaths"
 )
@@ -151,22 +152,40 @@ func (m *Manager) IssueDelegatedUserToken(ctx context.Context, orgUUID, wsUUID s
 		return "", time.Time{}, err
 	}
 	key := delegatedTokenKey{orgUUID: orgUUID, wsUUID: wsUUID, user: user.User, provider: providerName}
-	now := m.clock()
 
-	m.delegatedMu.Lock()
-	if entry, ok := m.delegated[key]; ok && now.Before(entry.refreshAt) {
-		m.delegatedMu.Unlock()
-		return entry.token, entry.expiresAt, nil
+	if token, expiresAt, ok := m.cachedDelegatedToken(key); ok {
+		return token, expiresAt, nil
 	}
-	m.delegatedMu.Unlock()
 
+	return m.mintDelegatedUserToken(ctx, key, orgUUID, wsUUID, user, providerName)
+}
+
+// cachedDelegatedToken returns a still-usable cached token for key.
+func (m *Manager) cachedDelegatedToken(key delegatedTokenKey) (string, time.Time, bool) {
+	now := m.clock()
+	m.delegatedMu.Lock()
+	defer m.delegatedMu.Unlock()
+	if entry, ok := m.delegated[key]; ok && now.Before(entry.refreshAt) {
+		return entry.token, entry.expiresAt, true
+	}
+	return "", time.Time{}, false
+}
+
+// mintDelegatedUserToken does the work IssueDelegatedUserToken deduplicates:
+// reconcile the account and its binding, then issue and cache a token.
+func (m *Manager) mintDelegatedUserToken(ctx context.Context, key delegatedTokenKey, orgUUID, wsUUID string, user Identity, providerName string) (string, time.Time, error) {
+	now := m.clock()
+	proofKey, err := delegatedProofKey(ctx, m.proofKeys)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("delegated user token cannot be minted: %w", err)
+	}
 	cs, err := m.clientset(orgUUID, wsUUID)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	tenantPath := tenantPathFor(orgUUID, wsUUID)
 	name := DelegatedUserServiceAccountName(tenantPath, user, providerName)
-	if err := ensureDelegatedUserServiceAccount(ctx, cs, name, tenantPath, orgUUID, wsUUID, user, providerName); err != nil {
+	if err := ensureDelegatedUserServiceAccount(ctx, cs, proofKey, name, tenantPath, orgUUID, wsUUID, user, providerName); err != nil {
 		return "", time.Time{}, err
 	}
 	if err := ensureWorkloadClusterRoleBinding(ctx, cs, DelegatedUserBindingName(name), DelegatedUserClusterRole, name); err != nil {
@@ -211,26 +230,47 @@ func IsDelegatedUserServiceAccount(sa *corev1.ServiceAccount) bool {
 }
 
 // DelegatedUserFromServiceAccount returns the human identity a verified
-// delegated ServiceAccount stands in for. Callers must have run the object
-// through VerifyWorkloadServiceAccountDetails first; this only reads.
-func DelegatedUserFromServiceAccount(sa *corev1.ServiceAccount) (Identity, error) {
+// delegated ServiceAccount stands in for.
+//
+// SECURITY: everything on this object is tenant-writable except the proof.
+// The account lives in namespace "default" of the tenant's own team
+// workspace, where the bootstrap binds every member — not only admins — to
+// cluster-admin (pkg/hub/kcp/bootstrap.go ensureWorkspaceAdmin). An ordinary
+// member can create a ServiceAccount there, apply LabelDelegatedUser, fill in
+// all four identity annotations naming anyone they like, give it the name the
+// hub would have derived (the name is a hash of public inputs), and mint a
+// token for it with TokenRequest. Every consistency check over those fields
+// compares inputs that same member wrote, so none of them prove anything.
+// AnnotationDelegatedProof is the sole field they cannot produce — a MAC over
+// the identity tuple and the ServiceAccount UID, keyed by a secret held in a
+// workspace no tenant identity can reach. Do not add an identity path here
+// that does not require it.
+func DelegatedUserFromServiceAccount(ctx context.Context, keys ProofKeySource, sa *corev1.ServiceAccount) (Identity, error) {
 	if !IsDelegatedUserServiceAccount(sa) {
 		return Identity{}, fmt.Errorf("ServiceAccount is not a delegated user identity")
 	}
-	if err := verifyDelegatedUserAnnotations(sa); err != nil {
+	key, err := delegatedProofKey(ctx, keys)
+	if err != nil {
+		return Identity{}, err
+	}
+	if err := verifyDelegatedUserAnnotations(key, sa); err != nil {
 		return Identity{}, err
 	}
 	return Identity{User: sa.Annotations[AnnotationDelegatedUser]}, nil
 }
 
-func verifyDelegatedUserAnnotations(sa *corev1.ServiceAccount) error {
-	for _, key := range []string{
+// verifyDelegatedUserAnnotations checks the shape of a delegated identity and
+// then the one thing that actually establishes it: the hub's keyed proof.
+// The shape checks are hygiene — they keep a malformed annotation out of a
+// response header — not authorization. The proof is the authorization.
+func verifyDelegatedUserAnnotations(key []byte, sa *corev1.ServiceAccount) error {
+	for _, annotation := range []string{
 		AnnotationDelegatedUser,
 		AnnotationDelegatedOrg,
 		AnnotationDelegatedWorkspace,
 		AnnotationDelegatedProvider,
 	} {
-		value := strings.TrimSpace(sa.Annotations[key])
+		value := strings.TrimSpace(sa.Annotations[annotation])
 		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
 			return fmt.Errorf("delegated ServiceAccount has incomplete identity annotations")
 		}
@@ -240,7 +280,7 @@ func verifyDelegatedUserAnnotations(sa *corev1.ServiceAccount) error {
 	if tenantPathFor(sa.Annotations[AnnotationDelegatedOrg], sa.Annotations[AnnotationDelegatedWorkspace]) != sa.Annotations[AnnotationWorkloadIdentityTenantPath] {
 		return fmt.Errorf("delegated ServiceAccount tenant annotations disagree")
 	}
-	return nil
+	return verifyDelegatedProof(key, sa)
 }
 
 func validateDelegatedInputs(orgUUID, wsUUID string, user Identity, providerName string) error {
@@ -282,41 +322,87 @@ func delegatedUserAnnotations(tenantPath, orgUUID, wsUUID string, user Identity,
 	}
 }
 
-func ensureDelegatedUserServiceAccount(ctx context.Context, cs kubernetes.Interface, name, tenantPath, orgUUID, wsUUID string, user Identity, providerName string) error {
+// ensureDelegatedServiceAccountAttempts bounds the create/replace loop. Each
+// iteration makes progress (create, or delete an unproven object), so a small
+// number covers replicas racing on the same tuple.
+const ensureDelegatedServiceAccountAttempts = 4
+
+func ensureDelegatedUserServiceAccount(ctx context.Context, cs kubernetes.Interface, proofKey []byte, name, tenantPath, orgUUID, wsUUID string, user Identity, providerName string) error {
 	sas := cs.CoreV1().ServiceAccounts(Namespace)
 	want := delegatedUserAnnotations(tenantPath, orgUUID, wsUUID, user, providerName)
-	sa, err := sas.Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		_, err = sas.Create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: Namespace,
-			Labels: map[string]string{
-				LabelWorkloadIdentity: "true",
-				LabelDelegatedUser:    "true",
-			},
-			Annotations: want,
-		}}, metav1.CreateOptions{})
-		if err == nil {
+	for attempt := 0; attempt < ensureDelegatedServiceAccountAttempts; attempt++ {
+		sa, err := sas.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			created, createErr := sas.Create(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: Namespace,
+				Labels: map[string]string{
+					LabelWorkloadIdentity: "true",
+					LabelDelegatedUser:    "true",
+				},
+				Annotations: want,
+			}}, metav1.CreateOptions{})
+			if apierrors.IsAlreadyExists(createErr) {
+				// Lost a race with another replica; re-read and evaluate it.
+				continue
+			}
+			if createErr != nil {
+				return fmt.Errorf("creating delegated ServiceAccount: %w", createErr)
+			}
+			// The proof binds the UID, which only exists once the object does.
+			return stampDelegatedProof(ctx, sas, created, proofKey, tenantPath, user, providerName)
+		}
+		if err != nil {
+			return fmt.Errorf("getting delegated ServiceAccount: %w", err)
+		}
+		// Every annotation participates in the name, so an existing account
+		// that disagrees on any of them is not ours — refuse rather than adopt
+		// it. The name is a hash of the tuple, so this only trips on a
+		// hand-made object.
+		if !IsDelegatedUserServiceAccount(sa) || sa.Labels[LabelWorkloadIdentity] != "true" {
+			return fmt.Errorf("ServiceAccount %q exists and is not a delegated user identity", name)
+		}
+		for key, value := range want {
+			if sa.Annotations[key] != value {
+				return fmt.Errorf("ServiceAccount %q is bound to a different delegated identity", name)
+			}
+		}
+		if verifyDelegatedProof(proofKey, sa) == nil {
 			return nil
 		}
-		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("creating delegated ServiceAccount: %w", err)
+		// The object describes the right identity but carries no proof from
+		// this hub. It is either a squatter — a tenant member can create this
+		// exact object and mint a token for it, then wait for the hub to bless
+		// it — or an account left by a key that no longer applies. Either way
+		// it must not be adopted: stamping a proof onto it would validate a
+		// token the attacker already holds. Deleting it changes the UID, and
+		// the UID is in the MAC, so every token issued against the old object
+		// dies with it.
+		if err := sas.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{
+			UID:             &sa.UID,
+			ResourceVersion: &sa.ResourceVersion,
+		}}); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+			return fmt.Errorf("replacing unproven delegated ServiceAccount %q: %w", name, err)
 		}
-		sa, err = sas.Get(ctx, name, metav1.GetOptions{})
 	}
-	if err != nil {
-		return fmt.Errorf("getting delegated ServiceAccount: %w", err)
+	return fmt.Errorf("delegated ServiceAccount %q could not be reconciled", name)
+}
+
+// stampDelegatedProof writes the hub's proof onto a freshly created account.
+// If the write fails the account is removed rather than left unproven: an
+// unproven account is useless to the hub and, left behind, is one the next
+// mint has to delete anyway.
+func stampDelegatedProof(ctx context.Context, sas corev1typed.ServiceAccountInterface, sa *corev1.ServiceAccount, proofKey []byte, tenantPath string, user Identity, providerName string) error {
+	if sa.UID == "" {
+		return fmt.Errorf("delegated ServiceAccount %q was created without a UID", sa.Name)
 	}
-	// Every annotation participates in the name, so an existing account that
-	// disagrees on any of them is not ours — refuse rather than adopt it. The
-	// name is a hash of the tuple, so this only trips on a hand-made object.
-	if !IsDelegatedUserServiceAccount(sa) || sa.Labels[LabelWorkloadIdentity] != "true" {
-		return fmt.Errorf("ServiceAccount %q exists and is not a delegated user identity", name)
+	sa = sa.DeepCopy()
+	if err := SignDelegatedUserServiceAccount(proofKey, sa, tenantPath, user, providerName); err != nil {
+		return err
 	}
-	for key, value := range want {
-		if sa.Annotations[key] != value {
-			return fmt.Errorf("ServiceAccount %q is bound to a different delegated identity", name)
-		}
+	if _, err := sas.Update(ctx, sa, metav1.UpdateOptions{}); err != nil {
+		_ = sas.Delete(ctx, sa.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &sa.UID}})
+		return fmt.Errorf("stamping delegated ServiceAccount proof: %w", err)
 	}
 	return nil
 }

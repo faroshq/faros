@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clienttesting "k8s.io/client-go/testing"
 )
 
@@ -251,38 +252,187 @@ func TestIssueDelegatedUserTokenRefusesForeignAccountOfSameName(t *testing.T) {
 	}
 }
 
-func TestVerifyDelegatedUserAnnotationsAcceptsHubMintedAndRejectsTampered(t *testing.T) {
-	tenantPath := tenantPathFor(delegatedTestOrg, delegatedTestWS)
-	good := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
-		Name: "faros-du-x", Namespace: Namespace,
+// hubMintedDelegatedServiceAccount is what the hub writes: the account plus
+// the keyed proof it stamps once the object (and its UID) exists.
+func hubMintedDelegatedServiceAccount(t *testing.T, tenantPath string, user Identity, uid types.UID) *corev1.ServiceAccount {
+	t.Helper()
+	name := DelegatedUserServiceAccountName(tenantPath, user, delegatedTestProvider)
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: Namespace, UID: uid,
 		Labels:      map[string]string{LabelWorkloadIdentity: "true", LabelDelegatedUser: "true"},
-		Annotations: delegatedUserAnnotations(tenantPath, delegatedTestOrg, delegatedTestWS, delegatedTestUser, delegatedTestProvider),
+		Annotations: delegatedUserAnnotations(tenantPath, delegatedTestOrg, delegatedTestWS, user, delegatedTestProvider),
 	}}
-	if err := verifyWorkloadServiceAccountAnnotations(good, tenantPath); err != nil {
+	key, err := testProofKeySource.DelegatedProofKey(context.Background())
+	if err != nil {
+		t.Fatalf("test proof key: %v", err)
+	}
+	sa.Annotations[AnnotationDelegatedProof] = computeDelegatedProof(key, tenantPath, user, delegatedTestProvider, name, uid)
+	return sa
+}
+
+func TestVerifyDelegatedUserAnnotationsAcceptsHubMintedAndRejectsTampered(t *testing.T) {
+	ctx := context.Background()
+	tenantPath := tenantPathFor(delegatedTestOrg, delegatedTestWS)
+	good := hubMintedDelegatedServiceAccount(t, tenantPath, delegatedTestUser, "uid-good")
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, good, tenantPath, testProofKeySource); err != nil {
 		t.Fatalf("hub-minted delegated account rejected: %v", err)
 	}
-	identity, err := DelegatedUserFromServiceAccount(good)
+	identity, err := DelegatedUserFromServiceAccount(ctx, testProofKeySource, good)
 	if err != nil || identity.User != "alice" {
 		t.Fatalf("DelegatedUserFromServiceAccount = %+v, %v", identity, err)
 	}
 
 	otherTenant := good.DeepCopy()
 	otherTenant.Annotations[AnnotationDelegatedWorkspace] = "elsewhere"
-	if err := verifyWorkloadServiceAccountAnnotations(otherTenant, tenantPath); err == nil {
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, otherTenant, tenantPath, testProofKeySource); err == nil {
 		t.Error("accepted a delegated account whose workspace annotation disagrees with its tenant path")
 	}
 	noUser := good.DeepCopy()
 	delete(noUser.Annotations, AnnotationDelegatedUser)
-	if err := verifyWorkloadServiceAccountAnnotations(noUser, tenantPath); err == nil {
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, noUser, tenantPath, testProofKeySource); err == nil {
 		t.Error("accepted a delegated account with no user annotation")
 	}
-	if err := verifyWorkloadServiceAccountAnnotations(good, "root:faros:tenants:org:other"); err == nil {
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, good, "root:faros:tenants:org:other", testProofKeySource); err == nil {
 		t.Error("accepted a delegated account for a tenant it was not minted in")
 	}
 	// A workload identity is still held to the full Project tuple.
 	notDelegated := good.DeepCopy()
 	delete(notDelegated.Labels, LabelDelegatedUser)
-	if err := verifyWorkloadServiceAccountAnnotations(notDelegated, tenantPath); err == nil {
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, notDelegated, tenantPath, testProofKeySource); err == nil {
 		t.Error("a non-delegated account with only delegated annotations passed the workload check")
+	}
+}
+
+// TestDelegatedIdentityRejectsTenantForgedServiceAccount is the privilege
+// escalation this proof exists to close.
+//
+// A delegated ServiceAccount lives in namespace "default" of the tenant's own
+// team workspace, and the bootstrap binds every workspace member to
+// cluster-admin there. An ordinary member can therefore create exactly the
+// object the hub would have created — right name (it is a hash of the tenant
+// path, the user, and the provider, all public), right label, all four
+// identity annotations naming whoever they choose — mint a token for it with
+// TokenRequest, and hand it to the provider proxy. Before the proof, every
+// check the hub made compared inputs that member had written, so the far end
+// received X-Faros-User naming the victim.
+func TestDelegatedIdentityRejectsTenantForgedServiceAccount(t *testing.T) {
+	ctx := context.Background()
+	tenantPath := tenantPathFor(delegatedTestOrg, delegatedTestWS)
+	victim := Identity{User: "victim@example.com"}
+
+	// Built exactly as a malicious workspace member would build it, and given
+	// a UID as the apiserver would on create. Everything here is genuine
+	// except that no hub ever touched it.
+	forged := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Name:      DelegatedUserServiceAccountName(tenantPath, victim, delegatedTestProvider),
+		Namespace: Namespace,
+		UID:       "uid-attacker-made",
+		Labels:    map[string]string{LabelWorkloadIdentity: "true", LabelDelegatedUser: "true"},
+		Annotations: delegatedUserAnnotations(
+			tenantPath, delegatedTestOrg, delegatedTestWS, victim, delegatedTestProvider),
+	}}
+
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, forged, tenantPath, testProofKeySource); err == nil {
+		t.Error("a tenant-forged delegated ServiceAccount passed workload verification")
+	}
+	if identity, err := DelegatedUserFromServiceAccount(ctx, testProofKeySource, forged); err == nil {
+		t.Errorf("a tenant-forged delegated ServiceAccount resolved as %q", identity.User)
+	}
+
+	// Nor can the attacker lift a valid proof off a real account: the MAC
+	// covers the user, the provider, the object name, and the object UID.
+	legitimate := hubMintedDelegatedServiceAccount(t, tenantPath, delegatedTestUser, "uid-legit")
+	stolen := forged.DeepCopy()
+	stolen.Annotations[AnnotationDelegatedProof] = legitimate.Annotations[AnnotationDelegatedProof]
+	if _, err := DelegatedUserFromServiceAccount(ctx, testProofKeySource, stolen); err == nil {
+		t.Error("a proof copied from another account was accepted")
+	}
+
+	// Nor can they take over a real account by recreating it under the same
+	// name: the UID is part of the MAC, so the copied proof dies with the
+	// original object.
+	recreated := legitimate.DeepCopy()
+	recreated.UID = "uid-attacker-recreated"
+	if _, err := DelegatedUserFromServiceAccount(ctx, testProofKeySource, recreated); err == nil {
+		t.Error("a delegated account recreated under a new UID kept its proof")
+	}
+
+	// Rewriting the user on a real account invalidates its proof too.
+	rewritten := legitimate.DeepCopy()
+	rewritten.Annotations[AnnotationDelegatedUser] = victim.User
+	if identity, err := DelegatedUserFromServiceAccount(ctx, testProofKeySource, rewritten); err == nil {
+		t.Errorf("a rewritten user annotation resolved as %q", identity.User)
+	}
+
+	// And the label alone must not open a path that skips the proof: with no
+	// key source configured the identity is refused outright rather than
+	// falling through to some other reading of the object.
+	if err := verifyWorkloadServiceAccountAnnotations(ctx, legitimate, tenantPath, nil); err == nil {
+		t.Error("a delegated account was accepted with no proof key source configured")
+	}
+
+	// Positive control: the hub's own account still resolves.
+	if identity, err := DelegatedUserFromServiceAccount(ctx, testProofKeySource, legitimate); err != nil || identity.User != delegatedTestUser.User {
+		t.Fatalf("hub-minted account did not resolve: %+v, %v", identity, err)
+	}
+}
+
+// TestIssueDelegatedUserTokenStampsProofAndReplacesSquatter covers the mint
+// side: the hub writes a proof, and it refuses to bless an unproven account
+// that a member pre-created and already holds a token for. Adopting one would
+// hand the attacker's existing token the victim's identity, so the account is
+// replaced — the new UID makes the old token dead.
+func TestIssueDelegatedUserTokenStampsProofAndReplacesSquatter(t *testing.T) {
+	ctx := context.Background()
+	tenantPath := tenantPathFor(delegatedTestOrg, delegatedTestWS)
+	name := DelegatedUserServiceAccountName(tenantPath, delegatedTestUser, delegatedTestProvider)
+
+	// The squatter: the object a member would create, with a UID they hold a
+	// token against, and no proof.
+	squatter := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: Namespace, UID: "uid-squatter",
+		Labels: map[string]string{LabelWorkloadIdentity: "true", LabelDelegatedUser: "true"},
+		Annotations: delegatedUserAnnotations(
+			tenantPath, delegatedTestOrg, delegatedTestWS, delegatedTestUser, delegatedTestProvider),
+	}}
+	m, cs := managerFor(t, squatter)
+	defer resetTestClientset()
+	cs.PrependReactor("create", "serviceaccounts/token", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, &authnv1.TokenRequest{Status: authnv1.TokenRequestStatus{
+			Token:               "delegated-token",
+			ExpirationTimestamp: metav1.NewTime(time.Now().Add(WorkloadIdentityTokenTTL)),
+		}}, nil
+	})
+
+	if _, _, err := m.IssueDelegatedUserToken(ctx, delegatedTestOrg, delegatedTestWS, delegatedTestUser, delegatedTestProvider); err != nil {
+		t.Fatalf("IssueDelegatedUserToken: %v", err)
+	}
+	sa, err := cs.CoreV1().ServiceAccounts(Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get delegated ServiceAccount: %v", err)
+	}
+	if sa.UID == squatter.UID {
+		t.Fatal("the hub adopted the pre-created account; a token the attacker already holds now resolves as the victim")
+	}
+	key, err := testProofKeySource.DelegatedProofKey(ctx)
+	if err != nil {
+		t.Fatalf("test proof key: %v", err)
+	}
+	if err := verifyDelegatedProof(key, sa); err != nil {
+		t.Fatalf("hub-minted account carries no valid proof: %v", err)
+	}
+	if _, err := DelegatedUserFromServiceAccount(ctx, testProofKeySource, sa); err != nil {
+		t.Fatalf("hub-minted account does not resolve: %v", err)
+	}
+}
+
+// TestIssueDelegatedUserTokenFailsClosedWithoutProofKey: a Manager that cannot
+// sign must not mint an account whose identity nothing can later establish.
+func TestIssueDelegatedUserTokenFailsClosedWithoutProofKey(t *testing.T) {
+	m, _ := managerFor(t)
+	defer resetTestClientset()
+	m.proofKeys = nil
+	if _, _, err := m.IssueDelegatedUserToken(context.Background(), delegatedTestOrg, delegatedTestWS, delegatedTestUser, delegatedTestProvider); err == nil {
+		t.Fatal("minted a delegated token with no proof key source")
 	}
 }

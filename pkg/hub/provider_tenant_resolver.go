@@ -76,6 +76,11 @@ type kcpTenantResolver struct {
 	// workloadConfig enables online verification of Faros-audience workload
 	// tokens in the concrete tenant selected by X-Faros-Org/Workspace.
 	workloadConfig serviceaccounts.WorkspaceConfigBuilder
+	// proofKeys yields the key that establishes a delegated user identity.
+	// Nil rejects every delegated token: the identity annotations on those
+	// accounts are written inside the tenant's own workspace and prove
+	// nothing on their own.
+	proofKeys serviceaccounts.ProofKeySource
 
 	mu  sync.RWMutex
 	hot map[string]kcpResolverEntry
@@ -95,17 +100,16 @@ const kcpResolverTTL = 5 * time.Minute
 // for unauthenticated requests; the backend proxy maps that to
 // "forward without injecting X-Faros-*" so anonymous /healthz reads
 // keep working.
-func newKCPTenantResolver(kcpProxy *kcpproxy.KCPProxy, client *farosclient.Client, workloadConfig ...serviceaccounts.WorkspaceConfigBuilder) providers.TenantResolver {
+func newKCPTenantResolver(kcpProxy *kcpproxy.KCPProxy, client *farosclient.Client, workloadConfig serviceaccounts.WorkspaceConfigBuilder, proofKeys serviceaccounts.ProofKeySource) providers.TenantResolver {
 	r := &kcpTenantResolver{
-		kcpProxy: kcpProxy,
-		client:   client,
-		hot:      make(map[string]kcpResolverEntry),
+		kcpProxy:       kcpProxy,
+		client:         client,
+		workloadConfig: workloadConfig,
+		proofKeys:      proofKeys,
+		hot:            make(map[string]kcpResolverEntry),
 	}
 	if kcpProxy != nil {
 		r.identifyUser = kcpProxy.IdentifyUser
-	}
-	if len(workloadConfig) > 0 {
-		r.workloadConfig = workloadConfig[0]
 	}
 	return providers.TenantResolverFunc(r.resolve)
 }
@@ -229,7 +233,7 @@ func (r *kcpTenantResolver) resolveWorkloadServiceAccount(req *http.Request) (st
 	}
 	tenantPath := workspacePathRoot + ":" + orgUUID + ":" + wsUUID
 	cfg := r.workloadConfig.ChildWorkspaceConfig(orgUUID, wsUUID)
-	username, sa, err := serviceaccounts.VerifyWorkloadServiceAccountDetails(req.Context(), cfg, token, tenantPath)
+	username, sa, err := serviceaccounts.VerifyWorkloadServiceAccountDetails(req.Context(), cfg, token, tenantPath, r.proofKeys)
 	if err != nil {
 		return "", "", err
 	}
@@ -237,9 +241,11 @@ func (r *kcpTenantResolver) resolveWorkloadServiceAccount(req *http.Request) (st
 	// org-owned provider in place of the caller's bearer) stands in for a
 	// person. Surface the person as X-Faros-User, so a provider calling back
 	// into the hub with it attributes the work to the user, not to the
-	// faros-du-* account. The tenant binding was verified above.
+	// faros-du-* account. The tenant binding was verified above, and so was
+	// the hub's keyed proof — without it this account is just an object any
+	// workspace member could have written, naming anyone they chose.
 	if serviceaccounts.IsDelegatedUserServiceAccount(sa) {
-		identity, err := serviceaccounts.DelegatedUserFromServiceAccount(sa)
+		identity, err := serviceaccounts.DelegatedUserFromServiceAccount(req.Context(), r.proofKeys, sa)
 		if err != nil {
 			return "", "", err
 		}
