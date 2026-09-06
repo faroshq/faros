@@ -63,6 +63,13 @@ func (p *Server) buildEdgesProxyHandler() http.Handler {
 			return
 		}
 
+		// 1a. Fail closed when kcp delegated authorization is unavailable: no
+		// credential means no TokenReview + SAR, and this handler is mounted
+		// whether or not kcp is wired.
+		if p.denyIfAuthorizationUnavailable(w, r) {
+			return
+		}
+
 		// 1b. Service subresources (proxy/mcp) are branched here BEFORE
 		// parseEdgesProxyPath: "services" is not a tunnel Kind, so that
 		// parser (which validates against gvrForResource) would reject it.
@@ -78,9 +85,11 @@ func (p *Server) buildEdgesProxyHandler() http.Handler {
 			return
 		}
 
-		// 3. Delegated authorization via kcp (if configured). Every bearer goes
-		// through authorizeFn — hub static-token users are ordinary kcp identities
+		// 3. Delegated authorization via kcp. Every bearer goes through
+		// authorizeFn — hub static-token users are ordinary kcp identities
 		// (faros:static:<hash>) and pass TokenReview + SAR like any other caller.
+		// Step 1a already refused the request if there is no kcp credential, so
+		// a nil kcpConfig here only happens under the test-only bypass.
 		if p.kcpConfig != nil {
 			tenantCfg, err := p.tenantConfigFor(r.Context(), cluster)
 			if err != nil {

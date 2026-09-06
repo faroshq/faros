@@ -295,7 +295,14 @@ func runServe() error {
 // kubeconfig) for token validation and Edge reads/writes. Best-effort: returns
 // nil (with a warning) when no kubeconfig is available, so the binary still
 // serves /healthz in environments where kcp isn't wired yet. Resolution order:
-// FAROS_PROVIDER_KUBECONFIG, KUBECONFIG, in-cluster.
+// FAROS_PROVIDER_KUBECONFIG, KUBECONFIG, in-cluster; note that a
+// FAROS_PROVIDER_KUBECONFIG that is set but unusable falls through the same
+// chain and can end in nil.
+//
+// A nil result does NOT unmount the data plane: the tunnel handlers are always
+// mounted and instead refuse every consumer-egress request with 503, because
+// there is no kcp credential to authorize bearers against (see
+// tunnel.Server.denyIfAuthorizationUnavailable).
 func loadKCPConfig(log logr.Logger) *rest.Config {
 	if p := os.Getenv("FAROS_PROVIDER_KUBECONFIG"); p != "" {
 		if c, err := clientcmd.BuildConfigFromFlags("", p); err == nil {
@@ -312,7 +319,7 @@ func loadKCPConfig(log logr.Logger) *rest.Config {
 	if c, err := rest.InClusterConfig(); err == nil {
 		return c
 	}
-	log.Info("no kcp kubeconfig available; tunnel token validation + Edge reads disabled (healthz only)")
+	log.Info("no kcp kubeconfig available; edge controllers are disabled and the tunnel data plane refuses every request with 503 (delegated authorization unavailable) - only /healthz and the static portal serve")
 	return nil
 }
 
