@@ -204,7 +204,7 @@ makes the state visible at startup and on every tick, for connections that
 have inbound enabled (`status.webhookPath` set):
 
 - **Slack** without a signing secret → `status.phase=Error`,
-  `status.message="signing secret required; update the connection"`. Editing
+  `status.message="webhook verification secret required; update the connection"`. Editing
   the connection and adding the signing secret (portal edit form, REST
   `signingSecret`, or the `update_connection` MCP tool) clears it.
   **Enable inbound** refuses to mint a URL for a Slack connection that has no

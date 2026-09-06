@@ -19,7 +19,7 @@ message can run an agent:
   an existing one via *Edit*). Requests are checked against
   `X-Slack-Signature` / `X-Slack-Request-Timestamp` (5-minute window). A
   Slack connection with inbound enabled and no signing secret shows
-  `Error: signing secret required; update the connection` and its events are
+  `Error: webhook verification secret required; update the connection` and its events are
   rejected until one is added.
 - **Telegram** — nothing to paste: the provider generates a webhook
   `secret_token` per connection and registers it with `setWebhook`; updates
