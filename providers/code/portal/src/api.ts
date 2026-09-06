@@ -20,6 +20,7 @@ import type {
   Repository,
   RepositoryDetail,
 } from './types'
+import { providerFetch, type ProviderFetch } from './portalkit/tenant'
 
 export type { KubernetesListOptions, KubernetesListPage } from './types'
 
@@ -28,7 +29,6 @@ const VERSION = 'v1alpha1'
 const CRED_NAMESPACE = 'default'
 const TOKEN_KEY = 'token'
 
-import { providerFetch, type ProviderFetch } from './portalkit/tenant'
 
 let bearerToken: string | null = null
 let clusterName: string | null = null
