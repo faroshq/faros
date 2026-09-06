@@ -131,11 +131,14 @@ func projectAssistantOrgMonthlyUSDCapMicrosForValue(value string) int64 {
 		}
 		return projectAssistantDefaultOrgMonthlyUSDCapMicros
 	}
-	micros := math.Round(usd * float64(projectAssistantUSDMicros))
-	if micros >= math.MaxInt64 {
-		return math.MaxInt64
+	micros := projectAssistantClampUSDMicros(usd * float64(projectAssistantUSDMicros))
+	if micros == 0 {
+		// A positive value below half a micro-USD rounds to 0, and 0 is the
+		// unlimited sentinel. The operator asked for a bound, so give them the
+		// smallest one the ledger can express rather than none at all.
+		return 1
 	}
-	return int64(micros)
+	return micros
 }
 
 // projectAssistantModelPrice is USD per one million tokens. One USD per 1M
@@ -207,13 +210,30 @@ func projectAssistantModelPriceFor(model string) (projectAssistantModelPrice, bo
 	return projectAssistantUnknownModelPrice, false
 }
 
+// projectAssistantClampUSDMicros turns a float micro-USD amount into the
+// int64 the ledger stores, failing closed at both ends. Go leaves a float to
+// int conversion of an out-of-range value implementation-defined, and on
+// amd64 it yields MinInt64 — a cost that would credit the organization. So:
+// NaN and +Inf (an amount that could not be priced) and anything at or past
+// the int64 range become MaxInt64, where they count fully against the cap;
+// negatives become 0; everything else is rounded to the nearest micro.
+func projectAssistantClampUSDMicros(micros float64) int64 {
+	switch {
+	case math.IsNaN(micros), math.IsInf(micros, 1), micros >= math.MaxInt64:
+		return math.MaxInt64
+	case micros <= 0:
+		return 0
+	}
+	return int64(math.Round(micros))
+}
+
 // projectAssistantModelCostMicros prices one model response. Cached prompt
 // tokens are billed at the full input rate: providers discount them
 // differently and a conservative estimate is the safe direction for a cap.
 func projectAssistantModelCostMicros(model string, inputTokens, outputTokens int64) int64 {
 	price, _ := projectAssistantModelPriceFor(model)
 	cost := float64(max(inputTokens, 0))*price.InputPer1M + float64(max(outputTokens, 0))*price.OutputPer1M
-	return int64(math.Round(cost))
+	return projectAssistantClampUSDMicros(cost)
 }
 
 // projectEinoAssistantOrgSpendGuard enforces the organization cap around one

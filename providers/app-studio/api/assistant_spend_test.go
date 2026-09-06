@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,13 @@ func TestProjectAssistantOrgMonthlyUSDCapConfiguration(t *testing.T) {
 		{value: "250", want: 250_000_000},
 		{value: "$12.50", want: 12_500_000},
 		{value: "0.000001", want: 1},
+		// Below half a micro these round to 0, which is the unlimited
+		// sentinel. A positive cap must never silently become no cap.
+		{value: "0.0000004", want: 1},
+		{value: "$0.0000001", want: 1},
+		{value: "1e-300", want: 1},
+		// Beyond int64 the cap saturates rather than wrapping.
+		{value: "1e300", want: math.MaxInt64},
 		{value: " unlimited ", want: 0},
 		{value: "0", want: 0},
 		{value: "-5", want: 100_000_000},
@@ -93,6 +101,40 @@ func TestProjectAssistantModelCostMicros(t *testing.T) {
 				t.Errorf("catalog price for %s exceeds the unknown-model fallback", id)
 			}
 		}
+	}
+}
+
+// The float to int64 step is where an absurd cost could turn into a credit:
+// Go leaves out-of-range conversions implementation-defined and amd64 yields
+// MinInt64. The clamp must fail closed at both ends so nothing unpriceable or
+// oversized ever lowers an organization's recorded spend.
+func TestProjectAssistantClampUSDMicros(t *testing.T) {
+	for name, tt := range map[string]struct {
+		in   float64
+		want int64
+	}{
+		"nan":          {math.NaN(), math.MaxInt64},
+		"+inf":         {math.Inf(1), math.MaxInt64},
+		"past int64":   {1e19, math.MaxInt64},
+		"at int64":     {float64(math.MaxInt64), math.MaxInt64},
+		"-inf":         {math.Inf(-1), 0},
+		"negative":     {-3, 0},
+		"zero":         {0, 0},
+		"rounds down":  {2.4, 2},
+		"rounds up":    {2.5, 3},
+		"ordinary":     {17_500_000, 17_500_000},
+		"half a micro": {0.4, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := projectAssistantClampUSDMicros(tt.in); got != tt.want {
+				t.Fatalf("clamp(%v) = %d, want %d", tt.in, got, tt.want)
+			}
+		})
+	}
+	// End to end: token counts large enough to overflow int64 at the fallback
+	// rate must saturate, never go negative.
+	if got := projectAssistantModelCostMicros("made-up-model", 1<<62, 1<<62); got != math.MaxInt64 {
+		t.Fatalf("overflowing cost = %d, want MaxInt64", got)
 	}
 }
 
