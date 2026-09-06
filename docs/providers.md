@@ -710,10 +710,14 @@ element. There is no iframe and no postMessage handshake. The shape:
    `/ui/providers/{name}/main.js?v={version}` as a classic `<script>` into the
    portal document. When the catalog entry carries `mainJSIntegrity` (the
    `sha384-…` the hub computed at registration, see §"Security
-   considerations"), the loader sets `integrity` + `crossorigin="anonymous"`
-   so the browser refuses a bundle whose bytes differ. Without a pin it loads
-   anyway and logs a warning. The `?v=` cache-buster does not interact with
-   SRI, which hashes the response body.
+   considerations"), the loader sets `integrity` so the browser refuses a
+   bundle whose bytes differ. It deliberately sets no `crossorigin`
+   attribute: the bundle is a same-origin load (response type `basic`), for
+   which the browser enforces SRI without one, and `crossorigin` would turn
+   the load into a CORS-mode request that the hub's UI proxy does not
+   negotiate (it sends no `Access-Control-Allow-Origin`), so the script would
+   fail to load. Without a pin it loads anyway and logs a warning. The `?v=`
+   cache-buster does not interact with SRI, which hashes the response body.
 2. **Mount the element.** After `customElements.whenDefined('faros-provider-{name}')`
    the host appends `<faros-provider-{name}>` into its own DOM. The provider
    shares the portal stylesheet (CSS variables cascade in), so there is no
@@ -1015,9 +1019,11 @@ A provider's UI MUST:
     embedded assets of a first-party provider — and records
     `sha384-…` in `CatalogEntry.status.ui.mainJSIntegrity` and on the registry
     record (`pkg/hub/providers/ui_integrity.go`). `/api/providers` exposes it
-    as `mainJSIntegrity`; the portal loads the script with `integrity` +
-    `crossorigin="anonymous"`, so a bundle swapped behind the URL after
-    registration is refused by the browser until the hub re-admits it.
+    as `mainJSIntegrity`; the portal loads the script with `integrity` (and
+    no `crossorigin` attribute — the load is same-origin, so SRI applies
+    without one and CORS mode would be refused by the UI proxy), so a bundle
+    swapped behind the URL after registration is refused by the browser
+    until the hub re-admits it.
     Org-owned providers are served over the edge tunnel and never dialled by
     the hub, so they currently load unpinned (the loader logs a warning).
   - **Host fetch, no raw token.** The host hands the bundle
@@ -1221,7 +1227,7 @@ operations:
    `mainJSIntegrity`.
 4. Click it. URL becomes `/providers/hello`. The element mounts; the
    injected `<script id="faros-provider-script-hello">` carries
-   `integrity` and `crossorigin="anonymous"`.
+   `integrity` and no `crossorigin` attribute.
 5. Open browser devtools → confirm:
    - A request the stub makes through `farosContext.fetch` to
      `/services/providers/hello/…` arrives at the backend with
