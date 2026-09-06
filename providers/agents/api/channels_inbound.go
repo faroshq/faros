@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 
@@ -451,7 +452,17 @@ func (s *Server) enableInbound(w http.ResponseWriter, r *http.Request) {
 
 	registered := false
 	note := ""
-	sec, _ := c.GetSecret(r.Context(), llm.SecretNamespace, connectionSecretName(name))
+	// A failed read must not read as "no secret stored". Both branches below
+	// act on that emptiness destructively: Slack would reject a correctly
+	// configured connection as missing its signing secret, and Telegram would
+	// mint and store a fresh secret token over whatever is already there —
+	// which breaks inbound until the webhook is re-registered, because the
+	// deliveries in flight still carry the old one. NotFound alone means empty.
+	sec, serr := c.GetSecret(r.Context(), llm.SecretNamespace, connectionSecretName(name))
+	if serr != nil && !apierrors.IsNotFound(serr) {
+		writeUpdateError(w, fmt.Errorf("read connection secret for %q: %w", name, serr))
+		return
+	}
 	signing := ""
 	if sec != nil {
 		signing = strings.TrimSpace(string(sec.Data[signingSecretKey]))
@@ -567,7 +578,13 @@ func telegramCall(ctx context.Context, botToken, method string, form url.Values,
 		Description string          `json:"description"`
 		Result      json.RawMessage `json:"result"`
 	}
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&out)
+	// A body that is not the Bot API's JSON envelope — an HTML error page from
+	// an intercepting proxy, a truncated response — would otherwise leave out.OK
+	// false and surface as a bare "HTTP 200", which describes neither what went
+	// wrong nor where. Report the decode failure and the status together.
+	if derr := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&out); derr != nil {
+		return fmt.Errorf("telegram %s: decode response (HTTP %d): %w", method, resp.StatusCode, derr)
+	}
 	if !out.OK {
 		if out.Description == "" {
 			out.Description = fmt.Sprintf("HTTP %d", resp.StatusCode)

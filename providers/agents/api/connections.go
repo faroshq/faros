@@ -11,10 +11,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/faroshq/provider-agents/apis/v1alpha1"
@@ -267,19 +269,26 @@ func applyConnectionUpdate(ctx context.Context, c *agentsclient.Client, name str
 	return out, nil
 }
 
-// connectionSigningSecretMissingMessage is the status message the reconcile
-// loop sets on an inbound-enabled Slack connection that has no signing secret
-// stored — the exact wording the portal shows next to the Error phase.
-const connectionSigningSecretMissingMessage = "signing secret required; update the connection"
-
 // mergeConnectionSecret writes keys into the connection Secret as the caller,
 // keeping every key it does not mention.
+//
+// The read is load-bearing, not an optimisation: the apply below sends the
+// merged map as the Secret's whole StringData, so any key missing from it is
+// dropped. Treating a failed read as "no keys yet" would therefore let a
+// transient gateway or apiserver blip turn "add a signing secret" into "erase
+// the bot token and the OAuth client_id/client_secret". Only NotFound — no
+// Secret exists yet — legitimately means "start from empty"; every other error
+// aborts before anything is written.
 func mergeConnectionSecret(ctx context.Context, c *agentsclient.Client, name string, updates map[string]string) error {
 	data := map[string]string{}
-	if existing, gerr := c.GetSecret(ctx, llm.SecretNamespace, connectionSecretName(name)); gerr == nil {
+	existing, gerr := c.GetSecret(ctx, llm.SecretNamespace, connectionSecretName(name))
+	switch {
+	case gerr == nil:
 		for k, v := range existing.Data {
 			data[k] = string(v)
 		}
+	case !apierrors.IsNotFound(gerr):
+		return fmt.Errorf("read connection secret for %q before merging: %w", name, gerr)
 	}
 	for k, v := range updates {
 		data[k] = v

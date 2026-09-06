@@ -13,9 +13,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,6 +146,118 @@ func TestInboundDedup(t *testing.T) {
 	}
 	if !d.claim("") {
 		t.Fatal("an empty key (platform sent no id) must never be treated as a duplicate")
+	}
+}
+
+// Eviction has to drop the OLDEST keys, not an arbitrary quarter. Go randomises
+// map iteration, so a sweep that simply ranges over the map discards whatever
+// it happens to touch first — keys claimed seconds ago can go while hour-old
+// ones survive. That is backwards for replay protection: a dropped key stops
+// being recognised as a duplicate, so its redelivery starts a second agent run,
+// and eviction fires at the tail of a burst, while that burst's redeliveries
+// are still arriving.
+func TestInboundDedupEvictsOldestFirst(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	d := newInboundDedup(time.Hour, 8)
+	d.now = func() time.Time { return now }
+
+	// Eight keys, each a second newer than the last, filling the set.
+	var keys []string
+	for i := 0; i < 8; i++ {
+		k := fmt.Sprintf("k%02d", i)
+		keys = append(keys, k)
+		d.claim(k)
+		now = now.Add(time.Second)
+	}
+	// The ninth claim finds the set at capacity and evicts max/4 == 2.
+	d.claim("k08")
+
+	if len(d.seen) > 8 {
+		t.Fatalf("set grew to %d entries, max 8", len(d.seen))
+	}
+	for _, gone := range keys[:2] {
+		if _, ok := d.seen[gone]; ok {
+			t.Fatalf("%q is among the two oldest and should have been evicted (set: %v)", gone, sortedKeys(d))
+		}
+	}
+	for _, kept := range append(keys[2:], "k08") {
+		if _, ok := d.seen[kept]; !ok {
+			t.Fatalf("%q is newer than the evicted keys and should have survived (set: %v)", kept, sortedKeys(d))
+		}
+	}
+}
+
+// max/4 is 0 for any max below 4, which made evict a no-op: it deleted nothing
+// while the set sat at capacity, so claim kept growing the map without bound
+// even though it believed it was capped.
+func TestInboundDedupStaysBoundedWithSmallMax(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	d := newInboundDedup(time.Hour, 2)
+	d.now = func() time.Time { return now }
+
+	for i := 0; i < 50; i++ {
+		d.claim(fmt.Sprintf("k%02d", i))
+		now = now.Add(time.Second)
+	}
+	if len(d.seen) > 2 {
+		t.Fatalf("set grew to %d entries with max 2 — evict dropped nothing", len(d.seen))
+	}
+}
+
+func sortedKeys(d *inboundDedup) []string {
+	out := make([]string, 0, len(d.seen))
+	for k := range d.seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// The "no verification secret" wording is one constant shared by the API error
+// and the Connection status message, and it must stay platform-neutral: this
+// path serves Telegram too, whose secret is a webhook secret_token, and a
+// Telegram 401 that talks about a "signing secret" sends the reader hunting for
+// a Slack setting their connection does not have.
+func TestSigningSecretMissingWordingIsSharedAndNeutral(t *testing.T) {
+	if errSigningSecretMissing.Error() != connectionSigningSecretMissingMessage {
+		t.Fatalf("the API error (%q) and the status message (%q) must be the same sentence",
+			errSigningSecretMissing.Error(), connectionSigningSecretMissingMessage)
+	}
+	if strings.Contains(strings.ToLower(connectionSigningSecretMissingMessage), "signing secret") {
+		t.Fatalf("wording names a Slack-only concept but is also returned for Telegram: %q",
+			connectionSigningSecretMissingMessage)
+	}
+	// Both verifiers must still reach that one error.
+	if err := verifyTelegramSecret("", "anything"); !errors.Is(err, errSigningSecretMissing) {
+		t.Fatalf("telegram: want errSigningSecretMissing, got %v", err)
+	}
+	if err := verifySlackSignature("", "1700000000", "v0=x", nil, time.Unix(1_700_000_000, 0)); !errors.Is(err, errSigningSecretMissing) {
+		t.Fatalf("slack: want errSigningSecretMissing, got %v", err)
+	}
+}
+
+// A body that is not the Bot API's JSON envelope — an HTML error page from a
+// proxy, a truncated response — used to fall through as ok=false with no
+// description and surface as a bare "HTTP 200", which names neither the problem
+// nor where it came from.
+func TestTelegramCallReportsDecodeFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><head><title>502 Bad Gateway</title></head></html>"))
+	}))
+	defer srv.Close()
+	t.Cleanup(func(old string) func() { return func() { telegramAPIBase = old } }(telegramAPIBase))
+	telegramAPIBase = srv.URL
+
+	err := telegramCall(context.Background(), "bot-token", "setWebhook", url.Values{}, nil)
+	if err == nil {
+		t.Fatal("want an error for a non-JSON body, got nil")
+	}
+	if !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("want the decode failure reported, got %v", err)
+	}
+	if strings.TrimSpace(err.Error()) == "HTTP 200" {
+		t.Fatalf("misleading status-only error hides the decode failure: %v", err)
 	}
 }
 

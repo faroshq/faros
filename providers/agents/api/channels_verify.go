@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,8 +46,20 @@ const signingSecretKey = "signing_secret"
 // documents five minutes; anything older is a replay of a captured request.
 const slackSignatureMaxSkew = 5 * time.Minute
 
+// connectionSigningSecretMissingMessage is the one wording for "this connection
+// has no verification secret stored". It is both the errSigningSecretMissing
+// text returned when a delivery cannot be verified and the
+// Connection.Status.Message the reconcile loop writes, so the API response and
+// what the portal shows cannot drift apart.
+//
+// The wording is platform-neutral on purpose: this path also serves Telegram,
+// whose secret is a webhook secret_token rather than a signing secret, and a
+// Telegram 401 that talks about a "signing secret" sends the reader looking for
+// a Slack setting that does not exist on their connection.
+const connectionSigningSecretMissingMessage = "webhook verification secret required; update the connection"
+
 var (
-	errSigningSecretMissing = errors.New("signing secret required; update the connection")
+	errSigningSecretMissing = errors.New(connectionSigningSecretMissingMessage)
 	errSignatureInvalid     = errors.New("invalid signature")
 	errSignatureStale       = errors.New("request timestamp outside the accepted window")
 )
@@ -183,6 +196,16 @@ func (d *inboundDedup) release(key string) {
 
 // evict drops expired keys; if that leaves the set at capacity, it drops the
 // oldest quarter so a burst cannot grow memory without bound. Caller holds mu.
+//
+// The ordering is explicit rather than incidental. Go randomises map iteration,
+// so evicting "whatever comes out of the range first" discards an arbitrary
+// quarter: keys claimed seconds ago can go while hour-old ones survive. This
+// set is replay protection, not a cache — a discarded key stops being a
+// duplicate and its delivery gets run a second time — so the entries most worth
+// keeping are the newest, exactly the ones a random sweep may take. Eviction
+// also runs at the tail of a burst, when redeliveries of that burst are still
+// arriving. Sorting a set this size (inboundDedupMax, 20k) is well under the
+// cost of the agent run a missed duplicate would start.
 func (d *inboundDedup) evict(now time.Time) {
 	for k, at := range d.seen {
 		if now.Sub(at) >= d.ttl {
@@ -192,13 +215,26 @@ func (d *inboundDedup) evict(now time.Time) {
 	if len(d.seen) < d.max {
 		return
 	}
+	// At least one, or a max below 4 would make this a no-op and let claim()
+	// grow the map without bound while believing it was capped.
 	drop := d.max / 4
-	for k := range d.seen {
-		if drop == 0 {
-			break
-		}
-		delete(d.seen, k)
-		drop--
+	if drop < 1 {
+		drop = 1
+	}
+	if drop > len(d.seen) {
+		drop = len(d.seen)
+	}
+	type seenAt struct {
+		key string
+		at  time.Time
+	}
+	entries := make([]seenAt, 0, len(d.seen))
+	for k, at := range d.seen {
+		entries = append(entries, seenAt{key: k, at: at})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
+	for _, e := range entries[:drop] {
+		delete(d.seen, e.key)
 	}
 }
 
