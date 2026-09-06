@@ -645,10 +645,15 @@ type CatalogEntryStatus struct {
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// UI reports what the hub observed about the provider's portal bundle.
-	// Nil when the hub serves no /main.js for this entry: UI-less providers,
-	// builtinRoute providers, and org-owned providers whose bundle travels the
-	// edge tunnel and is never dialled by the hub.
+	// UI is set only when the hub holds an integrity pin for this entry's
+	// bundle. Nil therefore means "no pin", which is NOT the same as "no
+	// bundle": it covers both entries the hub serves no /main.js for (UI-less
+	// providers, builtinRoute providers, and org-owned providers whose bundle
+	// travels the edge tunnel and is never dialled by the hub) and served
+	// bundles that are simply unpinned right now — a hash fetch that failed
+	// transiently, a version change whose re-hash has not landed yet, or a hub
+	// too old to compute pins at all. Clients must not read nil as "this
+	// provider has no UI"; the portal treats it as "load the bundle unpinned".
 	// +optional
 	UI *ProviderUIStatus `json:"ui,omitempty"`
 }
