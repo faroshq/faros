@@ -22,6 +22,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	apisv1alpha2 "github.com/kcp-dev/sdk/apis/apis/v1alpha2"
 	kcpclientset "github.com/kcp-dev/sdk/client/clientset/versioned"
@@ -318,6 +320,43 @@ func ensureMCPRBAC(ctx context.Context, cs kubernetes.Interface, srv *farosv1alp
 	return nil
 }
 
+// actionGrantCacheTTL bounds how stale the cached catalog action grants may
+// be. The platform catalog changes only when a provider ships, while every
+// MCPServer re-derives its role on each reconcile plus every 60s tools
+// refresh, so a short memo removes almost all of the listing without
+// meaningfully delaying a new action: worst case a server picks it up one TTL
+// later than it would have.
+const actionGrantCacheTTL = 30 * time.Second
+
+// cachedActionGrants memoizes an ActionGrantSource for ttl. The lock is held
+// across the refresh on purpose: concurrent reconciles then collapse into one
+// list of the system providers workspace instead of a stampede. Errors are not
+// cached, so a transient failure retries on the next reconcile, and the
+// returned slice is shared — callers must treat it as read-only.
+func cachedActionGrants(src ActionGrantSource, ttl time.Duration) ActionGrantSource {
+	if src == nil {
+		return nil
+	}
+	var (
+		mu      sync.Mutex
+		grants  []ActionGrant
+		expires time.Time
+	)
+	return func(ctx context.Context) ([]ActionGrant, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Now().Before(expires) {
+			return grants, nil
+		}
+		out, err := src(ctx)
+		if err != nil {
+			return nil, err
+		}
+		grants, expires = out, time.Now().Add(ttl)
+		return grants, nil
+	}
+}
+
 var catalogEntryGVR = schema.GroupVersionResource{
 	Group: providersv1alpha1.GroupName, Version: providersv1alpha1.Version, Resource: "catalogentries",
 }
@@ -326,16 +365,18 @@ var catalogEntryGVR = schema.GroupVersionResource{
 // providers' CatalogEntries from the system providers workspace. Only platform
 // providers federate into the aggregate (see the enumerator in server.go), so
 // org-owned catalogs are not consulted.
+// The dynamic client is built once and reused: it is stateless and its
+// construction was repeated on every reconcile.
 func catalogActionGrants(kcpConfig *rest.Config) ActionGrantSource {
+	if kcpConfig == nil {
+		return func(context.Context) ([]ActionGrant, error) { return nil, nil }
+	}
+	cfg := rest.CopyConfig(kcpConfig)
+	cfg.Host = apiurl.KCPClusterURL(kcpConfig.Host, kcppaths.SystemProviders)
+	dyn, dynErr := dynamic.NewForConfig(cfg)
 	return func(ctx context.Context) ([]ActionGrant, error) {
-		if kcpConfig == nil {
-			return nil, nil
-		}
-		cfg := rest.CopyConfig(kcpConfig)
-		cfg.Host = apiurl.KCPClusterURL(kcpConfig.Host, kcppaths.SystemProviders)
-		dyn, err := dynamic.NewForConfig(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("building system providers client: %w", err)
+		if dynErr != nil {
+			return nil, fmt.Errorf("building system providers client: %w", dynErr)
 		}
 		list, err := dyn.Resource(catalogEntryGVR).List(ctx, metav1.ListOptions{})
 		if err != nil {
