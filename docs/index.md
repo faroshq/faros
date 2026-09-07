@@ -48,7 +48,7 @@ faros is alpha software at v0.1.x. There is no hosted service; you run the hub y
 |:----------|:------------|
 | **Hub** (`faros-hub`) | The control plane: authentication, tenancy, provider registry, proxies and the MCP aggregate |
 | **Providers** | Out-of-process extensions installed by Helm; see the [repository](https://github.com/faroshq/faros/tree/main/providers) |
-| **Agent** (`faros-agent`) | Runs on each edge; establishes the tunnel and serves `kubectl`, SSH and service proxying |
+| **Agent** (`faros agent`) | The CLI's agent mode, packaged as the agent image and chart; runs on each edge, establishes the tunnel and serves `kubectl`, SSH and service proxying |
 | **CLI** (`faros`) | Log in, pick a workspace, manage edges, print MCP endpoints, run a local environment |
 
 ## Documentation

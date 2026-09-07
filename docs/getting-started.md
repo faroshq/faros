@@ -59,9 +59,10 @@ faros use
 
 ## Step 3: Connect the worker cluster as an edge
 
-Register the edge, then hand its credentials to the agent in the worker cluster. Point `kubectl` at the hub kind cluster for the first two commands; `faros dev init` printed the kubeconfig path.
+Register the edge, then hand its credentials to the agent in the worker cluster. `faros dev init` wrote one kubeconfig per kind cluster into the current directory: `faros-hub.kubeconfig` and `faros-agent.kubeconfig`.
 
 ```bash
+export KUBECONFIG=faros-hub.kubeconfig
 faros edge create local --labels env=dev
 
 # the hub mints a kubeconfig for the edge; extract it
@@ -69,14 +70,14 @@ kubectl get secret -n faros-system edge-local-kubeconfig \
   -o jsonpath='{.data.kubeconfig}' | base64 -d > edge-kubeconfig
 
 # hand it to the worker cluster and install the agent there
-kubectl --context kind-faros-agent create namespace faros-agent
-kubectl --context kind-faros-agent -n faros-agent create secret generic edge-kubeconfig \
+kubectl --kubeconfig faros-agent.kubeconfig create namespace faros-agent
+kubectl --kubeconfig faros-agent.kubeconfig -n faros-agent create secret generic edge-kubeconfig \
   --from-file=kubeconfig=edge-kubeconfig
 
 HUB_IP=$(docker inspect faros-hub-control-plane \
   -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 helm install faros-agent oci://ghcr.io/faroshq/charts/faros-agent \
-  --kube-context kind-faros-agent -n faros-agent \
+  --kubeconfig faros-agent.kubeconfig -n faros-agent \
   --set agent.edgeName=local \
   --set agent.hub.existingSecret=edge-kubeconfig \
   --set agent.hub.url=https://$HUB_IP:31443 \
@@ -118,7 +119,7 @@ faros dev delete --worker-count 1
 Check the agent's logs on the worker cluster:
 
 ```bash
-kubectl --context kind-faros-agent -n faros-agent logs deploy/faros-agent
+kubectl --kubeconfig faros-agent.kubeconfig -n faros-agent logs deploy/faros-agent
 ```
 
 A certificate error means `agent.hub.insecureSkipTLSVerify` was not set for the self-signed local hub. A connection refused or timeout means `agent.hub.url` is not the hub node's Docker-network address, or the two kind clusters are not on the same network; recreate with `faros dev init`.

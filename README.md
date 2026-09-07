@@ -154,7 +154,7 @@ To report a vulnerability, open a private security advisory on this repository r
 
 | Path | Contents |
 |---|---|
-| `cmd/` | `faros` CLI, `faros-hub`, `faros-agent`, GraphQL gateway |
+| `cmd/` | `faros` CLI (which also runs the agent through `faros agent`), `faros-hub`, the GraphQL gateway, and the release helper |
 | `pkg/hub` | Hub: control-plane bootstrap, tenancy, provider registry, proxies, MCP aggregation |
 | `pkg/agent` | Edge agent and tunnel |
 | `providers/` | The providers listed above, each its own Go module |
