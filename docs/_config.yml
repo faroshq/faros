@@ -1,6 +1,6 @@
 # Site settings
 title: Faros Documentation
-description: An open-source control plane for platform teams, built on kcp
+description: An open-source control plane for platform teams
 baseurl: "/faros"
 url: "https://faroshq.github.io"
 

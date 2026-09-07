@@ -1,6 +1,6 @@
 # faros
 
-faros is an open-source control plane for platform teams, built on [kcp](https://github.com/kcp-dev/kcp).
+faros is an open-source control plane for platform teams.
 
 Providers publish Kubernetes-style APIs, versioned actions and MCP tools into isolated tenant workspaces. Users, teams and organizations reach them through one portal, one CLI, one API and one MCP endpoint, and every call is authorized as the caller by the same RBAC. Edges extend the control plane to clusters and servers behind NAT through outbound tunnels, so the same workspace that holds an application also reaches the cluster it runs on.
 
@@ -8,9 +8,9 @@ Providers publish Kubernetes-style APIs, versioned actions and MCP tools into is
 
 ## What faros gives you
 
-- **Tenancy.** Organizations, teams and users are kcp workspaces. Membership and roles are first-party APIs. Authenticate with any OIDC provider or, for a single user, a static token.
+- **Tenancy.** Organizations, teams and users each get an isolated workspace with its own API surface. Membership and roles are first-party APIs. Authenticate with any OIDC provider or, for a single user, a static token.
 - **Providers.** Helm-installed extensions that bring an APIExport, controllers, a backend, a portal micro-frontend, MCP tools and actions. Tenants enable a provider in a workspace and get its APIs bound there. Organizations can also register providers they run themselves, reached over an edge ([BYO providers](docs/byo-providers.md)).
-- **Provider actions.** Versioned verbs on resources, granted through kcp RBAC, callable by people and by agents ([design](docs/provider-actions.md)).
+- **Provider actions.** Versioned verbs on resources, granted through the workspace's RBAC, callable by people and by agents ([design](docs/provider-actions.md)).
 - **One MCP endpoint per workspace.** Tools from every enabled provider and every connected edge, aggregated into one Model Context Protocol server. Each tool call runs as the calling user ([architecture](docs/mcp-architecture.md)).
 - **Edges.** Kubernetes clusters and Linux servers join through an agent that dials out. The hub proxies `kubectl`, SSH and selected in-cluster services to them.
 - **A portal.** One web UI that hosts each provider's micro-frontend under the tenant's identity.
@@ -36,7 +36,7 @@ Provider directories are mirrored read-only to `faroshq/provider-*` repositories
                  people · CLI · portal · AI agents (MCP)
                                  │
                         ┌────────▼────────┐
-                        │    faros hub    │   kcp workspaces, OIDC, RBAC,
+                        │    faros hub    │   workspaces, OIDC, RBAC,
                         │                 │   provider registry, proxies
                         └──┬─────┬─────┬──┘
            provider APIs   │     │     │   outbound tunnels
@@ -49,7 +49,7 @@ Provider directories are mirrored read-only to `faroshq/provider-*` repositories
 └────────────┘          └────────────────┘           └─────────────┘
 ```
 
-The hub is the only component that needs to be reachable. Providers register with the hub and serve their APIs inside their own kcp workspace; agents on edges connect outward. Traffic between the hub and everything else is HTTP/1.1 and WebSockets, so any reverse proxy, ingress or tunnel in front of the hub works.
+The hub is the only component that needs to be reachable. Providers register with the hub and serve their APIs inside their own workspace; agents on edges connect outward. Traffic between the hub and everything else is HTTP/1.1 and WebSockets, so any reverse proxy, ingress or tunnel in front of the hub works.
 
 ## Install
 
@@ -61,7 +61,7 @@ helm install faros-hub oci://ghcr.io/faroshq/charts/faros-hub \
   --set hub.hubExternalURL=https://faros.example.com
 ```
 
-That gives you a hub with embedded kcp. For TLS, OIDC, ingress and the provider hardening flags, see [Helm deployment](https://faroshq.github.io/faros/helm.html), [embedded kcp](https://faroshq.github.io/faros/install-embedded-kcp.html) and [external kcp](https://faroshq.github.io/faros/install-external-kcp.html).
+That is a complete single hub; its control-plane store runs inside the same release. For TLS, OIDC, ingress and the provider hardening flags, see [Helm deployment](https://faroshq.github.io/faros/helm.html). Larger installs can run the control-plane store as separate shards: [single hub](https://faroshq.github.io/faros/install-embedded-kcp.html), [multi-shard](https://faroshq.github.io/faros/install-external-kcp.html).
 
 To try faros on a laptop, the CLI can create a local hub in a kind cluster:
 
@@ -155,7 +155,7 @@ To report a vulnerability, open a private security advisory on this repository r
 | Path | Contents |
 |---|---|
 | `cmd/` | `faros` CLI, `faros-hub`, `faros-agent`, GraphQL gateway |
-| `pkg/hub` | Hub: kcp bootstrap, tenancy, provider registry, proxies, MCP aggregation |
+| `pkg/hub` | Hub: control-plane bootstrap, tenancy, provider registry, proxies, MCP aggregation |
 | `pkg/agent` | Edge agent and tunnel |
 | `providers/` | The providers listed above, each its own Go module |
 | `deploy/charts` | Helm charts for the hub and the agent |
@@ -167,9 +167,9 @@ Published: [Getting started](https://faroshq.github.io/faros/getting-started.htm
 
 Design documents in this repository: [providers](docs/providers.md), [organizations and the workspace tree](docs/organizations.md), [provider scoping](docs/provider-scoping.md), [provider actions](docs/provider-actions.md), [BYO providers](docs/byo-providers.md), [MCP architecture](docs/mcp-architecture.md).
 
-## Relationship to kcp and Platform Mesh
+## Under the hood
 
-faros runs on kcp and its author maintains kcp. It shares that substrate, and its GraphQL gateway, with [Platform Mesh](https://github.com/platform-mesh), the SAP and NeoNephos reference architecture. faros is the smaller, opinionated end of that spectrum: a single-binary hub with an agent surface (MCP and actions), providers an organization can run in its own cluster over an edge, and connectivity to clusters and servers built in.
+Workspaces are served by [kcp](https://github.com/kcp-dev/kcp), which gives every tenant a Kubernetes-style API server without a cluster per tenant; providers publish their APIs into it and tenants bind them. You meet this as an operator when you size and back up the hub, and as a provider author when you write one. Users see the portal, the CLI, the API and MCP.
 
 ## Contributing
 

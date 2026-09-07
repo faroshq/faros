@@ -21,7 +21,7 @@ Run a local hub, connect a cluster, and hand a workspace to an AI agent.
 
 ## Overview
 
-This guide uses the CLI's built-in local environment: a kind cluster running the hub with embedded kcp, and optionally a second kind cluster that joins it as an edge. Nothing here is exposed to the internet. For a real install, follow [Helm deployment]({% link helm.md %}) instead; the CLI steps from section 3 onward are the same.
+This guide uses the CLI's built-in local environment: a kind cluster running the hub, and optionally a second kind cluster that joins it as an edge. Nothing here is exposed to the internet. For a real install, follow [Helm deployment]({% link helm.md %}) instead; the CLI steps from section 3 onward are the same.
 
 ## Prerequisites
 

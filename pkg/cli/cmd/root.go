@@ -31,7 +31,7 @@ import (
 func NewRootCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "faros",
-		Short: "faros: an open-source control plane for platform teams, built on kcp",
+		Short: "faros: an open-source control plane for platform teams",
 		Long: `Faros is an OSS control plane that combines multi-tenant API serving
 with reverse-dialer connectivity mesh and OIDC identity.
 
