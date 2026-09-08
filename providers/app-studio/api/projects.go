@@ -472,7 +472,7 @@ func (s *Server) createProjectFromRequestWithPreflight(ctx context.Context, c *a
 			s.cleanupCreatedProjectSetup(ctx, c, id, created)
 			return nil, err
 		}
-		if err := claimProjectRepository(ctx, c, created.Name, repoPlan); err != nil {
+		if err := claimProjectRepository(ctx, c, created.Name, string(created.UID), repoPlan); err != nil {
 			s.cleanupCreatedProjectSetup(ctx, c, id, created)
 			return nil, err
 		}

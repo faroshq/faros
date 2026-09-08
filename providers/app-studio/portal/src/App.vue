@@ -188,6 +188,8 @@ import NewProjectWizard from './NewProjectWizard.vue'
 import FirstTimeSetup from './FirstTimeSetup.vue'
 import GitConnectionSettings from './GitConnectionSettings.vue'
 import { useGitOnboarding } from './useGitOnboarding'
+import { useProjectCreationSubmit } from './useProjectCreationSubmit'
+import GitRecommendationBanner from './GitRecommendationBanner.vue'
 import ProjectIntegrations from './ProjectIntegrations.vue'
 import {
   ConversationRunController,
@@ -973,6 +975,8 @@ const llmDiscoveryError = ref<string | null>(null)
 const llmDiscoveryStatus = ref<string | null>(null)
 let llmDiscoverySerial = 0
 const wizardOpen = ref(false)
+const projectCreationSubmit = useProjectCreationSubmit()
+const projectCreationPending = projectCreationSubmit.pending
 const setupSessionActive = ref(false)
 const { skipped: gitSetupSkipped, skip: skipGitSetup } = useGitOnboarding(() => props.ctx)
 const createWithGit = ref(false)
@@ -1410,6 +1414,7 @@ function llmModelMutationIsCurrent(guard: LLMModelMutationGuard): boolean {
 }
 
 function invalidateProjectContextState() {
+  projectCreationSubmit.invalidate()
   const hasToken = Boolean(props.ctx?.token)
   projectLoadSerial += 1
   assistantSkillsLoadSerial += 1
@@ -2873,6 +2878,7 @@ onMounted(() => {
 watch(
   () => props.ctx?.subPath ?? '',
   () => {
+    projectCreationSubmit.invalidate()
     // A route transition changes the visible workspace. Let an in-flight
     // deletion finish on the server, but fence its response from the new
     // route and release the old route's local lock immediately.
@@ -3139,6 +3145,7 @@ useEscapeKey(() => {
 
 onBeforeUnmount(() => {
   appComponentMounted = false
+  projectCreationSubmit.invalidate()
   developmentPreviewComponentMounted = false
   developmentPreviewRefreshController.dispose()
   developmentPreviewAuthorizationSerial += 1
@@ -4823,6 +4830,7 @@ async function createProjectFromPrompt() {
 // resolves in place without losing or re-rendering the submitted idea.
 
 async function onWizardCancel() {
+  projectCreationSubmit.invalidate()
   // Keep prompt.value intact so editing/back returns to the landing composer
   // with the exact idea that was submitted. NewProjectWizard invalidates its
   // pending plan request before emitting cancel.
@@ -4833,17 +4841,15 @@ async function onWizardCancel() {
 }
 
 async function onWizardCreate(payload: { prompt: string; templateName?: string; displayName?: string }) {
-  prompt.value = payload.prompt
-  // Revalidate while the confirmation surface is still mounted. A Git or LLM
-  // setting can change after the initial plan; closing first would discard the
-  // user's reviewed name/template and strand them back on the landing surface.
-  if (!await ensureCreateSetupReady()) return
-  setupSessionActive.value = false
-  setupCompletionVisible.value = false
-  wizardOpen.value = false
-  await createProjectAndStartConversation(payload.prompt, {
-    templateName: payload.templateName,
-    displayName: payload.displayName,
+  await projectCreationSubmit.run(ensureCreateSetupReady, async () => {
+    prompt.value = payload.prompt
+    setupSessionActive.value = false
+    setupCompletionVisible.value = false
+    wizardOpen.value = false
+    await createProjectAndStartConversation(payload.prompt, {
+      templateName: payload.templateName,
+      displayName: payload.displayName,
+    })
   })
 }
 
@@ -8805,10 +8811,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           :class="wizardOpen || firstTimeSetupVisible ? 'items-start' : 'items-center'"
         >
           <section class="w-full max-w-[1060px]">
-            <p v-if="!firstTimeSetupVisible && !wizardOpen && !gitConnectionCreateReady" class="mb-3 text-[12px] text-text-secondary">
-              Git recommended · <a :href="CODE_CONNECTIONS_URL" target="_blank" rel="noopener noreferrer" class="text-accent underline underline-offset-2">Connect Git</a>
-              <button type="button" class="k-btn k-btn--ghost ml-2" @click="loadCreateReadiness">Check connection</button>
-            </p>
             <template v-if="firstTimeSetupVisible">
               <FirstTimeSetup
                 :readiness="createReadiness"
@@ -8832,22 +8834,22 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             <template v-else-if="wizardOpen">
               <div class="mb-4 grid gap-2 rounded-md border border-border-subtle bg-surface p-3 text-[12px]">
                 <label class="flex items-center gap-2 text-text-primary">
-                  <input v-model="createWithGit" type="checkbox" :disabled="!reviewedGitConnection" />
+                  <input v-model="createWithGit" type="checkbox" :disabled="projectCreationPending || !reviewedGitConnection" />
                   Create a private Git repository (recommended)
                 </label>
                 <p class="text-text-secondary">{{ createWithGit ? 'Project source will be saved to a new private repository.' : 'Start without Git. Connect a repository later in project settings.' }}</p>
                 <a v-if="!reviewedGitConnection" :href="CODE_CONNECTIONS_URL" target="_blank" rel="noopener noreferrer" class="text-accent underline underline-offset-2">Connect GitHub</a>
                 <p v-if="createGitError" role="alert" class="text-danger">{{ createGitError }}</p>
                 <div v-if="createGitError || !reviewedGitConnection" class="flex gap-2">
-                  <button type="button" class="k-btn k-btn--ghost" @click="onWizardSetupRetry">Check again</button>
-                  <button type="button" class="k-btn k-btn--ghost" @click="createWithGit = false; createGitError = ''">Continue without Git</button>
+                  <button type="button" class="k-btn k-btn--ghost" :disabled="projectCreationPending" @click="onWizardSetupRetry">Check again</button>
+                  <button type="button" class="k-btn k-btn--ghost" :disabled="projectCreationPending" @click="createWithGit = false; createGitError = ''">Continue without Git</button>
                 </div>
               </div>
               <NewProjectWizard
                 :ctx="props.ctx"
                 :initial-prompt="prompt"
-                :disabled="busy || !canStartProjectFromPrompt"
-                :disabled-reason="createPromptSubmitTitle"
+                :disabled="projectCreationPending || busy || !canStartProjectFromPrompt"
+                :disabled-reason="projectCreationPending ? 'Checking project setup…' : createPromptSubmitTitle"
                 :setup-items="createSetupItemsForPrompt"
                 :setup-error="createSetupErrorMessage"
                 :setup-loading="createSetupLoading"
@@ -8866,6 +8868,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
 
             <template v-else>
             <div class="mx-auto w-full max-w-[860px]">
+              <GitRecommendationBanner v-if="!gitConnectionCreateReady" class="mb-8" :readiness="createReadiness" :checking="createReadinessChecking" :error="createReadinessError || ''" @retry="loadCreateReadiness" />
               <h2 class="text-left text-[28px] font-semibold leading-8 text-text-primary sm:text-[32px] sm:leading-9">
                 What are we building in Faros today?
               </h2>

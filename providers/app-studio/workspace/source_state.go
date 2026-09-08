@@ -51,6 +51,34 @@ type workspaceCommitSettlement struct {
 	Paths           []string `json:"paths"`
 }
 
+// RetainsSource reports whether this project incarnation has a local tree at
+// least as current as the last revision recorded by its owner. An empty tree
+// counts: its files may have been deliberately deleted. Revision metadata alone
+// does not count, since adoption can seed a floor before any source is hydrated.
+func (s *FileStore) RetainsSource(ctx context.Context, scope Scope, floor uint64) (bool, error) {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	dir, err := s.scopeDir(scope)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("workspace source is not a directory")
+	}
+	revision, err := s.sourceRevision(ctx, scope)
+	return revision >= floor, err
+}
+
 // UncommittedPaths returns the project source paths changed by App Studio
 // since the last successful repository commit. The state follows the
 // ProjectUID-scoped workspace rather than an individual assistant run.

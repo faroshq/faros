@@ -175,3 +175,59 @@ func TestOptionalGitGraphQLMissingProviderIsAdvisory(t *testing.T) {
 		t.Fatal("misclassified authorization failure")
 	}
 }
+
+func TestConnectLaterReservesDifferentRepositories(t *testing.T) {
+	c := newProjectCreationTestClient(codeConnectionObjectWithValidated("github", metav1.ConditionTrue))
+	s := &Server{projectClientFor: func(identity) (*asclient.Client, error) { return c, nil }}
+	refs := []string{}
+	for _, name := range []string{"project-one", "project-two"} {
+		p, err := s.createProjectFromRequest(context.Background(), c, identity{orgUUID: "org-a", workspaceUUID: "ws-1"}, CreateProjectRequest{Name: name, DisplayName: "Demo", RepositoryMode: "none"}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPut, "/api/projects/"+name+"/repository", strings.NewReader(`{"connectionRef":"github"}`))
+		setPublishingIdentity(req)
+		req = mux.SetURLVars(req, map[string]string{"project": p.Name})
+		rec := httptest.NewRecorder()
+		s.putProjectRepository(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("connect: %d %s", rec.Code, rec.Body.String())
+		}
+		p, err = c.Projects().Get(context.Background(), p.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		refs = append(refs, p.Spec.Repository.RepositoryRef)
+	}
+	if refs[0] == refs[1] {
+		t.Fatalf("distinct projects attached to the same repository before reconciliation: %v", refs)
+	}
+}
+
+func TestRepositoryClaimTransfersProjectIncarnationOnImport(t *testing.T) {
+	ctx := context.Background()
+	repo := codeRepositoryObject("repo", "repo", "github", true)
+	repo.SetAnnotations(map[string]string{projectRepositoryUIDAnnotation: "old-uid"})
+	c := newProjectCreationTestClient(repo)
+	plan := projectRepositoryPlan{Ref: "repo", Adopted: true}
+	if err := claimProjectRepository(ctx, c, "demo", "new-uid", plan); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := c.Resource(codeRepositoryResource, "").Get(ctx, "repo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.GetLabels()[projectRepositoryProjectLabel] != "demo" || claimed.GetAnnotations()[projectRepositoryUIDAnnotation] != "new-uid" {
+		t.Fatalf("wrong repository owner: %v %v", claimed.GetLabels(), claimed.GetAnnotations())
+	}
+	if err := releaseProjectRepository(ctx, c, "repo"); err != nil {
+		t.Fatal(err)
+	}
+	released, err := c.Resource(codeRepositoryResource, "").Get(ctx, "repo", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released.GetLabels()[projectRepositoryProjectLabel] != "" || released.GetAnnotations()[projectRepositoryUIDAnnotation] != "" {
+		t.Fatalf("released repository still has an owner: %v %v", released.GetLabels(), released.GetAnnotations())
+	}
+}

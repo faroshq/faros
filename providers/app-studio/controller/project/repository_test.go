@@ -83,6 +83,42 @@ func TestEnsureRepositoryNeverCreatesAdopted(t *testing.T) {
 	}
 }
 
+func TestEnsureRepositoryEnforcesProjectOwnership(t *testing.T) {
+	for _, adopted := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, owner, uid, connection string
+			allowed                      bool
+		}{
+			{"owned", "demo", "uid-1", "github", true},
+			{"legacy-owned", "demo", "", "github", true},
+			{"unclaimed", "", "", "github", false},
+			{"other-project", "another", "uid-2", "github", false},
+			{"recreated-project", "demo", "old-uid", "github", false},
+			{"other-connection", "demo", "uid-1", "another", false},
+		} {
+			t.Run(tc.name+map[bool]string{true: "-adopted", false: "-created"}[adopted], func(t *testing.T) {
+				p := repoProject(adopted)
+				repo := &unstructured.Unstructured{Object: map[string]any{
+					"apiVersion": repositoryGVK.GroupVersion().String(), "kind": repositoryGVK.Kind,
+					"metadata": map[string]any{"name": p.Spec.Repository.RepositoryRef,
+						"labels":      map[string]any{projectRepositoryLabel: tc.owner},
+						"annotations": map[string]any{projectRepositoryUIDAnnotation: tc.uid}},
+					"spec": map[string]any{"connectionRef": tc.connection},
+				}}
+				c := fake.NewClientBuilder().WithScheme(appscheme.NewScheme()).WithRuntimeObjects(repo).Build()
+				got, err := (&Reconciler{}).ensureRepository(context.Background(), c, p)
+				if tc.allowed {
+					if err != nil || got == nil {
+						t.Fatalf("owned repository rejected: %v", err)
+					}
+				} else if err == nil || got != nil {
+					t.Fatalf("unsafe repository accepted: %#v %v", got, err)
+				}
+			})
+		}
+	}
+}
+
 func TestRepositoryReady(t *testing.T) {
 	if repositoryReady(nil) {
 		t.Fatal("nil repository reported ready")

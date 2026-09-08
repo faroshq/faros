@@ -28,7 +28,7 @@ test('keeps first-time setup separate from the project prompt', async () => {
   assert.match(html, /aria-label="App Studio workspace setup"/)
   assert.doesNotMatch(html, /aria-labelledby="app-studio-setup-title"/)
   assert.match(html, /Connect an AI model/)
-  assert.match(html, /Git \(recommended\)/)
+  assert.match(html, /Git is optional and recommended/)
   assert.doesNotMatch(html, /Skip for now/)
   assert.doesNotMatch(html, /What are we building|Describe what you want to build|<textarea/)
 })
@@ -54,7 +54,7 @@ test('surfaces terminal Git validation failures with a recovery action', async (
   })
   assert.match(html, /The git host rejected the credential\./)
   assert.match(html, /Fix Git connection/)
-  assert.match(html, /Check failed/)
+  assert.match(html, /role="status"/)
 })
 
 test('completion hands off to normal project creation', async () => {

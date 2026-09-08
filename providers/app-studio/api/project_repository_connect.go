@@ -81,7 +81,9 @@ func (s *Server) putProjectRepository(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		plan, err := s.prepareProjectRepository(r.Context(), c, req.ConnectionRef, slugifyProjectName(p.Spec.DisplayName), p.Spec.DisplayName, p.Spec.Description)
+		// Project names are unique within the workspace; display names are not.
+		// Reserve distinct intent even before either Repository CR is reconciled.
+		plan, err := s.prepareProjectRepository(r.Context(), c, req.ConnectionRef, p.Name, p.Spec.DisplayName, p.Spec.Description)
 		if err != nil {
 			writeProjectError(w, err)
 			return

@@ -45,6 +45,7 @@ const (
 	codeLabelRepository    = "code.faros.sh/repository"
 
 	projectRepositoryProjectAnnotation = "app-studio.ai.faros.sh/project"
+	projectRepositoryUIDAnnotation     = "app-studio.ai.faros.sh/project-uid"
 
 	projectRepositoryProjectLabel = "app-studio.ai.faros.sh/project"
 
@@ -174,7 +175,7 @@ func adoptProjectRepository(ctx context.Context, c *asclient.Client, repositoryR
 }
 
 // claimProjectRepository stamps the project claim onto an adopted Repository.
-func claimProjectRepository(ctx context.Context, c *asclient.Client, projectName string, plan projectRepositoryPlan) error {
+func claimProjectRepository(ctx context.Context, c *asclient.Client, projectName, projectUID string, plan projectRepositoryPlan) error {
 	repo, err := c.Resource(codeRepositoryResource, "").Get(ctx, plan.Ref, metav1.GetOptions{})
 	if err != nil {
 		return codeProviderRequestError("get Code repository", err)
@@ -193,6 +194,7 @@ func claimProjectRepository(ctx context.Context, c *asclient.Client, projectName
 		annotations = map[string]string{}
 	}
 	annotations[projectRepositoryProjectAnnotation] = projectName
+	annotations[projectRepositoryUIDAnnotation] = projectUID
 	annotations[projectRepositoryAdoptedAnnotation] = "true"
 	repo.SetAnnotations(annotations)
 	if _, err := c.Resource(codeRepositoryResource, "").Update(ctx, repo, metav1.UpdateOptions{}); err != nil {
@@ -216,6 +218,7 @@ func releaseProjectRepository(ctx context.Context, c *asclient.Client, repositor
 	repo.SetLabels(labels)
 	annotations := repo.GetAnnotations()
 	delete(annotations, projectRepositoryProjectAnnotation)
+	delete(annotations, projectRepositoryUIDAnnotation)
 	delete(annotations, projectRepositoryAdoptedAnnotation)
 	repo.SetAnnotations(annotations)
 	_, err = c.Resource(codeRepositoryResource, "").Update(ctx, repo, metav1.UpdateOptions{})
