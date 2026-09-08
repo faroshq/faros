@@ -30,7 +30,7 @@ test('keeps first-time setup separate from the project prompt', async () => {
   assert.doesNotMatch(html, /Connect an AI model/)
   assert.match(html, /aria-current="step"/)
   assert.match(html, /Skip for now/)
-  assert.match(html, /Keep your code backed up with Git/)
+  assert.match(html, /Back up your source and track changes in Git/)
   assert.doesNotMatch(html, /What are we building|Describe what you want to build|<textarea/)
 })
 
@@ -119,7 +119,7 @@ test('Git choice precedes model setup even while model settings load', async () 
   const model = await render({ gitSkipped: true })
   assert.match(model, /Connect AI model/)
   assert.match(model, /Required/)
-  assert.doesNotMatch(model, /Keep your code backed up with Git/)
+  assert.doesNotMatch(model, /Back up your source and track changes in Git/)
 })
 
 test('revisiting Git clears only this user and workspace skip choice', async () => {
