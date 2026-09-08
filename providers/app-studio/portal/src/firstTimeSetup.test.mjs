@@ -27,17 +27,19 @@ test('keeps first-time setup separate from the project prompt', async () => {
   const html = await render()
   assert.match(html, /aria-label="App Studio workspace setup"/)
   assert.doesNotMatch(html, /aria-labelledby="app-studio-setup-title"/)
-  assert.match(html, /Connect an AI model/)
-  assert.match(html, /Git is optional and recommended/)
-  assert.doesNotMatch(html, /Skip for now/)
+  assert.doesNotMatch(html, /Connect an AI model/)
+  assert.match(html, /aria-current="step"/)
+  assert.match(html, /Skip for now/)
+  assert.match(html, /Keep your code backed up with Git/)
   assert.doesNotMatch(html, /What are we building|Describe what you want to build|<textarea/)
 })
 
 test('requires the model even when Git is ready', async () => {
   const html = await render({ readiness: { gitConnection: { ready: true, status: 'ready', connectionRef: 'github-workspace' } } })
-  assert.match(html, /GitHub connected/)
+  assert.match(html, /Connected/)
+  assert.doesNotMatch(html, /Skip for now/)
   assert.match(html, /Connect an AI model/)
-  assert.match(html, /tests the provider connection before saving/)
+  assert.match(html, /tested before saving/)
 })
 
 test('surfaces terminal Git validation failures with a recovery action', async () => {
@@ -80,12 +82,12 @@ test('optional Git step remains skippable while Git is missing, checking, or fai
   for (const status of ['provider-missing', 'connection-missing', 'validating', 'failed']) {
     const html = await render({ llmConfigured: true, readiness: { gitConnection: { ready: false, status } }, gitLoading: status === 'validating' })
     assert.match(html, /Skip for now/)
-    assert.match(html, /Connect Git \(recommended\)/)
+    assert.match(html, /Connect Git/)
     assert.doesNotMatch(html, /GitHub connected/)
   }
 })
 test('completion without Git does not claim Git was connected', async () => {
-  const html = await render({ llmConfigured: true, completion: true })
+  const html = await render({ llmConfigured: true, completion: true, gitSkipped: true })
   assert.match(html, /App Studio is ready/)
   assert.doesNotMatch(html, /Git and an AI model are connected|GitHub<\/dt>/)
 })
@@ -98,4 +100,24 @@ test('Git skip storage is scoped to a signed-in user and workspace', async () =>
   assert.notEqual(key, gitOnboardingStorageKey({ ...context, workspaceUUID: 'ws-b' }))
   assert.notEqual(key, gitOnboardingStorageKey({ ...context, user: { sub: 'bob' } }))
   assert.equal(gitOnboardingStorageKey({ ...context, user: null }), null)
+})
+
+test('skipping Git before model setup keeps the required model action and acknowledges the choice', async () => {
+  const html = await render({ gitSkipped: true })
+  assert.match(html, /Connect AI model/)
+  assert.match(html, /Skipped for now/)
+  assert.doesNotMatch(html, /Skip for now|Create your first project/)
+  const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  assert.match(app, /:git-skipped="gitSetupSkipped"/)
+  assert.match(app, /@skip-git="skipGitSetup"/)
+})
+
+test('Git choice precedes model setup even while model settings load', async () => {
+  const html = await render({ loading: true })
+  assert.match(html, /Skip for now/)
+  assert.doesNotMatch(html, /Checking AI model setup|Connect AI model/)
+  const model = await render({ gitSkipped: true })
+  assert.match(model, /Connect AI model/)
+  assert.match(model, /Required/)
+  assert.doesNotMatch(model, /Keep your code backed up with Git/)
 })

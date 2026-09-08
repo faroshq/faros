@@ -2167,7 +2167,6 @@ watch([isCreateRoute, createSetupLoading, () => createSetupVisible.value || gitS
 }, { immediate: true })
 
 async function finishFirstTimeSetup() {
-  if (!gitConnectionCreateReady.value) skipGitSetup()
   setupSessionActive.value = false
   setupCompletionVisible.value = false
   await nextTick()
@@ -8818,6 +8817,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 :llm-model="setupModelName"
                 :loading="createSetupLoading"
                 :git-loading="createReadinessChecking"
+                :git-skipped="gitSetupSkipped"
                 :git-error="createReadinessError || ''"
                 :llm-error="llmSettingsError || ''"
                 :completion="setupCompletionVisible"
@@ -8825,7 +8825,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 :code-catalog-url="CODE_PROVIDER_CATALOG_URL"
                 @connect-model="openSettings"
                 @retry="onWizardSetupRetry"
-                @skip-git="finishFirstTimeSetup"
+                @skip-git="skipGitSetup"
                 @finish="finishFirstTimeSetup"
                 @back="leaveFirstTimeSetup"
               />
