@@ -121,3 +121,32 @@ test('Git choice precedes model setup even while model settings load', async () 
   assert.match(model, /Required/)
   assert.doesNotMatch(model, /Keep your code backed up with Git/)
 })
+
+test('revisiting Git clears only this user and workspace skip choice', async () => {
+  const { effectScope } = await import('vue')
+  const { useGitOnboarding, gitOnboardingStorageKey } = await vite.ssrLoadModule('/src/useGitOnboarding.ts')
+  const context = { orgUUID: 'org-a', workspaceUUID: 'ws-a', user: { sub: 'alice' } }
+  const key = gitOnboardingStorageKey(context)
+  const otherKey = gitOnboardingStorageKey({ ...context, workspaceUUID: 'ws-b' })
+  const data = new Map([[key, '1'], [otherKey, '1']])
+  const original = globalThis.localStorage
+  globalThis.localStorage = { getItem: key => data.get(key), setItem: (key, value) => data.set(key, value), removeItem: key => data.delete(key) }
+  const scope = effectScope()
+  try {
+    const onboarding = scope.run(() => useGitOnboarding(() => context))
+    assert.equal(onboarding.skipped.value, true)
+    onboarding.reset()
+    assert.equal(onboarding.skipped.value, false)
+    assert.equal(data.has(key), false)
+    assert.equal(data.get(otherKey), '1')
+    assert.equal(scope.run(() => useGitOnboarding(() => context)).skipped.value, false)
+    onboarding.skip()
+    assert.equal(data.get(key), '1')
+  } finally {
+    scope.stop()
+    if (original === undefined) delete globalThis.localStorage
+    else globalThis.localStorage = original
+  }
+  assert.match(await render({ gitSkipped: true }), /Back to Git/)
+  assert.doesNotMatch(await render(), /Back to Git/)
+})

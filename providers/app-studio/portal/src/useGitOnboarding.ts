@@ -14,9 +14,9 @@ export function useGitOnboarding(context: () => FarosContext | null) {
     try { skipped.value = value ? localStorage.getItem(value) === '1' : false }
     catch { skipped.value = false }
   }, { immediate: true })
-  function skip() {
-    skipped.value = true
-    try { if (key.value) localStorage.setItem(key.value, '1') } catch { /* Session-only when storage is unavailable. */ }
+  function setSkipped(value: boolean) {
+    skipped.value = value
+    try { if (key.value) value ? localStorage.setItem(key.value, '1') : localStorage.removeItem(key.value) } catch { /* Session-only when storage is unavailable. */ }
   }
-  return { skipped, skip }
+  return { skipped, skip: () => setSkipped(true), reset: () => setSkipped(false) }
 }

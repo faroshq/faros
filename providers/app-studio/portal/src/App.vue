@@ -978,7 +978,7 @@ const wizardOpen = ref(false)
 const projectCreationSubmit = useProjectCreationSubmit()
 const projectCreationPending = projectCreationSubmit.pending
 const setupSessionActive = ref(false)
-const { skipped: gitSetupSkipped, skip: skipGitSetup } = useGitOnboarding(() => props.ctx)
+const { skipped: gitSetupSkipped, skip: skipGitSetup, reset: resetGitSetup } = useGitOnboarding(() => props.ctx)
 const createWithGit = ref(false)
 const reviewedGitConnection = ref('')
 const createGitError = ref('')
@@ -8826,6 +8826,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 @connect-model="openSettings"
                 @retry="onWizardSetupRetry"
                 @skip-git="skipGitSetup"
+                @revisit-git="resetGitSetup"
                 @finish="finishFirstTimeSetup"
                 @back="leaveFirstTimeSetup"
               />
