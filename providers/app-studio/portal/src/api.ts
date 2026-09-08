@@ -450,6 +450,10 @@ export const api = {
     return body.items ?? []
   },
 
+  async connectProjectRepository(ctx: FarosContext | null, project: string, connectionRef: string): Promise<Project> {
+    return request<Project>(ctx, 'PUT', `${baseURL(ctx)}/${encodeURIComponent(project)}/repository`, { connectionRef })
+  },
+
   async createProject(
     ctx: FarosContext | null,
     body: {
@@ -459,6 +463,7 @@ export const api = {
       templateName?: string
       inferDevelopmentTemplate?: boolean
       connectionRef?: string
+      repositoryMode?: 'auto' | 'none' | 'create'
       existingRepositoryRef?: string
     },
   ): Promise<Project> {
@@ -478,6 +483,7 @@ export const api = {
       templateName?: string
       inferDevelopmentTemplate?: boolean
       connectionRef?: string
+      repositoryMode?: 'auto' | 'none' | 'create'
       existingRepositoryRef?: string
     },
     onStatus: (message: string) => void,

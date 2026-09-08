@@ -186,6 +186,8 @@ import {
 } from './projectDeletion'
 import NewProjectWizard from './NewProjectWizard.vue'
 import FirstTimeSetup from './FirstTimeSetup.vue'
+import GitConnectionSettings from './GitConnectionSettings.vue'
+import { useGitOnboarding } from './useGitOnboarding'
 import ProjectIntegrations from './ProjectIntegrations.vue'
 import {
   ConversationRunController,
@@ -970,7 +972,12 @@ const llmDiscoveryLoading = ref(false)
 const llmDiscoveryError = ref<string | null>(null)
 const llmDiscoveryStatus = ref<string | null>(null)
 let llmDiscoverySerial = 0
+const wizardOpen = ref(false)
 const setupSessionActive = ref(false)
+const { skipped: gitSetupSkipped, skip: skipGitSetup } = useGitOnboarding(() => props.ctx)
+const createWithGit = ref(false)
+const reviewedGitConnection = ref('')
+const createGitError = ref('')
 const setupCompletionVisible = ref(false)
 const messagesRef = ref<HTMLDivElement | null>(null)
 const expandedMessageTimestampID = ref<string | null>(null)
@@ -1426,6 +1433,9 @@ function invalidateProjectContextState() {
   invalidateLLMConnectionTest()
   setupSessionActive.value = false
   setupCompletionVisible.value = false
+  createWithGit.value = false
+  reviewedGitConnection.value = ''
+  createGitError.value = ''
 
   clearInitializationRetry()
   clearProjectThumbnailURLs()
@@ -2129,18 +2139,19 @@ const createSetupItemsForPrompt = computed(() => createSetupItems({
   checkingGit: createReadinessChecking.value,
 }))
 const llmSettingsChecking = computed(() => llmSettingsLoading.value || (!!props.ctx?.token && llmSettings.value === null && !llmSettingsError.value))
-const createSetupLoading = computed(() => createReadinessChecking.value || llmSettingsChecking.value)
+const createSetupLoading = computed(() => llmSettingsChecking.value)
 const createPromptSubmitTitle = computed(() => {
   if (createSetupLoading.value) return 'Checking workspace setup'
   if (createSetupItemsForPrompt.value.length > 0) return 'Complete setup before preparing a project'
   return prompt.value.trim() ? 'Prepare project for review' : 'Describe what you want to build'
 })
-const createSetupVisible = computed(() => createSetupItemsForPrompt.value.length > 0 || !!createReadinessError.value || !!llmSettingsError.value)
-const createSetupErrorMessage = computed(() => createReadinessError.value || llmSettingsError.value || '')
-const firstTimeSetupVisible = computed(() => isCreateRoute.value && (createSetupLoading.value || createSetupVisible.value || setupCompletionVisible.value))
+const createSetupVisible = computed(() => createSetupItemsForPrompt.value.length > 0 || !!llmSettingsError.value)
+const gitSetupVisible = computed(() => !gitSetupSkipped.value && !gitConnectionCreateReady.value)
+const createSetupErrorMessage = computed(() => llmSettingsError.value || '')
+const firstTimeSetupVisible = computed(() => isCreateRoute.value && !wizardOpen.value && (createSetupLoading.value || createSetupVisible.value || gitSetupVisible.value || setupCompletionVisible.value))
 const setupModelName = computed(() => selectedLLMModel.value?.model || llmSettings.value?.model || '')
 
-watch([isCreateRoute, createSetupLoading, createSetupVisible], ([onCreateRoute, loadingSetup, setupVisible]) => {
+watch([isCreateRoute, createSetupLoading, () => createSetupVisible.value || gitSetupVisible.value], ([onCreateRoute, loadingSetup, setupVisible]) => {
   if (!onCreateRoute || loadingSetup) return
   if (setupVisible) {
     setupSessionActive.value = true
@@ -2151,6 +2162,7 @@ watch([isCreateRoute, createSetupLoading, createSetupVisible], ([onCreateRoute, 
 }, { immediate: true })
 
 async function finishFirstTimeSetup() {
+  if (!gitConnectionCreateReady.value) skipGitSetup()
   setupSessionActive.value = false
   setupCompletionVisible.value = false
   await nextTick()
@@ -2164,6 +2176,7 @@ function leaveFirstTimeSetup() {
 }
 function deleteProjectMessage(project: Project): string {
   const projectName = project.displayName || project.name
+  if (!project.repository?.ref) return `Delete ${projectName}? This removes the project and its conversation history. There is no Git repository containing an external copy of its source.`
   const repositoryName = project.repository?.name || project.repository?.ref
   const repositoryNote = repositoryName ? ` The associated repository resource (${repositoryName})` : ' The associated repository resource'
   return `Are you sure you want to delete ${projectName}? This removes the App Studio project and its conversation history.${repositoryNote} will be orphaned and will not be deleted.`
@@ -2826,7 +2839,7 @@ const developmentPreviewUnavailableMessage = computed(() => {
 })
 
 function handleCreateSetupWake() {
-  if (!isCreateRoute.value || createSetupLoading.value || !firstTimeSetupVisible.value) return
+  if (!isCreateRoute.value || createSetupLoading.value) return
   void Promise.all([loadCreateReadiness(), loadLLMSettings()])
 }
 
@@ -3406,7 +3419,6 @@ async function loadCreateReadiness() {
     createReadiness.value = readiness
   } catch (e) {
     if (serial !== createReadinessLoadSerial) return
-    if (handleProjectAPIInitializing(e)) return
     createReadiness.value = null
     createReadinessError.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -3455,7 +3467,6 @@ async function loadImportRepositories() {
     importRepositories.value = repositories
   } catch (e) {
     if (serial !== importRepositoriesLoadSerial) return
-    if (handleProjectAPIInitializing(e)) return
     importRepositoriesError.value = e instanceof Error ? e.message : String(e)
   } finally {
     if (serial === importRepositoriesLoadSerial) importRepositoriesLoading.value = false
@@ -4683,7 +4694,7 @@ async function saveLLMSettings() {
     llmEditorBaseline.value = null
     llmValidationAttempted.value = false
     if (returnRoute) {
-      if (returnRoute === CREATE_PROJECT_ROUTE && setupSessionActive.value) setupCompletionVisible.value = true
+      if (returnRoute === CREATE_PROJECT_ROUTE && setupSessionActive.value && !gitSetupVisible.value) setupCompletionVisible.value = true
       modelsReturnRoute.value = ''
       props.navigate(returnRoute, { replace: true })
     }
@@ -4802,12 +4813,14 @@ async function createProjectFromPrompt() {
   // Submitting the landing idea hands off to one stable project-details
   // surface. The actual create still runs from onWizardCreate, which re-checks
   // setup before using the durable project/thread path below.
+  createWithGit.value = gitConnectionCreateReady.value
+  reviewedGitConnection.value = createReadiness.value?.gitConnection.connectionRef || ''
+  createGitError.value = ''
   wizardOpen.value = true
 }
 
 // The creation surface is continuous from the landing composer: preparation
 // resolves in place without losing or re-rendering the submitted idea.
-const wizardOpen = ref(false)
 
 async function onWizardCancel() {
   // Keep prompt.value intact so editing/back returns to the landing composer
@@ -4825,6 +4838,8 @@ async function onWizardCreate(payload: { prompt: string; templateName?: string; 
   // setting can change after the initial plan; closing first would discard the
   // user's reviewed name/template and strand them back on the landing surface.
   if (!await ensureCreateSetupReady()) return
+  setupSessionActive.value = false
+  setupCompletionVisible.value = false
   wizardOpen.value = false
   await createProjectAndStartConversation(payload.prompt, {
     templateName: payload.templateName,
@@ -4838,11 +4853,19 @@ function onWizardSetupAction(action: 'setup-llm') {
 
 async function onWizardSetupRetry() {
   await Promise.all([loadCreateReadiness(), loadLLMSettings()])
+  if (!createWithGit.value) reviewedGitConnection.value = createReadiness.value?.gitConnection.connectionRef || ''
 }
 
 async function ensureCreateSetupReady(): Promise<boolean> {
-  await Promise.all([loadCreateReadiness(), loadLLMSettings()])
-  if (gitConnectionCreateReady.value && llmConfigured.value) return true
+  await loadLLMSettings()
+  if (createWithGit.value) {
+    await loadCreateReadiness()
+    if (!gitConnectionCreateReady.value || createReadiness.value?.gitConnection.connectionRef !== reviewedGitConnection.value) {
+      createGitError.value = createReadinessError.value || 'The selected Git connection is no longer ready. Retry, or continue without Git.'
+      return false
+    }
+  }
+  if (llmConfigured.value) return true
   error.value = null
   return false
 }
@@ -4953,6 +4976,8 @@ async function createProjectAndStartConversation(
       const created = await api.createProjectStream(props.ctx, {
         description: description || undefined,
         prompt: content,
+        repositoryMode: createWithGit.value ? 'create' : 'none',
+        connectionRef: createWithGit.value ? reviewedGitConnection.value : undefined,
         templateName: createOverrides?.templateName,
         displayName: createOverrides?.displayName,
         inferDevelopmentTemplate: !createOverrides?.templateName,
@@ -5171,6 +5196,12 @@ function closeSettings() {
     // so Escape/backdrop cannot leave an empty active settings host behind.
     closeWorkbenchTabByID('settings')
   }
+}
+
+function onProjectGitConnected(project: Project) {
+  if (selected.value?.name !== project.name) return
+  selected.value = project
+  projects.value = projects.value.map((item) => item.name === project.name ? project : item)
 }
 
 function syncProjectSettingsForm() {
@@ -8774,12 +8805,17 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           :class="wizardOpen || firstTimeSetupVisible ? 'items-start' : 'items-center'"
         >
           <section class="w-full max-w-[1060px]">
+            <p v-if="!firstTimeSetupVisible && !wizardOpen && !gitConnectionCreateReady" class="mb-3 text-[12px] text-text-secondary">
+              Git recommended · <a :href="CODE_CONNECTIONS_URL" target="_blank" rel="noopener noreferrer" class="text-accent underline underline-offset-2">Connect Git</a>
+              <button type="button" class="k-btn k-btn--ghost ml-2" @click="loadCreateReadiness">Check connection</button>
+            </p>
             <template v-if="firstTimeSetupVisible">
               <FirstTimeSetup
                 :readiness="createReadiness"
                 :llm-configured="llmConfigured"
                 :llm-model="setupModelName"
                 :loading="createSetupLoading"
+                :git-loading="createReadinessChecking"
                 :git-error="createReadinessError || ''"
                 :llm-error="llmSettingsError || ''"
                 :completion="setupCompletionVisible"
@@ -8787,12 +8823,26 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                 :code-catalog-url="CODE_PROVIDER_CATALOG_URL"
                 @connect-model="openSettings"
                 @retry="onWizardSetupRetry"
+                @skip-git="finishFirstTimeSetup"
                 @finish="finishFirstTimeSetup"
                 @back="leaveFirstTimeSetup"
               />
             </template>
 
             <template v-else-if="wizardOpen">
+              <div class="mb-4 grid gap-2 rounded-md border border-border-subtle bg-surface p-3 text-[12px]">
+                <label class="flex items-center gap-2 text-text-primary">
+                  <input v-model="createWithGit" type="checkbox" :disabled="!reviewedGitConnection" />
+                  Create a private Git repository (recommended)
+                </label>
+                <p class="text-text-secondary">{{ createWithGit ? 'Project source will be saved to a new private repository.' : 'Start without Git. Connect a repository later in project settings.' }}</p>
+                <a v-if="!reviewedGitConnection" :href="CODE_CONNECTIONS_URL" target="_blank" rel="noopener noreferrer" class="text-accent underline underline-offset-2">Connect GitHub</a>
+                <p v-if="createGitError" role="alert" class="text-danger">{{ createGitError }}</p>
+                <div v-if="createGitError || !reviewedGitConnection" class="flex gap-2">
+                  <button type="button" class="k-btn k-btn--ghost" @click="onWizardSetupRetry">Check again</button>
+                  <button type="button" class="k-btn k-btn--ghost" @click="createWithGit = false; createGitError = ''">Continue without Git</button>
+                </div>
+              </div>
               <NewProjectWizard
                 :ctx="props.ctx"
                 :initial-prompt="prompt"
@@ -9114,7 +9164,8 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               <span class="truncate">{{ selected.displayName || selected.name || 'Project' }}</span>
               <span aria-hidden="true">·</span>
               <GitBranch class="h-3 w-3 shrink-0" :stroke-width="2" />
-              <span class="truncate">{{ selected.repository?.name || selected.repository?.ref || 'No repository' }}</span>
+              <span v-if="selected.repository?.ref" class="truncate">{{ selected.repository.name || selected.repository.ref }}</span>
+              <button v-else type="button" class="text-accent underline underline-offset-2" @click="openSettings">Git recommended · Connect</button>
             </div>
           </div>
           <button
@@ -10518,6 +10569,11 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               </button>
             </div>
           </form>
+          <GitConnectionSettings
+            v-if="settingsProject" :key="settingsProject.name"
+            :ctx="props.ctx" :project="settingsProject"
+            @connected="onProjectGitConnected"
+          />
           <section
             class="grid gap-4 rounded-lg border border-border-subtle bg-surface-overlay/40 p-3"
             aria-label="Development settings"
@@ -10878,6 +10934,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
               <h2 class="text-[14px] font-semibold text-text-primary">History</h2>
               <p class="text-[12px] leading-5 text-text-muted">Return the current project filesystem to an earlier Git commit without changing Git history or production.</p>
             </div>
+            <button v-if="!selected?.repository?.ref" type="button" class="k-btn k-btn--ghost mb-3" @click="openSettings">Connect Git in project settings</button>
             <ProjectHistory
               :repository-ref="selected?.repository?.ref"
               :repository-status="selected?.repository?.status"
@@ -10958,7 +11015,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             <div class="min-w-0">
               <div class="text-[12px] font-medium text-text-primary">Delete project</div>
               <p class="mt-1 text-[12px] text-text-muted">
-                Remove this App Studio project without deleting its associated repository resource.
+                {{ selected?.repository?.ref ? 'Remove this App Studio project without deleting its associated repository resource.' : 'Remove this App Studio project. No Git repository contains an external copy of its source.' }}
               </p>
             </div>
             <button
