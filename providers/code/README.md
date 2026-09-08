@@ -329,20 +329,12 @@ controller crawlers, but does not coordinate HTTP callers across replicas.
 Replicas, different tokens for the same GitHub user,
 and other GitHub clients do not share a budget. There are at most 64 credential/
 host states, each with at most 256 cached entries and 1 MiB of serialized entry data.
-A tenant may admit at most eight credential/host states. Admission uses kcp's
-logical-cluster identity across all GitHub operations, including workflow reads;
-Connection UID is the fallback for incomplete objects. At the tenant limit, a
-new credential replaces that tenant's oldest idle, unthrottled state or fails
-locally. One tenant therefore cannot occupy all 64 states with throttled tokens.
-A shared credential's state is charged to the tenant that first admitted it;
-other tenants reusing that exact credential still share its GitHub throttle.
-The global bound remains: multiple tenants can collectively exhaust capacity.
-This is bounded admission protection, not a per-tenant CPU or request-rate quota.
 Oversized listings are fetched normally but not cached. Idle states are reclaimed
 on subsequent requests after an hour, except while a throttle is active. At state
 capacity, the oldest idle, unthrottled state is evicted. If every slot is busy or
 throttled, new credential/host requests fail locally until a slot is available;
-active throttle state is never evicted to admit new traffic. Large
+active throttle state is never evicted to admit new traffic. This global capacity
+bound does not guarantee availability isolation or fairness between tenants. Large
 accounts that exceed the response cache bounds will see less request sharing.
 
 For five repositories on one personal account with one page per ecosystem, the

@@ -61,8 +61,7 @@ func (b *Backend) client(ctx context.Context, cred backend.Credential, baseURL s
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cred.Token})
 	httpClient := oauth2.NewClient(ctx, ts)
 	httpClient.Timeout = githubRequestTimeout
-	tenant, _ := ctx.Value(requestTenantKey{}).([32]byte)
-	httpClient.Transport = &sharedTransport{base: httpClient.Transport, cache: b.requestCache(), credential: credentialHash(cred.Token), tenant: tenant}
+	httpClient.Transport = &sharedTransport{base: httpClient.Transport, cache: b.requestCache(), credential: credentialHash(cred.Token)}
 	if baseURL == "" {
 		return gogithub.NewClient(httpClient), nil
 	}
@@ -72,12 +71,6 @@ func (b *Backend) client(ctx context.Context, cred backend.Credential, baseURL s
 		return nil, fmt.Errorf("github: invalid baseURL %q: %w", baseURL, err)
 	}
 	return c, nil
-}
-
-// clientForConnection carries tenant admission into every backend operation,
-// including workflow reads and validation which do not use package caching.
-func (b *Backend) clientForConnection(ctx context.Context, cred backend.Credential, conn *codev1alpha1.Connection) (*gogithub.Client, error) {
-	return b.client(requestTenantContext(ctx, conn), cred, conn.Spec.BaseURL)
 }
 
 // owner resolves the account a repository is created/looked-up under: the
@@ -92,7 +85,7 @@ func owner(conn *codev1alpha1.Connection, repo *codev1alpha1.Repository) string 
 // ValidateConnection authenticates the token and returns the login + granted
 // scopes. GitHub reports token scopes on the X-OAuth-Scopes response header.
 func (b *Backend) ValidateConnection(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential) (string, []string, error) {
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return "", nil, err
 	}
@@ -111,7 +104,7 @@ func (b *Backend) ValidateConnection(ctx context.Context, conn *codev1alpha1.Con
 // EnsureRepository creates the repository if absent and returns its host
 // identifiers. Idempotent: an existing repo returns its current identifiers.
 func (b *Backend) EnsureRepository(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository) (backend.RepositoryResult, error) {
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.RepositoryResult{}, err
 	}
@@ -158,7 +151,7 @@ func (b *Backend) EnsureRepository(ctx context.Context, conn *codev1alpha1.Conne
 
 // DeleteRepository removes the repository. Idempotent: a missing repo is success.
 func (b *Backend) DeleteRepository(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository) error {
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return err
 	}
@@ -202,7 +195,7 @@ func (b *Backend) CommitFiles(ctx context.Context, conn *codev1alpha1.Connection
 	requestedEntries := entries
 	requestedFiles := files
 
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.RepositoryCommitResult{}, err
 	}
@@ -552,7 +545,7 @@ func commitURL(org string, repo *codev1alpha1.Repository, commit *gogithub.Commi
 // Idempotent on the key material: an already-registered identical key returns
 // its existing id rather than 422-ing.
 func (b *Backend) EnsureDeployKey(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, key *codev1alpha1.DeployKey, publicKey string) (backend.DeployKeyResult, error) {
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.DeployKeyResult{}, err
 	}
@@ -595,7 +588,7 @@ func (b *Backend) DeleteDeployKey(ctx context.Context, conn *codev1alpha1.Connec
 	if err != nil {
 		return fmt.Errorf("github: invalid deploy key id %q: %w", keyID, err)
 	}
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return err
 	}
@@ -613,7 +606,7 @@ func (b *Backend) DeleteDeployKey(ctx context.Context, conn *codev1alpha1.Connec
 // Pending is true when GitHub created an invitation the user must still accept
 // (the usual case for someone who is not already a member/collaborator).
 func (b *Backend) EnsureCollaborator(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, collab *codev1alpha1.Collaborator) (backend.CollaboratorResult, error) {
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.CollaboratorResult{}, err
 	}
@@ -638,7 +631,7 @@ func (b *Backend) EnsureCollaborator(ctx context.Context, conn *codev1alpha1.Con
 // RemoveCollaborator revokes the grant and cancels any pending invitation.
 // Idempotent.
 func (b *Backend) RemoveCollaborator(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, collab *codev1alpha1.Collaborator) error {
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return err
 	}
@@ -680,7 +673,7 @@ var packageTypes = []string{"container", "docker", "npm", "maven", "rubygems", "
 // — packages are created by pushing artifacts, not through this call.
 func (b *Backend) ListPackages(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository) ([]backend.PackageInfo, error) {
 	ctx = packageCacheContext(ctx, conn)
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return nil, err
 	}

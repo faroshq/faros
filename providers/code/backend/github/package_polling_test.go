@@ -326,7 +326,7 @@ func TestPollingCacheHostOwnerAndBounds(t *testing.T) {
 	}
 	cache.mu.Unlock()
 	for i := len(cache.states); i < maxRequestStates; i++ {
-		s, err := cache.acquire(context.WithValue(context.Background(), requestTenantKey{}, credentialHash(fmt.Sprint(i))), requestIdentity{credential: credentialHash(fmt.Sprint(i)), host: "test"})
+		s, err := cache.acquire(context.Background(), requestIdentity{credential: credentialHash(fmt.Sprint(i)), host: "test"})
 		if err != nil {
 			t.Fatal(err)
 		}

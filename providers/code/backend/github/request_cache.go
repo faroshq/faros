@@ -29,30 +29,17 @@ import (
 )
 
 const (
-	packageCacheTTL        = 2 * time.Minute
-	githubRequestTimeout   = 30 * time.Second
-	maxRequestStates       = 64
-	maxTenantRequestStates = 8
-	maxCachedResponses     = 256
-	maxCachedBytes         = 1 << 20 // per credential/host; at most 64 MiB per backend
+	packageCacheTTL      = 2 * time.Minute
+	githubRequestTimeout = 30 * time.Second
+	maxRequestStates     = 64
+	maxCachedResponses   = 256
+	maxCachedBytes       = 1 << 20 // per credential/host; at most 64 MiB per backend
 )
 
 type cacheTTLKey struct{}
 type cacheScopeKey struct{}
-type requestTenantKey struct{}
-
-// requestTenantContext uses kcp's authoritative logical cluster identity.
-// Incomplete objects fall back to Connection UID, never owner or token values.
-func requestTenantContext(ctx context.Context, conn *codev1alpha1.Connection) context.Context {
-	identity := conn.Annotations["kcp.io/cluster"]
-	if identity == "" {
-		identity = "connection:" + string(conn.UID)
-	}
-	return context.WithValue(ctx, requestTenantKey{}, sha256.Sum256([]byte(identity)))
-}
 
 func packageCacheContext(ctx context.Context, conn *codev1alpha1.Connection) context.Context {
-	ctx = requestTenantContext(ctx, conn)
 	// UID is globally unique in kcp. Include cluster/name for incomplete objects,
 	// and keep all tenant identity out of printable cache keys.
 	identity, _ := json.Marshal([]string{string(conn.UID), conn.Annotations["kcp.io/cluster"], conn.Namespace, conn.Name})
@@ -72,7 +59,6 @@ type requestIdentity struct {
 	host       string
 }
 type requestState struct {
-	tenant    [32]byte // tenant that admitted this shared credential/host state
 	gate      chan struct{}
 	lastUsed  time.Time // protected by requestCache.mu
 	users     int       // holders and waiters; protected by requestCache.mu
@@ -104,10 +90,6 @@ func (b *Backend) requestCache() *requestCache {
 func (c *requestCache) acquire(ctx context.Context, key requestIdentity) (*requestState, error) {
 	c.mu.Lock()
 	now := c.now()
-	tenant, _ := ctx.Value(requestTenantKey{}).([32]byte)
-	var tenantStates int
-	var tenantOldest *requestState
-	var tenantEvict requestIdentity
 	var oldest *requestState
 	var evict requestIdentity
 	for k, s := range c.states {
@@ -119,27 +101,12 @@ func (c *requestCache) acquire(ctx context.Context, key requestIdentity) (*reque
 				oldest = s
 				evict = k
 			}
-			if c.states[k] != nil && s.tenant == tenant && s.users == 0 && len(s.listings) == 0 && !now.Before(s.until) && (tenantOldest == nil || s.lastUsed.Before(tenantOldest.lastUsed)) {
-				tenantOldest, tenantEvict = s, k
-			}
 			s.gate <- struct{}{}
 		default:
-		}
-		if c.states[k] != nil && s.tenant == tenant {
-			tenantStates++
 		}
 	}
 	s := c.states[key]
 	if s == nil {
-		// Reuse this tenant's idle slots before consuming global capacity. A
-		// tenant with only busy/throttled slots cannot displace another tenant.
-		if tenantStates >= maxTenantRequestStates {
-			if tenantOldest == nil {
-				c.mu.Unlock()
-				return nil, fmt.Errorf("github: tenant request budget capacity reached; retry later")
-			}
-			delete(c.states, tenantEvict)
-		}
 		if len(c.states) >= maxRequestStates && oldest != nil {
 			delete(c.states, evict)
 		}
@@ -147,7 +114,7 @@ func (c *requestCache) acquire(ctx context.Context, key requestIdentity) (*reque
 			c.mu.Unlock()
 			return nil, fmt.Errorf("github: request budget capacity reached; retry later")
 		}
-		s = &requestState{tenant: tenant, gate: make(chan struct{}, 1), responses: make(map[[32]byte]cachedResponse)}
+		s = &requestState{gate: make(chan struct{}, 1), responses: make(map[[32]byte]cachedResponse)}
 		s.gate <- struct{}{}
 		c.states[key] = s
 	}
@@ -171,7 +138,6 @@ type sharedTransport struct {
 	base       http.RoundTripper
 	cache      *requestCache
 	credential [32]byte
-	tenant     [32]byte
 }
 
 // release drops a reservation and releases its request gate.
@@ -186,7 +152,7 @@ func (c *requestCache) release(s *requestState) {
 func (t *sharedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	c := t.cache
 	identity := requestIdentity{t.credential, req.URL.Scheme + "://" + req.URL.Host}
-	s, err := c.acquire(context.WithValue(req.Context(), requestTenantKey{}, t.tenant), identity)
+	s, err := c.acquire(req.Context(), identity)
 	if err != nil {
 		return nil, err
 	}

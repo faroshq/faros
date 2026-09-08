@@ -37,7 +37,7 @@ const (
 // anything beyond the caps are skipped and reported, never errors — a partial
 // text checkout is the contract (backend.RepositoryReader).
 func (b *Backend) CheckoutFiles(ctx context.Context, conn *codev1alpha1.Connection, cred backend.Credential, repo *codev1alpha1.Repository, input backend.RepositoryCheckoutInput) (backend.RepositoryCheckoutResult, error) {
-	c, err := b.clientForConnection(ctx, cred, conn)
+	c, err := b.client(ctx, cred, conn.Spec.BaseURL)
 	if err != nil {
 		return backend.RepositoryCheckoutResult{}, err
 	}
