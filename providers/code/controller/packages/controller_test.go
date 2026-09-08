@@ -12,13 +12,22 @@ package packages
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"sort"
 	"testing"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/cluster"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	mcmanager "sigs.k8s.io/multicluster-runtime/pkg/manager"
+	"sigs.k8s.io/multicluster-runtime/pkg/multicluster"
+	mcreconcile "sigs.k8s.io/multicluster-runtime/pkg/reconcile"
 
 	codev1alpha1 "github.com/faroshq/provider-code/apis/v1alpha1"
 	"github.com/faroshq/provider-code/backend"
@@ -180,4 +189,84 @@ func names(pkgs []codev1alpha1.Package) []string {
 		out[i] = p.Status.PackageName
 	}
 	return out
+}
+
+type pollingManager struct {
+	mcmanager.Manager
+	c client.Client
+}
+
+func (m pollingManager) GetCluster(context.Context, multicluster.ClusterName) (cluster.Cluster, error) {
+	return pollingCluster{c: m.c}, nil
+}
+
+type pollingCluster struct {
+	cluster.Cluster
+	c client.Client
+}
+
+func (c pollingCluster) GetClient() client.Client { return c.c }
+
+type pollingLister struct {
+	backend.GitBackend
+	infos []backend.PackageInfo
+	err   error
+	calls int
+}
+
+func (b *pollingLister) Name() string { return "github" }
+func (b *pollingLister) ListPackages(context.Context, *codev1alpha1.Connection, backend.Credential, *codev1alpha1.Repository) ([]backend.PackageInfo, error) {
+	b.calls++
+	return b.infos, b.err
+}
+
+func TestReconcileRetainsLastKnownPackagesOnFailureAndRecovers(t *testing.T) {
+	repo := testRepo()
+	conn := &codev1alpha1.Connection{ObjectMeta: metav1.ObjectMeta{Name: "conn"}, Spec: codev1alpha1.ConnectionSpec{Provider: codev1alpha1.ProviderGitHub, SecretRef: codev1alpha1.LocalSecretReference{Name: "credential", Namespace: "default", Key: "token"}}}
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "credential", Namespace: "default"}, Data: map[string][]byte{"token": []byte("test-token")}}
+	c := newFakeClient(repo, conn, secret)
+	b := &pollingLister{infos: []backend.PackageInfo{{Name: "image", Type: "container", Versions: []backend.PackageVersion{{Digest: "sha256:known", Tags: []string{"latest"}}}}}}
+	registry := backend.NewRegistry()
+	if err := registry.Register(b); err != nil {
+		t.Fatal(err)
+	}
+	r := &Reconciler{Manager: pollingManager{c: c}, Backends: registry, CrawlInterval: defaultCrawlInterval}
+	req := mcreconcile.Request{Request: reconcile.Request{NamespacedName: types.NamespacedName{Name: repo.Name}}}
+	ctx := context.Background()
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	before := listPackages(t, c, repo.Name)
+	if len(before) != 1 {
+		t.Fatal("initial crawl did not create Package")
+	}
+	b.err = errors.New("transient version lookup failure")
+	b.infos = nil
+	result, err := r.Reconcile(ctx, req)
+	if err != nil || result.RequeueAfter != defaultCrawlInterval || b.calls != 2 {
+		t.Fatalf("retry=%v err=%v calls=%d", result, err, b.calls)
+	}
+	after := listPackages(t, c, repo.Name)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("failed crawl changed last known state: before=%v after=%v", before, after)
+	}
+	b.err = nil
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if got := listPackages(t, c, repo.Name); len(got) != 0 {
+		t.Fatal("successful empty refresh did not remove stale package")
+	}
+}
+
+func TestCrawlIntervalDefaultsAndOverride(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+	}{{"", 2 * time.Minute}, {"invalid", 2 * time.Minute}, {"-1s", 2 * time.Minute}, {"30s", 30 * time.Second}} {
+		t.Setenv("CODE_PACKAGE_CRAWL_INTERVAL", tc.raw)
+		if got := crawlIntervalFromEnv(); got != tc.want {
+			t.Fatalf("interval(%q)=%s want %s", tc.raw, got, tc.want)
+		}
+	}
 }
