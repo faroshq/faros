@@ -380,6 +380,10 @@ codegen-databricks-provider: $(CONTROLLER_GEN) $(KCP_APIGEN_GEN) ## Codegen for 
 test:
 	go test $(shell go list ./... | grep -v '/test/e2e')
 
+.PHONY: test-tilt-sandbox-default
+test-tilt-sandbox-default: ## Verify universal sandbox is opt-in in Tilt
+	python3 hack/scripts/verify-tilt-sandbox-default.test.py
+
 test-util:
 	go test ./pkg/util/...
 
