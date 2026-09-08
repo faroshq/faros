@@ -174,7 +174,7 @@ func TestStalledResponseTimesOutAndReleasesSharedGate(t *testing.T) {
 		if slow.Client().Timeout != githubRequestTimeout {
 			t.Fatalf("timeout=%s", slow.Client().Timeout)
 		}
-		// Stall inside a paginated refresh while it holds the credential lease.
+		// Stall inside a paginated refresh while reading a response body.
 		done := make(chan error, 1)
 		go func() {
 			_, err := b.ListPackages(ctx, pollingConnection("https://example.test"), cred, pollingRepo("demo"))
@@ -201,4 +201,156 @@ func TestStalledResponseTimesOutAndReleasesSharedGate(t *testing.T) {
 			t.Fatalf("shared gate did not recover: %v", err)
 		}
 	})
+}
+
+func TestHealthyPaginationDoesNotStarveOtherAPICalls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		firstPageStarted := make(chan struct{})
+		base := pollingRoundTripper(func(r *http.Request) (*http.Response, error) {
+			headers := http.Header{}
+			body := `[]`
+			if r.URL.Path == "/api/v3/users/alice" {
+				body = `{"type":"User"}`
+			}
+			if r.URL.Query().Get("package_type") == "container" {
+				if r.URL.Query().Get("page") == "" {
+					close(firstPageStarted)
+					headers.Set("Link", `<https://example.test/api/v3/users/alice/packages?package_type=container&page=2&per_page=100>; rel="next"`)
+				}
+				// Both pages finish within the per-request timeout. No stalled request.
+				time.Sleep(20 * time.Second)
+			}
+			return &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		})
+		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: base})
+		b := New()
+		cred := backend.Credential{Token: "mock"}
+		done := make(chan error, 1)
+		go func() {
+			_, err := b.ListPackages(ctx, pollingConnection("https://example.test"), cred, pollingRepo("demo"))
+			done <- err
+		}()
+		<-firstPageStarted
+		time.Sleep(time.Second)
+		client, err := b.client(ctx, cred, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, fastErr := client.Client().Get("https://example.test/fast")
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("listing itself failed: %v", err)
+		}
+		if fastErr != nil {
+			t.Fatalf("unrelated API call timed out behind healthy pagination: %v", fastErr)
+		}
+	})
+}
+
+func TestListingRefreshCoalescesWithoutHoldingRequestGate(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		t.Run(fmt.Sprint("failed=", failed), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				b := New()
+				cred := backend.Credential{Token: "mock"}
+				ctx := packageCacheContext(context.Background(), pollingConnection("https://example.test"))
+				client, err := b.client(ctx, cred, "https://example.test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				started, finish := make(chan struct{}), make(chan struct{})
+				calls := 0
+				failure := errors.New("page two failed")
+				fetch := func(context.Context) ([]string, error) {
+					calls++
+					if calls == 1 {
+						close(started)
+						<-finish
+					}
+					if failed {
+						return nil, failure
+					}
+					return []string{"original"}, nil
+				}
+				type outcome struct {
+					values []string
+					err    error
+				}
+				run := func(ctx context.Context, done chan<- outcome) {
+					values, err := cachedPackageListing(ctx, b, client, cred, []string{"packages", "alice", "npm"}, fetch)
+					done <- outcome{values, err}
+				}
+				leader, waiter, cancelled := make(chan outcome, 1), make(chan outcome, 1), make(chan outcome, 1)
+				go run(ctx, leader)
+				<-started
+				go run(ctx, waiter)
+				cancelCtx, cancel := context.WithCancel(ctx)
+				go run(cancelCtx, cancelled)
+				synctest.Wait()
+				cancel()
+				if got := <-cancelled; !errors.Is(got.err, context.Canceled) {
+					t.Fatalf("waiter cancellation: %v", got.err)
+				}
+				cache := b.requestCache()
+				identity := requestIdentity{credentialHash(cred.Token), "https://example.test"}
+				// Cache pressure must not evict a refresh while its HTTP gate is free.
+				cache.mu.Lock()
+				original := cache.states[identity]
+				cache.mu.Unlock()
+				for i := 0; i < maxRequestStates; i++ {
+					state, err := cache.acquire(ctx, requestIdentity{credentialHash(fmt.Sprint(i)), identity.host})
+					if err != nil {
+						t.Fatal(err)
+					}
+					cache.release(state)
+				}
+				state, err := cache.acquire(ctx, identity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state != original {
+					t.Fatal("evicted active listing")
+				}
+				cache.release(state)
+				close(finish)
+				first, second := <-leader, <-waiter
+				if calls != 1 {
+					t.Fatalf("concurrent refreshes=%d want 1", calls)
+				}
+				if failed {
+					if !errors.Is(first.err, failure) || !errors.Is(second.err, failure) {
+						t.Fatalf("failure not shared: %v %v", first.err, second.err)
+					}
+					// Failures are not cached; a later reconciliation gets a fresh attempt.
+					run(ctx, leader)
+					if got := <-leader; !errors.Is(got.err, failure) || calls != 2 {
+						t.Fatalf("retry: %v calls=%d", got.err, calls)
+					}
+				} else {
+					if first.err != nil || second.err != nil {
+						t.Fatalf("refresh: %v %v", first.err, second.err)
+					}
+					first.values[0] = "mutated"
+					if second.values[0] != "original" {
+						t.Fatal("waiter shares mutable result")
+					}
+					run(ctx, leader)
+					if got := <-leader; got.err != nil || got.values[0] != "original" || calls != 1 {
+						t.Fatalf("cached result: %+v calls=%d", got, calls)
+					}
+				}
+				state, err = cache.acquire(ctx, identity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				remaining := len(state.listings)
+				cache.release(state)
+				if remaining != 0 {
+					t.Fatalf("retained %d completed refreshes", remaining)
+				}
+			})
+		})
+	}
 }

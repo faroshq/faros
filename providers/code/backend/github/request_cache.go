@@ -64,6 +64,7 @@ type requestState struct {
 	users     int       // holders and waiters; protected by requestCache.mu
 	until     time.Time // protected by gate
 	backoff   time.Duration
+	listings  map[[32]byte]*listingFlight // protected by gate; pins state during refresh
 	responses map[[32]byte]cachedResponse
 	bytes     int
 }
@@ -94,9 +95,9 @@ func (c *requestCache) acquire(ctx context.Context, key requestIdentity) (*reque
 	for k, s := range c.states {
 		select {
 		case <-s.gate:
-			if s.users == 0 && now.Sub(s.lastUsed) >= time.Hour && !now.Before(s.until) {
+			if s.users == 0 && len(s.listings) == 0 && now.Sub(s.lastUsed) >= time.Hour && !now.Before(s.until) {
 				delete(c.states, k)
-			} else if s.users == 0 && !now.Before(s.until) && (oldest == nil || s.lastUsed.Before(oldest.lastUsed)) {
+			} else if s.users == 0 && len(s.listings) == 0 && !now.Before(s.until) && (oldest == nil || s.lastUsed.Before(oldest.lastUsed)) {
 				oldest = s
 				evict = k
 			}
@@ -151,19 +152,11 @@ func (c *requestCache) release(s *requestState) {
 func (t *sharedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	c := t.cache
 	identity := requestIdentity{t.credential, req.URL.Scheme + "://" + req.URL.Host}
-	lease, _ := req.Context().Value(listingLeaseKey{}).(*listingLease)
-	var s *requestState
-	if lease != nil && lease.cache == c && lease.identity == identity {
-		// A complete paginated refresh already holds this credential's gate.
-		s = lease.state
-	} else {
-		var err error
-		s, err = c.acquire(req.Context(), identity)
-		if err != nil {
-			return nil, err
-		}
-		defer c.release(s)
+	s, err := c.acquire(req.Context(), identity)
+	if err != nil {
+		return nil, err
 	}
+	defer c.release(s)
 	now := c.now()
 	ttl, _ := req.Context().Value(cacheTTLKey{}).(time.Duration)
 	scope, _ := req.Context().Value(cacheScopeKey{}).([32]byte)

@@ -299,7 +299,9 @@ a new artifact can take roughly 4.5 minutes to reach a particular Repository's
 Package CRs if another repository refreshed the shared listing just before publish.
 
 GitHub API calls through the backend's go-github client, including workflow
-build-status reads, share a serialized request gate per credential and host. Primary exhaustion
+build-status reads, share a serialized request gate per credential and host.
+Complete listing refreshes coalesce separately, releasing that gate between
+pages so a long crawl does not monopolize other API operations. Primary exhaustion
 pauses network requests until reset (plus one second); secondary throttling uses
 `Retry-After`, or exponential delays from one minute up to fifteen minutes when
 that header is absent. The backend returns a typed `RateLimitError` with an
@@ -310,6 +312,10 @@ crawls keep the normal polling interval and jitter. Listing or version failures
 leave the last successful Package CR state intact. The shared GitHub gate still
 enforces throttling if resource events trigger reconciliation before a scheduled
 retry, or another repository/controller uses the same credential.
+Connection spec changes and credential Secret create/update/delete events
+enqueue affected repositories in the same tenant immediately, including during
+a reset delay. Secret matching respects the configured default namespace. A
+rotated token therefore selects fresh backend state on the next reconciliation.
 Fresh cached listings may still be used while the network gate is paused.
 Paginated refreshes fetch every page anew and publish only on complete success;
 failed refreshes never leave independently reusable pages behind. Each GitHub

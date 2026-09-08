@@ -214,11 +214,13 @@ type pollingLister struct {
 	infos []backend.PackageInfo
 	err   error
 	calls int
+	token string
 }
 
 func (b *pollingLister) Name() string { return "github" }
-func (b *pollingLister) ListPackages(context.Context, *codev1alpha1.Connection, backend.Credential, *codev1alpha1.Repository) ([]backend.PackageInfo, error) {
+func (b *pollingLister) ListPackages(_ context.Context, _ *codev1alpha1.Connection, cred backend.Credential, _ *codev1alpha1.Repository) ([]backend.PackageInfo, error) {
 	b.calls++
+	b.token = cred.Token
 	return b.infos, b.err
 }
 
