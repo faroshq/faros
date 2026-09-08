@@ -302,8 +302,14 @@ GitHub API calls through the backend's go-github client, including workflow
 build-status reads, share a serialized request gate per credential and host. Primary exhaustion
 pauses network requests until reset (plus one second); secondary throttling uses
 `Retry-After`, or exponential delays from one minute up to fifteen minutes when
-that header is absent. Reconciliation remains eventual: a later crawl retries,
-and listing or version failures leave the last successful Package CR state intact.
+that header is absent. The backend returns a typed `RateLimitError` with an
+absolute `RetryAt` deadline. The package controller schedules `RequeueAfter`
+until that deadline; it returns other host or credential-resolution failures
+as errors for controller-runtime's exponential workqueue backoff. Successful
+crawls keep the normal polling interval and jitter. Listing or version failures
+leave the last successful Package CR state intact. The shared GitHub gate still
+enforces throttling if resource events trigger reconciliation before a scheduled
+retry, or another repository/controller uses the same credential.
 Fresh cached listings may still be used while the network gate is paused.
 Paginated refreshes fetch every page anew and publish only on complete success;
 failed refreshes never leave independently reusable pages behind. Each GitHub

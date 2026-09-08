@@ -58,7 +58,7 @@ func cachedPackageListing[T any](ctx context.Context, b *Backend, client *gogith
 	ctx = context.WithValue(ctx, cacheTTLKey{}, time.Duration(0))
 	result, err := fetch(ctx)
 	if err != nil {
-		return nil, err
+		return nil, state.retryError(err, cache.now())
 	}
 	body, err := json.Marshal(result)
 	if err != nil {

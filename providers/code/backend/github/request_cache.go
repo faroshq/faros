@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	codev1alpha1 "github.com/faroshq/provider-code/apis/v1alpha1"
+	"github.com/faroshq/provider-code/backend"
 )
 
 const (
@@ -173,7 +175,7 @@ func (t *sharedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	if now.Before(s.until) {
-		return nil, fmt.Errorf("github: requests paused until %s", s.until.UTC().Format(time.RFC3339))
+		return nil, &backend.RateLimitError{RetryAt: s.until}
 	}
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
@@ -189,12 +191,17 @@ func (t *sharedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		body, err = io.ReadAll(io.LimitReader(resp.Body, maxCachedBytes+1))
 		if err != nil {
 			_ = resp.Body.Close()
-			return nil, err
+			return nil, s.retryError(err, c.now())
 		}
 		resp.Body = &replayBody{Reader: io.MultiReader(bytes.NewReader(body), resp.Body), Closer: resp.Body}
 	}
+	throttled := headerThrottle
 	if !headerThrottle {
-		s.observe(resp, body, observedAt)
+		throttled = s.observe(resp, body, observedAt)
+	}
+	if throttled {
+		_ = resp.Body.Close()
+		return nil, &backend.RateLimitError{RetryAt: s.until, Err: fmt.Errorf("github: rate limited (HTTP %d)", resp.StatusCode)}
 	}
 	if resp.StatusCode == 200 && req.Method == http.MethodGet && ttl > 0 && len(body) <= maxCachedBytes {
 		s.store(key, cachedResponse{resp.StatusCode, resp.Header.Clone(), body, c.now().Add(ttl)})
@@ -275,4 +282,14 @@ func (s *requestState) store(key [32]byte, value cachedResponse) {
 	}
 	s.responses[key] = value
 	s.bytes += len(value.body)
+}
+
+// Decode failures and go-github's own preflight rate checks can occur after
+// RoundTrip. Preserve the shared deadline when those fail a paginated refresh.
+func (s *requestState) retryError(err error, now time.Time) error {
+	var limited *backend.RateLimitError
+	if err != nil && now.Before(s.until) && !errors.As(err, &limited) {
+		return &backend.RateLimitError{RetryAt: s.until, Err: err}
+	}
+	return err
 }

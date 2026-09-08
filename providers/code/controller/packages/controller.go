@@ -25,6 +25,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -105,12 +106,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	}
 
 	// Resolve the backend + credential the same way the repository reconciler
-	// does. Any gap (wrong connectionRef, unknown provider, missing credential)
-	// is transient for a crawler: log and retry next interval, never fail hard.
+	// does. Resolution failures use the controller's workqueue retry backoff.
 	conn, err := shared.ResolveConnection(ctx, c, repo.Spec.ConnectionRef)
 	if err != nil {
-		logger.V(4).Info("packages: connection not resolvable yet, will retry", "reason", err.Error())
-		return ctrl.Result{RequeueAfter: r.CrawlInterval}, nil
+		return ctrl.Result{}, err
 	}
 	b, ok := r.Backends.Get(string(conn.Spec.Provider))
 	if !ok {
@@ -128,15 +127,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req mcreconcile.Request) (ct
 	}
 	cred, err := shared.ResolveCredential(ctx, c, conn)
 	if err != nil {
-		logger.V(4).Info("packages: credential not available yet, will retry", "reason", err.Error())
-		return ctrl.Result{RequeueAfter: r.CrawlInterval}, nil
+		return ctrl.Result{}, err
 	}
 
 	infos, err := lister.ListPackages(ctx, conn, cred, &repo)
 	if err != nil {
-		// Host error (throttle, transient): keep what we have, retry next pass.
-		logger.V(2).Info("packages: host list failed, will retry", "error", err.Error())
-		return ctrl.Result{RequeueAfter: r.CrawlInterval}, nil
+		// Preserve observed state. Known host deadlines are scheduled explicitly;
+		// other failures use controller-runtime's exponential workqueue retry.
+		var limited *backend.RateLimitError
+		if errors.As(err, &limited) {
+			return ctrl.Result{RequeueAfter: max(time.Until(limited.RetryAt), time.Second)}, nil
+		}
+		return ctrl.Result{}, err
 	}
 
 	if err := r.sync(ctx, c, &repo, infos); err != nil {

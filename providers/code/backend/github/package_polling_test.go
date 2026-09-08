@@ -13,6 +13,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -246,14 +247,20 @@ func TestPackageThrottleSharedWithWorkflowAndRecovery(t *testing.T) {
 			defer srv.Close()
 			conn := pollingConnection(srv.URL)
 			cred := backend.Credential{Token: "token"}
-			if _, err := b.ListPackages(context.Background(), conn, cred, pollingRepo("demo")); err == nil {
-				t.Fatal("expected throttle")
+			wait := 5 * time.Minute
+			if kind == "primary" || kind == "success-exhausted" {
+				wait += time.Second
 			}
+			if kind == "secondary-fallback" {
+				wait = time.Minute
+			}
+			retryAt := clock.now().Add(wait)
+			_, err := b.ListPackages(context.Background(), conn, cred, pollingRepo("demo"))
+			assertRetryAt(t, err, retryAt)
 			query := backend.WorkflowRunQuery{WorkflowFileName: "build.yml"}
 			for i := 0; i < 5; i++ {
-				if _, err := b.LatestWorkflowRun(context.Background(), conn, cred, pollingRepo("demo"), query); err == nil {
-					t.Fatal("expected shared throttle")
-				}
+				_, err := b.LatestWorkflowRun(context.Background(), conn, cred, pollingRepo("demo"), query)
+				assertRetryAt(t, err, retryAt)
 			}
 			if calls.Load() != 1 {
 				t.Fatalf("requests while throttled=%d", calls.Load())
@@ -264,13 +271,6 @@ func TestPackageThrottleSharedWithWorkflowAndRecovery(t *testing.T) {
 			}
 			if calls.Load() != 1 {
 				t.Fatal("early network request")
-			}
-			wait := 5 * time.Minute
-			if kind == "primary" || kind == "success-exhausted" {
-				wait += time.Second
-			}
-			if kind == "secondary-fallback" {
-				wait = time.Minute
 			}
 			clock.advance(wait - 31*time.Second)
 			if _, err := b.LatestWorkflowRun(context.Background(), conn, cred, pollingRepo("demo"), query); err == nil || calls.Load() != 1 {
@@ -486,5 +486,13 @@ func TestPollingPermissionErrorDoesNotThrottle(t *testing.T) {
 	s.observe(&http.Response{StatusCode: 403, Header: http.Header{}}, []byte(`{"message":"Resource not accessible by integration"}`), now)
 	if !s.until.IsZero() {
 		t.Fatal("permission error treated as throttling")
+	}
+}
+
+func assertRetryAt(t *testing.T, err error, want time.Time) {
+	t.Helper()
+	var limited *backend.RateLimitError
+	if !errors.As(err, &limited) || !limited.RetryAt.Equal(want) {
+		t.Fatalf("error=%v, want typed retry at %s", err, want)
 	}
 }

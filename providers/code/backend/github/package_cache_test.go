@@ -12,6 +12,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,9 +53,15 @@ func TestThrottleHeadersSurviveBodyFailure(t *testing.T) {
 			})}
 			ctx := packageCacheContext(context.Background(), pollingConnection("https://example.test"))
 			req, _ := http.NewRequestWithContext(ctx, "GET", "https://example.test/packages", nil)
+			retryAt := clock.now().Add(5 * time.Minute)
+			if status != http.StatusTooManyRequests {
+				retryAt = retryAt.Add(time.Second)
+			}
 			for i := 0; i < 2; i++ {
-				if _, err := transport.RoundTrip(req); err == nil {
-					t.Fatal("expected error")
+				_, err := transport.RoundTrip(req)
+				assertRetryAt(t, err, retryAt)
+				if i == 0 && !errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Fatalf("lost body failure cause: %v", err)
 				}
 			}
 			if calls != 1 {
