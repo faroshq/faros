@@ -10687,7 +10687,8 @@ function isMissingCodeConnectionError(value: string | null): boolean {
                     <Globe class="h-4 w-4 shrink-0 text-text-muted" :stroke-width="1.75" />
                     <h3 class="text-[15px] font-semibold text-text-primary">Production</h3>
                   </div>
-                  <p class="mt-1 max-w-2xl text-[13px] leading-5 text-text-secondary">{{ productionOverviewDescription }}</p>
+                  <p class="mt-1 max-w-2xl text-[13px] leading-5 text-text-secondary">{{ selected?.repository?.ref ? productionOverviewDescription : 'Build and preview without Git. Production publishing requires a connected repository, a Git commit, and a successful build.' }}</p>
+                  <button v-if="selected && !selected.repository?.ref" type="button" class="k-btn k-btn--primary mt-3" @click="openSettings">Connect Git</button>
                 </div>
                 <StatusBadge :status="productionOverview.label" :tone="productionOverview.tone" />
               </div>

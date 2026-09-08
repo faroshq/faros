@@ -30,7 +30,7 @@ test('keeps first-time setup separate from the project prompt', async () => {
   assert.doesNotMatch(html, /Connect an AI model/)
   assert.match(html, /aria-current="step"/)
   assert.match(html, /Skip for now/)
-  assert.match(html, /Back up your source and track changes in Git/)
+  assert.match(html, /Git backs up your source and tracks changes/)
   assert.doesNotMatch(html, /What are we building|Describe what you want to build|<textarea/)
 })
 
@@ -119,7 +119,7 @@ test('Git choice precedes model setup even while model settings load', async () 
   const model = await render({ gitSkipped: true })
   assert.match(model, /Connect AI model/)
   assert.match(model, /Required/)
-  assert.doesNotMatch(model, /Back up your source and track changes in Git/)
+  assert.doesNotMatch(model, /Git backs up your source and tracks changes/)
 })
 
 test('revisiting Git clears only this user and workspace skip choice', async () => {
@@ -149,4 +149,13 @@ test('revisiting Git clears only this user and workspace skip choice', async () 
   }
   assert.match(await render({ gitSkipped: true }), /Back to Git/)
   assert.doesNotMatch(await render(), /Back to Git/)
+})
+
+test('explains development without Git and production prerequisites before skipping', async () => {
+  for (const gitError of ['', 'Connection unavailable']) {
+    const html = await render({ gitError })
+    assert.match(html, /Development environments work without Git; publishing to production requires it/)
+    assert.match(html, /Skip for now/)
+  }
+  assert.match(await render(), /skip for now and connect it later/)
 })
