@@ -300,7 +300,7 @@ func TestListingRefreshCoalescesWithoutHoldingRequestGate(t *testing.T) {
 				original := cache.states[identity]
 				cache.mu.Unlock()
 				for i := 0; i < maxRequestStates; i++ {
-					state, err := cache.acquire(ctx, requestIdentity{credentialHash(fmt.Sprint(i)), identity.host})
+					state, err := cache.acquire(context.WithValue(ctx, requestTenantKey{}, credentialHash(fmt.Sprint(i))), requestIdentity{credentialHash(fmt.Sprint(i)), identity.host})
 					if err != nil {
 						t.Fatal(err)
 					}

@@ -323,9 +323,21 @@ HTTP request has a 30-second timeout (including gate waits and response reads),
 so a stalled response releases the gate. Throttle headers are recorded before
 reading the body, including when the body is truncated or times out.
 
-Caches are process-local: replicas, different tokens for the same GitHub user,
+Caches and throttle deadlines are process-local and reset after a process restart
+or failover to another replica. Existing controller leader election limits active
+controller crawlers, but does not coordinate HTTP callers across replicas.
+Replicas, different tokens for the same GitHub user,
 and other GitHub clients do not share a budget. There are at most 64 credential/
 host states, each with at most 256 cached entries and 1 MiB of serialized entry data.
+A tenant may admit at most eight credential/host states. Admission uses kcp's
+logical-cluster identity across all GitHub operations, including workflow reads;
+Connection UID is the fallback for incomplete objects. At the tenant limit, a
+new credential replaces that tenant's oldest idle, unthrottled state or fails
+locally. One tenant therefore cannot occupy all 64 states with throttled tokens.
+A shared credential's state is charged to the tenant that first admitted it;
+other tenants reusing that exact credential still share its GitHub throttle.
+The global bound remains: multiple tenants can collectively exhaust capacity.
+This is bounded admission protection, not a per-tenant CPU or request-rate quota.
 Oversized listings are fetched normally but not cached. Idle states are reclaimed
 on subsequent requests after an hour, except while a throttle is active. At state
 capacity, the oldest idle, unthrottled state is evicted. If every slot is busy or
