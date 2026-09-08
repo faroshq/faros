@@ -77,7 +77,7 @@ func (r *Reconciler) ensureRepository(ctx context.Context, c client.Client, p *a
 		"metadata": map[string]any{
 			"name":        b.RepositoryRef,
 			"labels":      map[string]any{projectRepositoryLabel: p.Name},
-			"annotations": map[string]any{projectRepositoryLabel: p.Name, projectRepositoryUIDAnnotation: string(p.UID)},
+			"annotations": map[string]any{projectRepositoryLabel: p.Name, projectRepositoryUIDAnnotation: string(p.UID), "code.faros.sh/create-only": "true"},
 		},
 		"spec": map[string]any{
 			"connectionRef": b.ConnectionRef,

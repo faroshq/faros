@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	asclient "github.com/faroshq/provider-app-studio/client"
@@ -65,7 +66,9 @@ func (s *Server) putProjectRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ConnectionRef string `json:"connectionRef"`
+		ConnectionRef      string `json:"connectionRef"`
+		RetryRepositoryRef string `json:"retryRepositoryRef,omitempty"`
+		ProjectUID         string `json:"projectUID,omitempty"`
 	}
 	if !decodeStrictJSON(w, r, &req) {
 		return
@@ -75,15 +78,32 @@ func (s *Server) putProjectRepository(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, newValidationError("connectionRef is required"))
 		return
 	}
-	if p.Spec.Repository != nil {
+	retry := req.RetryRepositoryRef != ""
+	if retry {
+		if req.ProjectUID == "" || req.ProjectUID != string(p.UID) || p.Spec.Repository == nil || p.Spec.Repository.RepositoryRef != req.RetryRepositoryRef || p.Spec.Repository.ConnectionRef != req.ConnectionRef {
+			writeStatus(w, http.StatusConflict, "Conflict", "Project Git setup changed; refresh before retrying.")
+			return
+		}
+		repo, err := c.Resource(codeRepositoryResource, "").Get(r.Context(), req.RetryRepositoryRef, metav1.GetOptions{})
+		if err != nil {
+			writeProjectError(w, err)
+			return
+		}
+		if !projectRepositoryCreationRetryable(p, repo) {
+			writeStatus(w, http.StatusConflict, "Conflict", "Only an unconfirmed repository creation can be retried with a new name.")
+			return
+		}
+	}
+	if p.Spec.Repository != nil && !retry {
 		if p.Spec.Repository.ConnectionRef != req.ConnectionRef || p.Spec.Repository.Adopted {
 			writeStatus(w, http.StatusConflict, "Conflict", "This project already has a repository; it cannot be replaced here.")
 			return
 		}
 	} else {
-		// Project names are unique within the workspace; display names are not.
-		// Reserve distinct intent even before either Repository CR is reconciled.
-		plan, err := s.prepareProjectRepository(r.Context(), c, req.ConnectionRef, p.Name, p.Spec.DisplayName, p.Spec.Description)
+		// Reserve a fresh name across workspaces and project incarnations. The
+		// Code provider also enforces create-only intent against remote collisions.
+		name := dns1123LabelWithSuffix(p.Name, uuid.NewString()[:8])
+		plan, err := s.prepareProjectRepository(r.Context(), c, req.ConnectionRef, name, p.Spec.DisplayName, p.Spec.Description)
 		if err != nil {
 			writeProjectError(w, err)
 			return

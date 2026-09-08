@@ -138,16 +138,17 @@ type ProjectProviderBindingView struct {
 }
 
 type ProjectRepositoryView struct {
-	Ref           string                        `json:"ref"`
-	Name          string                        `json:"name,omitempty"`
-	ConnectionRef string                        `json:"connectionRef,omitempty"`
-	HTMLURL       string                        `json:"htmlURL,omitempty"`
-	Status        string                        `json:"status,omitempty"`
-	Message       string                        `json:"message,omitempty"`
-	Ready         bool                          `json:"ready,omitempty"`
-	Commits       []ProjectRepositoryCommitView `json:"commits,omitempty"`
-	CommitsError  string                        `json:"commitsError,omitempty"`
-	commitsErr    error
+	CanRetryCreation bool                          `json:"canRetryCreation,omitempty"`
+	Ref              string                        `json:"ref"`
+	Name             string                        `json:"name,omitempty"`
+	ConnectionRef    string                        `json:"connectionRef,omitempty"`
+	HTMLURL          string                        `json:"htmlURL,omitempty"`
+	Status           string                        `json:"status,omitempty"`
+	Message          string                        `json:"message,omitempty"`
+	Ready            bool                          `json:"ready,omitempty"`
+	Commits          []ProjectRepositoryCommitView `json:"commits,omitempty"`
+	CommitsError     string                        `json:"commitsError,omitempty"`
+	commitsErr       error
 }
 
 type ProjectRepositoryCommitView struct {

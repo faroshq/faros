@@ -385,6 +385,7 @@ func projectRepositoryViewFromResources(ctx context.Context, p *aiv1alpha1.Proje
 	if connectionRef, _, _ := unstructured.NestedString(repo.Object, "spec", "connectionRef"); connectionRef != "" {
 		view.ConnectionRef = connectionRef
 	}
+	view.CanRetryCreation = projectRepositoryCreationRetryable(p, repo)
 	view.HTMLURL, _, _ = unstructured.NestedString(repo.Object, "status", "htmlURL")
 	if view.ConnectionRef == "" {
 		view.Status = projectRepositoryStatusConnectionMissing

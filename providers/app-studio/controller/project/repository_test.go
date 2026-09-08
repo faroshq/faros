@@ -54,6 +54,9 @@ func TestEnsureRepositoryCreatesForNonAdopted(t *testing.T) {
 	if got.GetLabels()[projectRepositoryLabel] != "demo" {
 		t.Fatalf("labels = %v, want %s=demo", got.GetLabels(), projectRepositoryLabel)
 	}
+	if got.GetAnnotations()["code.faros.sh/create-only"] != "true" {
+		t.Fatal("new repositories must require creation, never remote adoption")
+	}
 	autoInit, _, _ := unstructured.NestedBool(got.Object, "spec", "autoInit")
 	if !autoInit {
 		t.Fatalf("spec.autoInit not set")

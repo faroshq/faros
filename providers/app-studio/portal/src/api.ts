@@ -450,8 +450,8 @@ export const api = {
     return body.items ?? []
   },
 
-  async connectProjectRepository(ctx: FarosContext | null, project: string, connectionRef: string): Promise<Project> {
-    return request<Project>(ctx, 'PUT', `${baseURL(ctx)}/${encodeURIComponent(project)}/repository`, { connectionRef })
+  async connectProjectRepository(ctx: FarosContext | null, project: string, connectionRef: string, retry?: { retryRepositoryRef: string; projectUID: string }): Promise<Project> {
+    return request<Project>(ctx, 'PUT', `${baseURL(ctx)}/${encodeURIComponent(project)}/repository`, { connectionRef, ...retry })
   },
 
   async createProject(

@@ -143,6 +143,9 @@ func TestConnectRepositoryIsIdempotentAndPermissionScoped(t *testing.T) {
 	if err != nil || attached.Spec.Repository == nil || attached.Annotations["ai.faros.sh/initialize-repository"] != attached.Spec.Repository.RepositoryRef {
 		t.Fatalf("attachment=%#v err=%v", attached, err)
 	}
+	if attached.Spec.Repository.Name == project.Name || !strings.HasPrefix(attached.Spec.Repository.Name, project.Name+"-") {
+		t.Fatalf("connect later must reserve a fresh remote name: %q", attached.Spec.Repository.Name)
+	}
 	if response := call(`{"connectionRef":"another"}`); response.Code != http.StatusConflict {
 		t.Fatalf("replacement accepted: %d", response.Code)
 	}
