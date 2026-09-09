@@ -647,3 +647,5 @@ faros-dashboard-tile-agents .agents-tile-empty {
 }
 faros-dashboard-tile-agents .agents-tile-msg { font-size: 11px; color: var(--color-text-muted, #5d5f78); }
 faros-dashboard-tile-agents .agents-tile-err { font-size: 11px; color: var(--color-danger); }
+
+faros-provider-agents .agents-usage-disclosure { align-self: flex-start; }

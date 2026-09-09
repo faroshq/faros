@@ -2607,3 +2607,28 @@ e2e-all: build ## Run all e2e suites
 
 e2e-keep: ## Run standalone e2e, keep clusters on failure for debugging
 	$(MAKE) e2e-standalone E2E_FLAGS="--keep-clusters"
+
+.PHONY: test-model-connections test-model-connections-api lint-model-connections fix-lint-model-connections
+# The providers remain standalone; run each contract in its owning module.
+test-model-connections: ## Verify the shared Models UX and provider adapters
+	cd providers/agents/portal && npm run typecheck && npm test
+	cd providers/app-studio/portal && npm run typecheck && node --test --test-concurrency=1 src/modelsSettings.test.mjs src/modelIDSelector.test.mjs src/modelIDSelection.test.mjs src/llmSettingsValidation.test.mjs
+
+test-model-connections-api: ## Verify model connection APIs and catalog behavior
+	cd providers/agents && go test -count=1 ./api ./llm
+	cd providers/app-studio && go test -count=1 ./api
+	cd provider-sdk && go test -count=1 ./modelcatalog
+
+lint-model-connections: $(GOLANGCI_LINT) ## Lint the model connection implementation in its owning modules
+	cd providers/agents && $(abspath $(GOLANGCI_LINT)) run $(ARGS) ./api/... ./llm/...
+	cd providers/app-studio && $(abspath $(GOLANGCI_LINT)) run $(ARGS) ./api/...
+	cd provider-sdk && $(abspath $(GOLANGCI_LINT)) run $(ARGS) ./modelcatalog/...
+
+fix-lint-model-connections: $(GOLANGCI_LINT) ## Format model connection changes with the pinned formatter
+	cd providers/agents && $(abspath $(GOLANGCI_LINT)) fmt api/model_connection.go api/settings.go llm/catalog.go api/model_connection_test.go
+	cd providers/app-studio && $(abspath $(GOLANGCI_LINT)) fmt api/llm_registry.go api/model_connection_test.go
+	cd provider-sdk && $(abspath $(GOLANGCI_LINT)) fmt modelcatalog/catalog.go
+
+.PHONY: test-app-studio-portal
+test-app-studio-portal: ## Run the App Studio portal regression suite
+	cd providers/app-studio/portal && npm test

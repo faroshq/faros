@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import MarkdownIt from 'markdown-it'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Component } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Component } from 'vue'
 import {
   AppWindow,
   ArrowLeft,
@@ -226,7 +226,12 @@ import {
 import StatusBadge from './portalkit/StatusBadge.vue'
 import ReleasePipeline from './ReleasePipeline.vue'
 import ProjectHistory from './ProjectHistory.vue'
-import ModelsSettings from './ModelsSettings.vue'
+const ModelsSettings = defineAsyncComponent({
+  loader: () => import('./ModelsSettings.vue'),
+  delay: 0,
+  loadingComponent: { render: () => h('div', { role: 'status' }, 'Loading model settings…') },
+  errorComponent: { render: () => h('div', { role: 'alert' }, 'Could not load model settings. Reload this page to retry.') },
+})
 import ProductionForm from './ProductionForm.vue'
 import ProductionSettingsLoadingShell from './ProductionSettingsLoadingShell.vue'
 import { productionFormValuesFromSchema, type ProductionFormValues } from './productionForm'
@@ -958,6 +963,7 @@ const llmSaving = ref(false)
 const llmTesting = ref(false)
 const llmTestStatus = ref<string | null>(null)
 const llmTestError = ref<string | null>(null)
+const llmModelTests = ref<Record<string, { state: string; tone: 'success' | 'danger' | 'muted'; error?: string }>>({})
 const llmTestedFingerprint = ref('')
 let llmConnectionTestSerial = 0
 const llmStatus = ref<string | null>(null)
@@ -1392,6 +1398,7 @@ async function retryPreProjectAttachment(clientID: string) {
 
 function invalidateLLMModelMutationState() {
   llmModelMutationGeneration += 1
+  llmModelTests.value = {}
   // A route/context transition owns the replacement busy state. The previous
   // request remains in flight, but its finalizer is no longer allowed to
   // touch this value.
@@ -1399,6 +1406,7 @@ function invalidateLLMModelMutationState() {
 }
 
 function beginLLMModelMutation(): LLMModelMutationGuard {
+  llmModelTests.value = {}
   return {
     generation: ++llmModelMutationGeneration,
     contextFingerprint: appContextFingerprint(props.ctx),
@@ -4644,10 +4652,10 @@ function normalizeLLMModelInput(provider: string, model: string, credentialMode:
 }
 
 const llmConnectionFingerprint = computed(() => JSON.stringify([
-  llmProvider.value.trim(), llmCredentialMode.value, llmBaseURL.value.trim(), llmModel.value.trim(), llmApiKey.value.trim(),
+  llmEditingModelID.value, llmProvider.value.trim(), llmCredentialMode.value, llmBaseURL.value.trim(), llmModel.value.trim(), llmApiKey.value.trim(),
 ]))
 const llmConnectionTested = computed(() => Boolean(llmTestedFingerprint.value) && llmTestedFingerprint.value === llmConnectionFingerprint.value)
-const llmConnectionTestRequired = computed(() => isCreateModelRoute.value && modelsReturnRoute.value === CREATE_PROJECT_ROUTE && setupSessionActive.value)
+const llmConnectionTestRequired = computed(() => llmEditorOpen.value || isCreateModelRoute.value)
 
 function invalidateLLMConnectionTest() {
   llmConnectionTestSerial += 1
@@ -4720,7 +4728,7 @@ async function testLLMConnection() {
     llmTestError.value = 'Enter a model ID before testing the connection.'
     return
   }
-  if (!llmApiKey.value.trim()) {
+  if (!llmApiKey.value.trim() && llmCredentialRequired.value) {
     llmTestError.value = 'Enter a credential before testing the connection.'
     return
   }
@@ -4733,6 +4741,7 @@ async function testLLMConnection() {
       baseURL: normalizeLLMBaseURLInput(llmProvider.value, llmBaseURL.value, llmCredentialMode.value),
       model: normalizeLLMModelInput(llmProvider.value, llmModel.value, llmCredentialMode.value),
       apiKey: llmApiKey.value.trim(),
+      existingModelID: llmEditingModelID.value || undefined,
     })
     if (serial !== llmConnectionTestSerial || fingerprint !== llmConnectionFingerprint.value) return
     if (!result.ok) throw new Error('The provider did not confirm this connection.')
@@ -4745,6 +4754,24 @@ async function testLLMConnection() {
     if (serial === llmConnectionTestSerial) llmTesting.value = false
   }
 }
+
+async function testSavedLLMModel(modelID: string) {
+  const saved = llmSettings.value?.models.find(model => model.id === modelID)
+  if (!saved?.configured || llmSaving.value || llmModelTests.value[modelID]?.state === 'Testing…') return
+  const guard: LLMModelMutationGuard = { generation: llmModelMutationGeneration, contextFingerprint: appContextFingerprint(props.ctx), routePath: routePath.value }
+  const token = { state: 'Testing…', tone: 'muted' as const }
+  llmModelTests.value = { ...llmModelTests.value, [modelID]: token }
+  try {
+    const result = await api.testLLMConnection(props.ctx, { provider: saved.provider, baseURL: saved.baseURL, model: saved.model, apiKey: '', existingModelID: modelID })
+    if (!llmModelMutationIsCurrent(guard)) return
+    if (!result.ok) throw new Error('The provider did not confirm this connection.')
+    llmModelTests.value = { ...llmModelTests.value, [modelID]: { state: 'Test passed', tone: 'success' } }
+  } catch (error) {
+    if (!llmModelMutationIsCurrent(guard)) return
+    llmModelTests.value = { ...llmModelTests.value, [modelID]: { state: 'Test failed', tone: 'danger', error: error instanceof Error ? error.message : String(error) } }
+  }
+}
+watch([() => appContextFingerprint(props.ctx), routePath, llmSettings], () => { llmModelTests.value = {} })
 
 async function deleteLLMModel(modelID: string) {
   const confirmationGuard: LLMModelMutationGuard = {
@@ -9092,7 +9119,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           <ArrowLeft class="h-3.5 w-3.5" :stroke-width="1.75" /> {{ llmCreateReturnLabel }}
         </button>
         <header v-if="isCreateModelRoute" class="k-create-header">
-          <h1 class="k-create-title">{{ llmConnectionTestRequired ? 'Connect an AI model' : 'Connect model' }}</h1>
+          <h1 class="k-create-title">Connect model</h1>
           <p class="k-create-description">{{ llmConnectionTestRequired ? llmCreateDescription : 'Add a credentialed model connection for project creation and chat.' }}</p>
         </header>
         <div id="app-studio-models-host" class="min-h-[420px]" />
@@ -10960,6 +10987,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
 
           <ModelsSettings
             v-if="!publishingInWorkbench && !historyInWorkbench && !settingsProject"
+            :model-tests="llmModelTests"
             :settings="llmSettings"
             :loading="llmSettingsLoading"
             :load-error="llmSettingsError"
@@ -11004,6 +11032,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             @cancel-editor="cancelLLMEditor"
             @save="saveLLMSettings"
             @test="testLLMConnection"
+            @test-saved="testSavedLLMModel"
             @delete="deleteLLMModel"
             @set-default="setDefaultLLMModel"
             @select-provider="selectLLMProvider"

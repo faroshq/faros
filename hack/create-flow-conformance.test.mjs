@@ -127,7 +127,7 @@ test('Agents route-owned create flows use the shared skeleton without obsolete m
     ['automation', 'providers/agents/portal/src/views/Automation.vue'],
   ]
   for (const [name, path] of cases) {
-    const text = await source(path)
+    const text = await source(path) + (name === 'model' ? await source('providers/agents/portal/src/views/ModelConnectionEditor.vue') : '')
     expectSkeleton(`Agents ${name}`, text)
   }
   const [agent, assistedSearch] = await Promise.all([

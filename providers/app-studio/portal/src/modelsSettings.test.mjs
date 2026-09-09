@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
+import ts from 'typescript'
 import { createServer } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { createSSRApp } from 'vue'
@@ -79,10 +80,10 @@ test('presents multiple workspace models with explicit default and readiness sta
 
   assert.match(html, /aria-label="Model GPT High"/)
   assert.match(html, /aria-label="Model Gemini Fast"/)
-  assert.match(html, /grid-cols-\[repeat\(auto-fill,minmax\(min\(100%,280px\),360px\)\)\] justify-start/)
+  assert.match(html, /k-model-grid/)
   assert.match(html, /gpt-5\.4/)
   assert.match(html, /Default/)
-  assert.match(html, /Credential saved/)
+  assert.match(html, /Credential stored/)
   assert.match(html, /Needs credential/)
   assert.match(html, /Make default/)
   assert.doesNotMatch(html, /aria-label="Model configuration form"/)
@@ -272,8 +273,8 @@ test('announces the active model mutation and disables competing card actions', 
 test('first-time setup requires a verified model response before save and finish', async () => {
   const html = await render({ creationRoute: true, name: 'OpenAI', apiKey: 'test-key', requireConnectionTest: true })
   assert.match(html, /Test connection/)
-  assert.match(html, /Save and finish/)
-  assert.match(html, /<button class="k-btn k-btn--primary" disabled>[\s\S]*Save and finish/)
+  assert.match(html, /Connect model/)
+  assert.match(html, /<button class="k-btn k-btn--primary" disabled>[\s\S]*Connect model/)
 
   const verified = await render({
     creationRoute: true,
@@ -377,4 +378,54 @@ test('uses the stored project-creation destination and Models fallback for route
   const saveEnd = app.indexOf('\nasync function deleteLLMModel', saveStart)
   assert.match(app.slice(cancelStart, saveStart), /const returnRoute = routeOwnedCreation[\s\S]*modelsReturnRoute\.value = ''[\s\S]*props\.navigate\(returnRoute, \{ replace: true \}\)/)
   assert.match(app.slice(saveStart, saveEnd), /const returnRoute = routeOwnedCreation[\s\S]*modelsReturnRoute\.value = ''[\s\S]*props\.navigate\(returnRoute, \{ replace: true \}\)/)
+})
+
+
+test('invalidating a pending saved-model test allows retry and ignores the old completion', async () => {
+  const app = await readFile(new URL('./App.vue', import.meta.url), 'utf8')
+  const script = app.slice(app.indexOf('>') + 1, app.indexOf('</script>'))
+  const parsed = ts.createSourceFile('App.ts', script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const names = ['invalidateLLMModelMutationState', 'llmModelMutationIsCurrent', 'testSavedLLMModel']
+  const functions = names.map(name => {
+    const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+    assert.ok(declaration, `${name} exists`)
+    return declaration.getText(parsed)
+  }).join('\n')
+  for (const name of ['openLLMEditor', 'cancelLLMEditor']) {
+    const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
+    assert.match(declaration.getText(parsed), /invalidateLLMModelMutationState\(\)/)
+  }
+  const { outputText } = ts.transpileModule(`
+    export function harness(api) {
+      let llmModelMutationGeneration = 0;
+      const appComponentMounted = true;
+      const props = { ctx: 'workspace' };
+      const appContextFingerprint = ctx => ctx;
+      const routePath = { value: '/models' };
+      const llmSaving = { value: false };
+      const llmModelTests = { value: {} };
+      const llmSettings = { value: { models: [{ id: 'main', configured: true, provider: 'openai-compatible', baseURL: 'https://example.test/v1', model: 'chat' }] } };
+      ${functions}
+      return { states: llmModelTests, test: testSavedLLMModel, invalidate: invalidateLLMModelMutationState };
+    }
+  `, { compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 } })
+  const { harness } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`)
+  for (const fail of [false, true]) {
+    const requests = []
+    const state = harness({ testLLMConnection: () => new Promise((resolve, reject) => requests.push({ resolve, reject })) })
+    const oldTest = state.test('main')
+    assert.equal(state.states.value.main.state, 'Testing…')
+    state.invalidate() // Opening and cancelling the editor invalidate the same generation.
+    state.invalidate()
+    assert.equal(state.states.value.main, undefined)
+    const retry = state.test('main')
+    assert.equal(requests.length, 2)
+    if (fail) requests[0].reject(new Error('Old request failed'))
+    else requests[0].resolve({ ok: true })
+    await oldTest
+    assert.equal(state.states.value.main.state, 'Testing…', 'old completion cannot overwrite the retry')
+    requests[1].resolve({ ok: true })
+    await retry
+    assert.equal(state.states.value.main.state, 'Test passed')
+  }
 })
