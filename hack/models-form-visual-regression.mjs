@@ -250,6 +250,13 @@ async function collect(page, provider, theme, width, scenario) {
       scroll: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
     }
   }, { provider, theme, width, scenario })
+  const providerBox = result.landmarks.providerControl.rect
+  const endpointBox = result.landmarks.endpointControl.rect
+  assert.ok(providerBox && endpointBox, 'connection controls must be rendered')
+  assert.equal(endpointBox.height, providerBox.height, 'endpoint and provider control heights must match')
+  if (width >= 640) {
+    assert.equal(endpointBox.y, providerBox.y, 'endpoint and provider controls must align at the top')
+  }
   const screenshot = `${outputDir}/${provider}-${theme}-${width}${scenarioSuffix(scenario)}.png`
   await page.locator('.k-create-page').screenshot({ path: screenshot, animations: 'disabled' })
   page.off('console', onConsole)
