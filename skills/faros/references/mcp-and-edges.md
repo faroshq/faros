@@ -49,10 +49,13 @@ curl -s "$HUB/api/orgs/$ORG/workspaces/$WS/mcpservers/default/connect" -H "$A" -
 ```
 
 **Calling it without an MCP client.** The endpoint is plain JSON-RPC over
-HTTP, so `curl` is enough (see SKILL.md section 9.2). `Accept` must include
-`text/event-stream`; replies may arrive as SSE, so strip a leading `data: `
-before parsing. A failing tool returns HTTP 200 with the error text in
-`result.content[].text`, so never judge success by status code alone.
+HTTP, so `curl` is enough (see SKILL.md section 9.2). `Accept` must contain
+**both** `application/json` and `text/event-stream`, or the endpoint answers
+`400 Accept must contain both 'application/json' and 'text/event-stream'`.
+Replies always arrive as SSE (`event: message`, then `data: {…}`), so strip
+the leading `data: ` and parse the last JSON object. A failing tool still
+returns HTTP 200 with the error text in `result.content[].text`, so never
+judge success by status code alone.
 
 ```bash
 curl -s -X POST "$MCP_URL" -H "Authorization: Bearer $MCP_TOKEN" \

@@ -26,6 +26,12 @@ reference for an area before doing non-trivial work in it:
 | agents provider: agents, runs, channels, schedules, deep research | [references/agents.md](references/agents.md) |
 | MCP aggregate, MCPServer, per-edge MCP, edges, kuery, service catalog | [references/mcp-and-edges.md](references/mcp-and-edges.md) |
 
+One thing the references cannot give you, because it is not in the code:
+**section 9** collects what only appears when you actually drive a hub — how
+to call MCP tools from a plain shell, which 403s are not about permissions,
+and which alarming states are just latency. Read it before you conclude
+something is broken.
+
 ## 1. Rules that override everything else
 
 1. **There is no default hub.** `faros login` needs `--hub-url` or
@@ -65,14 +71,23 @@ reference for an area before doing non-trivial work in it:
    the GitHub repo), `delete_instance`, `delete_agent` (deletes runs and
    memories), `edge delete`, `pods_delete`, and any `<svc>_call_service`
    that moves physical things.
-10. **Tell "not yet" from "wrong" before you act.** Much of the platform is
+10. **An App Studio project is created by App Studio, in one call.**
+    `POST /api/projects` creates the code `Repository`, the GitHub repo, the
+    seeded first commit and the dev `Instance` as one owned set. Do not
+    hand-assemble a project by creating a `Repository` CR and an `Instance`
+    yourself and hoping App Studio adopts them — it will not, and you get
+    parts that build but can never be promoted or published. Adopting an
+    existing repo has its own supported input, `existingRepositoryRef`.
+    Creating an `Instance` directly is a different, valid workflow (section 6),
+    not a step toward a project.
+11. **Tell "not yet" from "wrong" before you act.** Much of the platform is
     asynchronous, and several normal intermediate states are indistinguishable
     from errors: a new hostname fails TLS until its certificate is issued, a
     promotion reads `none` until the ghcr crawler runs, a Ready project has no
     repository yet. Waiting and rebuilding are opposite responses, so identify
     which you are looking at (section 9.4) before doing either. The exception
     that never resolves: an `exposure: internal` template has no URL coming.
-11. **Direct `git push` is not promotable.** App Studio only recognizes
+12. **Direct `git push` is not promotable.** App Studio only recognizes
     commits recorded through faros (`code__commit_files` or the App Studio
     reconciler). Pushing to GitHub directly builds in CI but App Studio
     cannot select that commit for promotion. See section 5.
@@ -277,6 +292,17 @@ For a blueprint from a prompt without creating anything:
 
 ### Step 2: create the project
 
+**One call creates everything, and it must be this call.** App Studio owns
+the set — repository, first commit, dev instance — and ownership is what
+later makes promotion and publishing work. There is no supported way to
+assemble a project out of parts you created yourself.
+
+| Want | Do | Not |
+|---|---|---|
+| A new project | `POST /api/projects` with `templateName` | Create a `Repository` CR, then an `Instance`, and hope they get adopted |
+| A project around a repo that already exists | `POST /api/projects` with `existingRepositoryRef` (candidates from `GET …/import-repositories`) | Point a new project at a repo by name and expect it to bind |
+| Just a running container, no git loop | An `Instance` directly (section 6) | Create a project and delete the parts you did not want |
+
 ```bash
 curl -s -X POST "$AS/api/projects" -H "$A" $T -H 'Content-Type: application/json' \
   -d '{"name":"shop","displayName":"Shop","templateName":"application","description":"Storefront demo"}'
@@ -289,11 +315,18 @@ adopts an existing repository CR and hydrates the workspace from it
 (candidates: `GET $AS/api/projects/import-repositories`). `POST $AS/api/projects/stream`
 is the same call as SSE with progress events.
 
-What happens: a `code.faros.sh` `Repository` CR is created (private,
-`autoInit`), the code provider creates the GitHub repo, the scaffold repo is
-seeded into the workspace and committed as the first commit, and a dev
-instance `<project>-dev` (`farosMode: development`, `access: private`) is
-provisioned on the infrastructure runtime cluster.
+What happens, all from that one request: a `code.faros.sh` `Repository` CR is
+created (private, `autoInit`), the code provider creates the GitHub repo, the
+scaffold repo is seeded into the workspace and committed as the first commit,
+and a dev instance `<project>-dev` (`farosMode: development`,
+`access: private`) is provisioned on the infrastructure runtime cluster.
+
+You will see those objects with `kubectl get repositories.code.faros.sh` and
+`kubectl get instances.infrastructure.faros.sh`, which makes it tempting to
+conclude you could have written them yourself. Read them, do not create them:
+they carry ownership App Studio put there. The reverse is also true — deleting
+the project deletes its dev instance, so do not treat those objects as
+independently yours.
 
 Wait and inspect. **`phase: Ready` on the project is not the gate** — the
 project reports Ready while its repository is still being created, and a
@@ -360,7 +393,7 @@ curl -s -X POST "$AS/api/projects/shop/sync-development" -H "$A" $T             
 
 Then `git pull` locally so your clone matches the commit faros created.
 
-**C. Plain `git push`.** Works for CI and for the GitHub repo, but see rule 11:
+**C. Plain `git push`.** Works for CI and for the GitHub repo, but see rule 12:
 App Studio will not see the commit for promotion. Use it only when you plan to
 deploy with the infrastructure provider directly (section 6) or when the
 user accepts that limitation.
@@ -459,7 +492,22 @@ per member).
   is injected into every assistant turn. A root `AGENTS.md` in the repo is
   also injected (32 KiB cap).
 - **Delete**: `DELETE $AS/api/projects/shop?uid=<project uid>`. The
-  repository CR and GitHub repo survive; the dev instance does not.
+  repository CR and GitHub repo survive; the dev instance does not. Confirmed
+  on a live hub 2026-09-09: a deleted project left its `Repository` CR and
+  GitHub repo in place with nothing owning them.
+  That leaves an **orphan you will meet again**. Project names can be reused
+  after the async delete, but the `Repository` of the same name is still
+  there, so recreating a project under the old name is not a clean slate.
+  Check first, and either adopt the orphan or pick a different name:
+
+  ```bash
+  curl -s "$AS/api/projects" -H "$A" $T | jq -r '.items[].name'   # projects
+  kubectl get repositories.code.faros.sh                          # repositories, some possibly orphaned
+  ```
+
+  To adopt: `POST /api/projects {"existingRepositoryRef":"<repo>"}`. To
+  discard: delete the `Repository` CR — but that **deletes the GitHub repo
+  with it** (rule 9), so ask first.
 
 ## 5. Playbook: local development discipline
 
@@ -468,7 +516,7 @@ Studio project and still ship through App Studio.
 
 1. Confirm the project is settled: `GET …/assistant/threads/…/turns/active` is
    204 for every thread, and `GET …/checkpoints` shows Git `done`.
-2. Clone `repository.htmlURL`. Never push to `main` directly (rule 11).
+2. Clone `repository.htmlURL`. Never push to `main` directly (rule 12).
    Local branches are fine for your own iteration.
 3. Make the change locally. Run the project's own tests locally. The dev
    toolchain in the sandbox is Node.js only for `application` and
@@ -485,6 +533,13 @@ Studio project and still ship through App Studio.
    component `workspacePath`). Logs: `infrastructure__dev_logs`.
 
 ## 6. Playbook: deploy without App Studio
+
+**Choose this path deliberately, at the start.** It is a different product,
+not a lower-level way to reach the same place: you get a running workload with
+no repository, no CI, no promotion, and no publishing flow. Nothing here grows
+into an App Studio project later, and an `Instance` you create by hand will
+never be adopted by one. Pick it when the user wants a container or a database
+running and has not asked for a git-backed app; pick section 4 otherwise.
 
 The infrastructure provider exposes exactly two kinds in your workspace:
 `Template` (read-only catalog) and `Instance`. Which product an instance is
@@ -605,19 +660,37 @@ Fleet-wide reads across edges go through `kuery__kuery_query` and
 ## 9. Calling the platform from a shell, and reading its failures
 
 Everything in this section was learned by driving a live hub, not by reading
-code. It exists because the same three mistakes cost real time.
+code, and every claim below was re-tested against one. None of it is visible
+in the source, and each item cost real time before it was written down.
 
-### 9.1 Use `curl`. Never Python's `urllib` or `requests`.
+### 9.1 A 403 is often the HTTP client, not your token
 
-The hub sits behind Cloudflare, which rejects Python's default user agent with
-a **403 whose body is Cloudflare error 1010** (`browser_signature_banned`).
-It looks exactly like a faros authorization failure, and it fires identically
-for a valid user token and a valid ServiceAccount token, which makes it very
-easy to misread as "my token lacks permission" and go debugging RBAC.
+The hub sits behind Cloudflare, which blocks requests by user agent. Python's
+default (`Python-urllib/…`, and `requests` likewise) is rejected with a **403
+whose body is Cloudflare error 1010**, `browser_signature_banned`.
 
-If a 403 body mentions `cloudflare` or `error_code: 1010`, it is the client,
-not your credentials. Use `curl`, or set a browser-like `User-Agent`. Build
-JSON payloads with Python if you like, but send them with `curl --data-binary @file`.
+It is easy to misread. The status is 403, the same as a permissions failure,
+and it fires identically for a valid user bearer and a valid ServiceAccount
+token — so it looks like "my token lacks permission" and sends you into RBAC,
+claims, and membership for nothing.
+
+Measured against `/api/orgs` on 2026-09-09 with one identical valid token:
+
+| Client | Result |
+|---|---|
+| `curl` | 200 |
+| Python, default user agent | 403, `error code: 1010` |
+| Python, `User-Agent: Mozilla/5.0 (…)` | 200 |
+
+So the rule is about the header, not the language. **Prefer `curl`.** If you
+want Python's ergonomics for building a large JSON body, build the file there
+and send it with `curl --data-binary @payload.json`; that also sidesteps
+shell-quoting a payload with embedded code. If you must use Python for the
+request itself, set a browser-like `User-Agent` explicitly.
+
+Tell it apart from a real 403 by reading the body: `error_code: 1010` or any
+mention of `cloudflare` is the edge. A genuine faros denial comes back as a
+Kubernetes `Status` JSON.
 
 ### 9.2 The MCP aggregate is plain HTTP; no MCP client required
 
@@ -638,11 +711,17 @@ curl -s -X POST "$MCP_URL" -H "Authorization: Bearer $MCP_TOKEN" \
   --data-binary @payload.json
 ```
 
-Two parsing details. The `Accept` header **must** include `text/event-stream`
-or the request is rejected. Replies may come back as SSE, so strip a leading
-`data: ` from each line and parse the last JSON object. A tool error arrives
-as a normal 200 with the failure described in `result.content[].text`, not as
-an HTTP error code — so check the body, never just the status.
+Three parsing details, all verified 2026-09-09:
+
+- **`Accept` must contain both `application/json` and `text/event-stream`.**
+  Anything else is a `400` with the body
+  `Accept must contain both 'application/json' and 'text/event-stream'`.
+- **Replies are always SSE**, even for a single result:
+  `content-type: text/event-stream`, an `event: message` line, then
+  `data: {…}`. Strip the leading `data: ` and parse the last JSON object.
+- **A failing tool still returns HTTP 200.** The failure is prose inside
+  `result.content[].text` — that is where `repository "x" not found` and the
+  GitHub rate-limit message arrive. Check the body, never just the status.
 
 ### 9.3 `tools/list` is the only honest inventory
 
@@ -654,9 +733,14 @@ only — **no `infrastructure__*` at all**, so every infrastructure action had
 to go through kubectl or provider REST instead.
 
 Call `tools/list` and read the prefixes before planning a route that depends
-on a tool. Do not infer availability from this skill's tool inventory, from
-the provider catalog, or from the fact that a provider is enabled. `app-studio`
-is always absent by design (it is an MCP client, and returns 404 on `/mcp`).
+on a tool. Being *enabled* predicts nothing — an org-scoped provider can be
+enabled, Ready, and working perfectly over kubectl while contributing no MCP
+tools at all. The catalog's `scope` field is a good predictor (`org` means
+excluded), but `tools/list` is the only authority. `app-studio` is always
+absent by design: it is an MCP client, not a server, and returns 404 on `/mcp`.
+
+When a tool you expected is missing, the fix is a different surface, not a
+retry: kubectl against the workspace, or the provider's REST API.
 
 ### 9.4 Latency is not failure
 
@@ -713,7 +797,7 @@ is the signature of a loop that retried through a rate limit.
 | `github: forbidden — token lacks scope or rate-limited` | Read past the colon. Usually the PAT's hourly limit, not scopes (section 9.5) |
 | New instance URL fails TLS, curl exit 35 | The hostname's certificate is still being issued; wait (section 9.4) |
 | An `<provider>__*` tool does not exist | That provider is org-scoped, so it is excluded from the aggregate; use kubectl or its REST API (section 9.3) |
-| MCP endpoint returns 406 or rejects the request | `Accept` must include `text/event-stream` (section 9.2) |
+| MCP endpoint returns `400 Accept must contain both …` | Send `Accept: application/json, text/event-stream` (section 9.2) |
 
 ## 11. Known stale documentation
 

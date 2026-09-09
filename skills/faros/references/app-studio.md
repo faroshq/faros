@@ -113,11 +113,11 @@ before the first commit:
 until curl -s "$AS/api/projects/$P" -H "$A" $T | jq -e '.repository.ready == true' >/dev/null; do sleep 5; done
 ```
 
-The same two fields are the honest check after any event that could have
-removed the repository underneath a surviving project — `RepositoryMissing`
-is a live status, not only a startup state, so a project can outlive its
-repository. `kubectl get repositories.code.faros.sh` confirms from the other
-side.
+Observed on a fresh project, so treat it as a startup race rather than
+evidence that projects routinely outlive their repositories. The same two
+fields are still the honest check whenever you are unsure which objects
+actually exist; `kubectl get repositories.code.faros.sh` confirms from the
+other side.
 
 ### Files and workspace
 
