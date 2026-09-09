@@ -82,15 +82,16 @@ matches App Studio's wrapper geometry. The `.k-back-action` arrow is a fixed
 14px by 14px flex-none SVG. Focused forms use the shared wide creation surface,
 with the name followed by Connection, Credential, and Model sections. Use the
 `.k-model-form-*` recipes for identical section geometry and responsive columns
-across both providers; keep field help inside the form surface.
-The canonical stylesheet version 10 also owns the host font-feature settings
+across both providers; keep field help inside the form surface. Fields top-align
+their grid contents so adjacent controls stay aligned when only one has help text.
+The canonical stylesheet version 11 also owns the host font-feature settings
 and the `.k-create-title:focus-visible` title-focus recipe.
 
 Usage summaries appear below the collection. `ModelUsageSection` is one bordered,
 raised section card with 20px padding and a 6px radius; its title, time controls,
 metrics, and expandable detail content stay inside that boundary. App Studio's
 usage-unavailable message remains inside the same card without a nested box.
-Shared recipes ship through `make sync-portalkit` and stylesheet version 10,
+Shared recipes ship through `make sync-portalkit` and stylesheet version 11,
 including compatibility fallback for older host stylesheets.
 
 ## Accessibility
