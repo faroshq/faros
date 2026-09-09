@@ -29,7 +29,7 @@
   /* Bump this when a standalone primitive requires a newer stylesheet than
    * the generic canonical marker can describe. Provider bundles use it to
    * recover from a host stylesheet served from an older deployment. */
---faros-ui-version: 11;
+--faros-ui-version: 12;
 --k-toast-bottom-offset: 16px;
   /* Shared stacking contract: menus sit above page content, fullscreen
    * surfaces above menus, and global modal/toast layers remain topmost. */
@@ -2840,3 +2840,4 @@ min-width: 44px;
 .k-model-form-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;}
 .k-model-form-test-hint{margin:0 0 14px;padding-inline:16px;font-size:11px;color:var(--km-t);}
 @media (min-width:640px){.k-model-form-columns{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (pointer: coarse), (any-pointer: coarse){.k-model-form .k-model-form-field>.k-input,.k-model-form .k-model-form-section>.k-input{min-height:44px;}}

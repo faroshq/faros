@@ -230,6 +230,7 @@ async function collect(page, provider, theme, width, scenario) {
         blankNotices: notices.map((node, index) => describe(node, `blank-notice[${index}]`)),
       },
       fields,
+      modelInputs: many('.k-model-form .k-input', form).map(node => describe(node)),
       sections,
       hints: many('.k-model-form-hint', form).map((node, index) => describe(node, `.k-model-form-hint[${index}]`)),
       testHint: describe(query('.k-model-form-test-hint', form)),
@@ -254,6 +255,16 @@ async function collect(page, provider, theme, width, scenario) {
   const endpointBox = result.landmarks.endpointControl.rect
   assert.ok(providerBox && endpointBox, 'connection controls must be rendered')
   assert.equal(endpointBox.height, providerBox.height, 'endpoint and provider control heights must match')
+  assert.ok(result.modelInputs.length > 0, 'model form controls must be rendered')
+  const expectedModelInputHeight = width < 640 ? 44 : 40
+  for (const control of result.modelInputs) {
+    assert.ok(control.rect, 'model form control geometry must be available')
+    if (width < 640) {
+      assert.ok(control.rect.height >= expectedModelInputHeight, `touch model form control height must be at least ${expectedModelInputHeight}px`)
+    } else {
+      assert.equal(control.rect.height, expectedModelInputHeight, `desktop model form control height must be ${expectedModelInputHeight}px`)
+    }
+  }
   if (width >= 640) {
     assert.equal(endpointBox.y, providerBox.y, 'endpoint and provider controls must align at the top')
   }

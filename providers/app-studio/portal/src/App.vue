@@ -962,7 +962,8 @@ const llmSaving = ref(false)
 const llmTesting = ref(false)
 const llmTestStatus = ref<string | null>(null)
 const llmTestError = ref<string | null>(null)
-const llmModelTests = ref<Record<string, { state: string; tone: 'success' | 'danger' | 'muted'; error?: string }>>({})
+const llmModelTests = ref<Record<string, { state: string; tone: 'success' | 'danger' | 'muted'; error?: string; requestID: number }>>({})
+let llmModelTestRequestSerial = 0
 const llmTestedFingerprint = ref('')
 let llmConnectionTestSerial = 0
 const llmStatus = ref<string | null>(null)
@@ -4770,16 +4771,17 @@ async function testSavedLLMModel(modelID: string) {
   const saved = llmSettings.value?.models.find(model => model.id === modelID)
   if (!saved?.configured || llmSaving.value || llmModelTests.value[modelID]?.state === 'Testing…') return
   const guard: LLMModelMutationGuard = { generation: llmModelMutationGeneration, contextFingerprint: appContextFingerprint(props.ctx), routePath: routePath.value }
-  const token = { state: 'Testing…', tone: 'muted' as const }
+  const requestID = ++llmModelTestRequestSerial
+  const token = { state: 'Testing…', tone: 'muted' as const, requestID }
   llmModelTests.value = { ...llmModelTests.value, [modelID]: token }
   try {
     const result = await api.testLLMConnection(props.ctx, { provider: saved.provider, baseURL: saved.baseURL, model: saved.model, apiKey: '', existingModelID: modelID })
-    if (!llmModelMutationIsCurrent(guard)) return
+    if (!llmModelMutationIsCurrent(guard) || llmModelTests.value[modelID]?.requestID !== requestID) return
     if (!result.ok) throw new Error('The provider did not confirm this connection.')
-    llmModelTests.value = { ...llmModelTests.value, [modelID]: { state: 'Test passed', tone: 'success' } }
+    llmModelTests.value = { ...llmModelTests.value, [modelID]: { state: 'Test passed', tone: 'success', requestID } }
   } catch (error) {
-    if (!llmModelMutationIsCurrent(guard)) return
-    llmModelTests.value = { ...llmModelTests.value, [modelID]: { state: 'Test failed', tone: 'danger', error: error instanceof Error ? error.message : String(error) } }
+    if (!llmModelMutationIsCurrent(guard) || llmModelTests.value[modelID]?.requestID !== requestID) return
+    llmModelTests.value = { ...llmModelTests.value, [modelID]: { state: 'Test failed', tone: 'danger', error: error instanceof Error ? error.message : String(error), requestID } }
   }
 }
 watch([() => appContextFingerprint(props.ctx), routePath, llmSettings], () => { llmModelTests.value = {} })
