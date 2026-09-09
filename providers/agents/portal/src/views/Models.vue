@@ -234,7 +234,7 @@ defineExpose({ loadCatalog, loadUsage })
 </script>
 
 <template>
-  <div :class="createRoute || creating || editingCredential ? 'agents-menu agents-create-page k-create-page' : 'agents-panel agents-route-panel'">
+  <div :class="createRoute || creating || editingCredential ? 'k-create-page' : 'agents-panel agents-route-panel agents-models-page'">
     <template v-if="createRoute || creating || editingCredential">
       <button type="button" class="k-btn k-btn--ghost k-back-action" :disabled="editor?.locked" @click="editor?.cancel()"><ArrowLeft :stroke-width="1.75" /> Models</button>
       <header class="k-create-header"><h1 class="k-create-title">{{ editingCredential ? 'Edit model' : 'Connect model' }}</h1><p class="k-create-description">Configure a workspace model connection for your agents.</p></header>
@@ -263,7 +263,7 @@ defineExpose({ loadCatalog, loadUsage })
       <ModelUsageSection provider="Agents" available>
 <template #controls><div class="agents-seg" role="group" aria-label="Usage window"><button v-for="days in [7, 30, 90]" :key="days" :class="['k-btn k-btn--ghost', { on: days === windowDays }]" :aria-pressed="days === windowDays" @click="windowDays = days">{{ days }}d</button></div></template>
       <div v-if="usageError && !usageHasSnapshot" class="k-error" role="alert">Usage unavailable: {{ usageError }} <button class="k-btn k-btn--ghost" :disabled="usageLoading" @click="loadUsage">{{ usageLoading ? 'Retrying…' : 'Retry' }}</button></div>
-      <div v-else-if="!usageHasSnapshot" class="k-card agents-dash-loading k-loading-reveal muted" role="status">Loading usage…</div>
+      <div v-else-if="!usageHasSnapshot" class="agents-dash-loading k-loading-reveal muted" role="status">Loading usage…</div>
       <template v-else-if="normalizedUsage">
         <div v-if="usageError" class="k-stale" role="status">Could not refresh usage. Showing usage from the last successful read. {{ usageError }} <button class="k-btn k-btn--ghost" :disabled="usageLoading" @click="loadUsage">{{ usageLoading ? 'Retrying…' : 'Retry' }}</button></div>
         <div class="agents-dash">

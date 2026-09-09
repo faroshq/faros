@@ -10,6 +10,7 @@ import type { ProjectLLMDiscoveredModel, ProjectLLMSettings } from './types'
 type LLMCredentialMode = 'api-key' | 'service-account-json'
 
 const props = defineProps<{
+  routePage?: boolean
   modelTests?: Record<string, { state: string; tone: 'success' | 'danger' | 'muted'; error?: string }>
   settings: ProjectLLMSettings | null
   loading: boolean
@@ -76,9 +77,11 @@ const emit = defineEmits<{
 
 <template>
   <section class="grid gap-4" :aria-label="creationRoute ? 'Connect model' : 'Models'">
-    <div v-if="!creationRoute && !editorOpen && !(loading && !settings) && (settings?.models.length ?? 0) > 0" class="flex justify-end">
+    <header v-if="!creationRoute && !editorOpen" class="flex flex-wrap items-center justify-between gap-3">
+      <h2 v-if="routePage" class="m-0 text-[15px] font-semibold text-text-primary">Models</h2>
       <span
-        class="inline-flex"
+        v-if="!(loading && !settings) && (settings?.models.length ?? 0) > 0"
+        class="ml-auto inline-flex"
         :title="(settings?.models.length ?? 0) >= 20 ? 'This workspace already has the maximum of 20 models.' : undefined"
       >
         <button
@@ -91,7 +94,8 @@ const emit = defineEmits<{
           Connect model
         </button>
       </span>
-    </div>
+    </header>
+    <p v-if="routePage && !creationRoute && !editorOpen" class="text-[13px] text-text-muted">Configure the model credentials App Studio uses when creating and chatting in projects.</p>
 
     <div v-if="loading && !settings && !creationRoute" class="grid min-h-48 content-start gap-3 rounded-md border border-dashed border-border-subtle bg-surface p-4" role="status" aria-live="polite" aria-busy="true">
       <div class="shimmer h-4 w-36 rounded bg-surface-overlay" />
@@ -125,10 +129,10 @@ const emit = defineEmits<{
           <p v-if="modelTests?.[saved.id]?.error" class="k-inline-notification k-inline-notification--error" role="alert">{{ modelTests[saved.id].error }}</p>
           <template #actions>
 
-            <button type="button" class="k-btn k-btn--ghost" :disabled="saving" @click="emit('openEditor', saved.id)">
+            <button type="button" class="app-studio-touch-target k-btn k-btn--ghost" :disabled="saving" @click="emit('openEditor', saved.id)">
               <Pencil class="h-3.5 w-3.5" :stroke-width="1.75" /> Edit
             </button>
-            <button type="button" class="k-btn k-btn--ghost" :disabled="saving || !saved.configured || modelTests?.[saved.id]?.state === 'Testing…'" @click="emit('testSaved', saved.id)">Test connection</button>
+            <button type="button" class="app-studio-touch-target k-btn k-btn--ghost" :disabled="saving || !saved.configured || modelTests?.[saved.id]?.state === 'Testing…'" @click="emit('testSaved', saved.id)">Test connection</button>
             <span
               v-if="!saved.default"
               class="inline-flex"
@@ -136,7 +140,7 @@ const emit = defineEmits<{
             >
               <button
                 type="button"
-                class="k-btn k-btn--ghost"
+                class="app-studio-touch-target k-btn k-btn--ghost"
                 :disabled="saving || !saved.configured"
                 :aria-label="!saved.configured ? `Make ${saved.name} default unavailable: add a credential first` : `Make ${saved.name} default`"
                 @click="emit('setDefault', saved.id)"
@@ -144,7 +148,7 @@ const emit = defineEmits<{
                 <Star class="h-3.5 w-3.5" :stroke-width="1.75" /> Make default
               </button>
             </span>
-            <button type="button" class="k-icon-action" :disabled="saving" :aria-label="`Delete ${saved.name}`" @click="emit('delete', saved.id)">
+            <button type="button" class="app-studio-touch-target k-icon-action" :disabled="saving" :aria-label="`Delete ${saved.name}`" @click="emit('delete', saved.id)">
               <Trash2 class="h-3.5 w-3.5" :stroke-width="1.75" />
             </button>
           </template>
@@ -164,7 +168,7 @@ const emit = defineEmits<{
 
       <ModelUsageSection v-if="!editorOpen && !creationRoute && settings?.models.length" provider="App Studio" />
 
-      <form v-if="editorOpen || creationRoute" class="k-create-surface" :class="{ 'k-create-surface--wide': creationRoute }" aria-label="Model configuration form" :aria-busy="saving" novalidate @submit.prevent="emit('save')">
+      <form v-if="editorOpen || creationRoute" class="k-create-surface k-model-form" :class="{ 'k-create-surface--wide': creationRoute }" aria-label="Model configuration form" :aria-busy="saving" novalidate @submit.prevent="emit('save')">
         <div class="k-create-body">
           <div v-if="!creationRoute" class="flex flex-wrap items-start gap-3">
             <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface text-text-muted"><KeyRound class="h-4 w-4" :stroke-width="1.75" /></div>
@@ -174,7 +178,7 @@ const emit = defineEmits<{
             </div>
           </div>
 
-          <label for="model-display-name" class="grid gap-1.5 text-[11px] font-medium text-text-secondary">
+          <label for="model-display-name" class="k-model-form-field">
             Display name
             <input
               id="model-display-name"
@@ -190,24 +194,24 @@ const emit = defineEmits<{
               @input="emit('update:name', ($event.target as HTMLInputElement).value)"
             />
             <span v-if="nameError" id="model-display-name-error" class="text-[11px] font-normal leading-4 text-danger" role="alert">{{ nameError }}</span>
-            <span v-else id="model-display-name-hint" class="text-[11px] font-normal leading-4 text-text-muted">Use a name people can recognize in project and chat model pickers.</span>
+            <span v-else id="model-display-name-hint" class="k-model-form-hint">Use a name people can recognize in project and chat model pickers.</span>
           </label>
 
-          <section class="grid gap-3 border-t border-border-subtle pt-4" aria-labelledby="model-provider-heading">
-            <h5 id="model-provider-heading" class="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Connection</h5>
-            <div class="grid gap-3 sm:grid-cols-2">
-              <label for="model-provider" class="grid min-w-0 gap-1.5 text-[11px] font-medium text-text-secondary">Provider
+          <section class="k-model-form-section" aria-labelledby="model-provider-heading">
+            <h5 id="model-provider-heading" class="k-model-form-heading">Connection</h5>
+            <div class="k-model-form-columns">
+              <label for="model-provider" class="k-model-form-field">Provider
                 <select id="model-provider" :value="providerPreset" class="k-input" :disabled="saving" aria-describedby="model-provider-hint" @change="emit('selectProvider', ($event.target as HTMLSelectElement).value as LLMProviderPreset)"><option value="openai">OpenAI</option><option value="google">Google AI Studio</option><option value="custom">Custom OpenAI-compatible</option></select>
-                <span id="model-provider-hint" class="text-[11px] font-normal leading-4 text-text-muted">{{ providerGuidance }}</span>
+                <span id="model-provider-hint" class="k-model-form-hint">{{ providerGuidance }}</span>
               </label>
-              <label v-if="googleProvider" for="model-credential-method" class="grid min-w-0 content-start gap-1.5 text-[11px] font-medium text-text-secondary">Credential method
+              <label v-if="googleProvider" for="model-credential-method" class="k-model-form-field">Credential method
                 <select id="model-credential-method" :value="credentialMode" class="k-input" :disabled="saving" @change="emit('update:credentialMode', ($event.target as HTMLSelectElement).value as LLMCredentialMode)"><option value="api-key">Gemini API key</option><option value="service-account-json">Vertex AI service account</option></select>
               </label>
-              <label v-else-if="customProvider" for="model-base-url" class="grid min-w-0 gap-1.5 text-[11px] font-medium text-text-secondary">Base URL
+              <label v-else-if="customProvider" for="model-base-url" class="k-model-form-field">Base URL
                 <input id="model-base-url" :value="baseURL" class="k-input h-10 min-w-0 font-mono text-[12px]" :class="baseURLError ? 'border-danger' : ''" :placeholder="baseURLPlaceholder" :disabled="saving" :aria-invalid="Boolean(baseURLError)" aria-required="true" aria-describedby="model-base-url-help" type="url" @input="emit('update:baseURL', ($event.target as HTMLInputElement).value)" />
                 <span id="model-base-url-help" class="text-[11px] font-normal leading-4" :class="baseURLError ? 'text-danger' : 'text-text-muted'" :role="baseURLError ? 'alert' : undefined">{{ baseURLError || 'App Studio adds /chat/completions and queries /models.' }}</span>
               </label>
-              <div v-else class="grid min-w-0 content-start gap-1.5 text-[11px] font-medium text-text-secondary">
+              <div v-else class="k-model-form-field">
                 API endpoint
                 <div class="k-input font-mono text-[11px] text-text-muted">
                   <span class="truncate" :title="baseURL">{{ baseURL }}</span>
@@ -216,17 +220,17 @@ const emit = defineEmits<{
             </div>
           </section>
 
-          <section class="grid gap-2 border-t border-border-subtle pt-4" aria-labelledby="model-credential-heading">
-            <h5 id="model-credential-heading" class="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Credential</h5>
+          <section class="k-model-form-section" aria-labelledby="model-credential-heading">
+            <h5 id="model-credential-heading" class="k-model-form-heading">Credential</h5>
             <label for="model-credential" class="sr-only">{{ googleServiceAccountMode ? 'Service account JSON' : 'API key' }}</label>
             <textarea v-if="googleServiceAccountMode" id="model-credential" :value="apiKey" class="k-input min-h-[140px] resize-y font-mono text-[12px] leading-5" :class="credentialError ? 'border-danger' : ''" :placeholder="apiKeyPlaceholder" autocomplete="off" :disabled="saving" :aria-invalid="Boolean(credentialError)" :aria-required="credentialRequired" aria-describedby="model-credential-help" @input="emit('update:apiKey', ($event.target as HTMLTextAreaElement).value)" />
             <input v-else id="model-credential" :value="apiKey" class="k-input h-10" :class="credentialError ? 'border-danger' : ''" :placeholder="editingModelID && !credentialRequired ? `${apiKeyPlaceholder} (leave blank to keep current)` : apiKeyPlaceholder" type="password" autocomplete="new-password" :disabled="saving" :aria-invalid="Boolean(credentialError)" :aria-required="credentialRequired" aria-describedby="model-credential-help" @input="emit('update:apiKey', ($event.target as HTMLInputElement).value)" />
             <p id="model-credential-help" class="text-[11px] leading-4" :class="credentialError ? 'text-danger' : 'text-text-muted'" :role="credentialError ? 'alert' : undefined">{{ credentialError || apiKeyHint }}</p>
           </section>
 
-          <section class="grid gap-3 border-t border-border-subtle pt-4" aria-labelledby="model-selection-heading">
+          <section class="k-model-form-section" aria-labelledby="model-selection-heading">
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <h5 id="model-selection-heading" class="text-[10px] font-semibold uppercase tracking-wide text-text-muted">Model</h5>
+              <h5 id="model-selection-heading" class="k-model-form-heading">Model</h5>
               <span class="inline-flex" :title="!canDiscover ? (googleServiceAccountMode ? 'Vertex AI model discovery is not available yet.' : 'Enter a credential before finding models.') : undefined">
                 <button type="button" class="app-studio-touch-target k-btn k-btn--ghost h-8 px-2.5 text-[11px]" :disabled="saving || discoveryLoading || !canDiscover" @click="emit('discover')">
                   <Loader2 v-if="discoveryLoading" class="h-3.5 w-3.5 animate-spin" :stroke-width="1.75" />
@@ -235,7 +239,7 @@ const emit = defineEmits<{
                 </button>
               </span>
             </div>
-            <label for="model-id" class="grid min-w-0 content-start gap-1.5 text-[11px] font-medium text-text-secondary">Model ID
+            <label for="model-id" class="k-model-form-field">Model ID
               <ModelIDSelector
                 :model-value="model"
                 :models="discoveredModels"
@@ -246,7 +250,7 @@ const emit = defineEmits<{
                 @select="emit('selectDiscoveredModel', $event)"
               />
               <span v-if="modelError" id="model-id-error" class="text-[11px] font-normal leading-4 text-danger" role="alert">{{ modelError }}</span>
-              <span v-else id="model-id-hint" class="text-[11px] font-normal leading-4 text-text-muted">{{ modelHint }} Find models to load the full catalog, then search or enter an ID.</span>
+              <span v-else id="model-id-hint" class="k-model-form-hint">{{ modelHint }} Find models to load the full catalog, then search or enter an ID.</span>
             </label>
             <div v-if="recommendedDiscoveredModels.length" class="grid gap-2" aria-label="Recommended models">
               <span class="text-[9px] font-semibold uppercase tracking-wide text-text-muted">Recommended for App Studio</span>
@@ -261,7 +265,7 @@ const emit = defineEmits<{
           </section>
 
         </div>
-        <p class="px-4 text-[11px] text-text-secondary">Testing sends a small model request and may incur a charge.</p>
+        <p class="k-model-form-test-hint">Testing sends a small model request and may incur a charge.</p>
         <footer class="k-create-actions">
           <button type="button" class="k-btn k-btn--ghost" :disabled="saving || testing" @click="emit('cancelEditor')">Cancel</button>
           <button type="button" class="k-btn k-btn--ghost" :disabled="saving || testing || !model.trim() || (credentialRequired && !apiKey.trim()) || Boolean(baseURLError)" @click="emit('test')">

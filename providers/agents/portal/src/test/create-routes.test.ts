@@ -224,6 +224,9 @@ describe('route-owned creation surfaces', () => {
     const api = stubApi({ saveCredential, testCredentialDraft: () => Promise.resolve({ ok: true }), catalog: () => Promise.resolve([]), usage: () => Promise.resolve({ windowDays: 30, total: { key: 'total', runs: 0, errors: 0, inputTokens: 0, outputTokens: 0, usdMicros: 0, latencyP50MS: 0, latencyP95MS: 0 }, byAgent: [], byModel: [], series: [] }) })
     const store = makeStore(api)
     const el = await mount<Models>('agents-models', { store, api, routeOwned: true, createRoute: true })
+    expect(el.querySelector('.k-create-page')).not.toBeNull()
+    expect(el.querySelectorAll('.k-back-action')).toHaveLength(1)
+    expect(el.querySelector('.k-create-header .k-create-title')?.textContent).toContain('Connect model')
     expect(el.querySelector('.k-create-surface')).not.toBeNull()
     expect(el.querySelector('.k-model-grid')).toBeNull()
     for (const [field, value] of Object.entries({ name: 'main', apiKey: 'secret' })) {

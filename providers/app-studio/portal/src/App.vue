@@ -10520,10 +10520,10 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           : isCreateModelRoute
             ? ''
           : isModelsRoute
-            ? 'rounded-lg border border-border-subtle'
+            ? ''
           : 'max-h-[90vh] max-w-2xl rounded-xl border border-border-subtle shadow-2xl'"
       >
-        <header v-if="!publishingInWorkbench && !historyInWorkbench && !isCreateModelRoute" class="flex items-center justify-between gap-3 border-b border-border-subtle bg-surface-overlay/60 px-4 py-3">
+        <header v-if="!publishingInWorkbench && !historyInWorkbench && !isCreateModelRoute && !isModelsRoute" class="flex items-center justify-between gap-3 border-b border-border-subtle bg-surface-overlay/60 px-4 py-3">
           <div class="min-w-0">
             <div class="flex items-center gap-2">
               <Cpu v-if="isModelsRoute || isCreateModelRoute" class="h-4 w-4 shrink-0 text-accent" :stroke-width="1.75" />
@@ -10545,7 +10545,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
           </button>
         </header>
 
-        <div :class="isCreateModelRoute ? '' : 'min-h-0 overflow-auto p-4'">
+        <div :class="isCreateModelRoute ? '' : isModelsRoute ? 'min-h-0' : 'min-h-0 overflow-auto p-4'">
           <div class="grid gap-4">
           <div
             v-if="settingsProject && !publishingInWorkbench && !historyInWorkbench"
@@ -10987,6 +10987,7 @@ function isMissingCodeConnectionError(value: string | null): boolean {
 
           <ModelsSettings
             v-if="!publishingInWorkbench && !historyInWorkbench && !settingsProject"
+            :route-page="isModelsRoute"
             :model-tests="llmModelTests"
             :settings="llmSettings"
             :loading="llmSettingsLoading"

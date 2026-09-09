@@ -144,7 +144,7 @@ test('App Studio removes collection tabs and nested settings chrome from model c
     source('providers/app-studio/portal/src/ModelsSettings.vue'),
   ])
   assert.match(app, /<Tabs[\s\S]*v-if="!isCreateModelRoute"/)
-  assert.match(app, /v-if="!publishingInWorkbench && !historyInWorkbench && !isCreateModelRoute"/)
+  assert.match(app, /v-if="!publishingInWorkbench && !historyInWorkbench && !isCreateModelRoute && !isModelsRoute"/)
   assert.match(settings, /v-if="!creationRoute" class="flex flex-wrap items-start/)
 })
 

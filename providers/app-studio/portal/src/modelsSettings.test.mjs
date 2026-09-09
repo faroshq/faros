@@ -97,6 +97,27 @@ test('uses an explicit empty state before opening the model form', async () => {
   assert.doesNotMatch(html, /aria-label="Model configuration form"/)
 })
 
+test('renders the Models collection heading and an explicit unavailable usage card', async () => {
+  const html = await render({
+    routePage: true,
+    settings: {
+      provider: 'openai-compatible',
+      baseURL: 'https://api.openai.com/v1',
+      model: 'gpt-5.4',
+      configured: true,
+      defaultModelID: 'gpt-high',
+      models: [{ id: 'gpt-high', name: 'GPT High', provider: 'openai-compatible', baseURL: 'https://api.openai.com/v1', model: 'gpt-5.4', configured: true, default: true }],
+    },
+  })
+
+  assert.match(html, /<h2[^>]*>Models<\/h2>/)
+  assert.match(html, /Configure the model credentials App Studio uses/)
+  assert.match(html, /class="k-model-usage" aria-label="Usage and cost"/)
+  assert.match(html, /class="k-model-usage__unavailable"/)
+  assert.match(html, /Usage reporting isn’t available yet/)
+  assert.match(html, /Spend will appear here when reporting is available/)
+})
+
 test('route-owned model creation keeps the collection out of the form surface', async () => {
   const html = await render({
     creationRoute: true,
@@ -225,7 +246,7 @@ test('editing replaces the collection with one focused form', async () => {
 
   assert.match(html, /Edit model/)
   assert.match(html, /aria-label="Model configuration form"/)
-  assert.match(html, /class="k-create-surface"/)
+  assert.match(html, /class="k-create-surface k-model-form"/)
   assert.match(html, /Save changes/)
   assert.doesNotMatch(html, /aria-label="Model GPT High"/)
 })
