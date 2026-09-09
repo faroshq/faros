@@ -39,7 +39,7 @@
   --k-layer-toast: 2147483001;
 }
 
-/* ── Eyebrow / KPI ────────────────────────────────────────────────────────
+/* Eyebrow / KPI
  * Small uppercase tracked label + big expanded numeral (KPI recipe). */
 .k-eyebrow {
   font-size: 10px;
@@ -60,7 +60,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Card ─────────────────────────────────────────────────────────────────*/
+/* Card */
 .k-card {
   background: var(--color-surface-raised, #111320);
   border: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.07));
@@ -74,7 +74,7 @@ html.light .k-card {
   box-shadow: none;
 }
 
-/* ── Table ────────────────────────────────────────────────────────────────
+/* Table
  * Rounded surface card wrapper + 10px/600 uppercase headers + 13px rows with
  * an accent-tinted hover. Wrap a <table> in `.k-table` (or apply to a card). */
 .k-table {
@@ -133,7 +133,7 @@ html.light .k-card {
   font-size: 12px;
 }
 
-/* ── Badge / status tag ───────────────────────────────────────────────────
+/* Badge / status tag
  * Square mono tag, not a pill: 3px corners, IBM Plex Mono, hairline border
  * derived from the semantic colour via currentColor. */
 .k-badge {
@@ -161,7 +161,7 @@ html.light .k-card {
   background: currentColor;
 }
 
-/* ── Dashboard tile semantics ────────────────────────────────────────────
+/* Dashboard tile semantics
  * Framework-neutral mirror of dashboardtile.ts's Tailwind vocabulary. Plain
  * DOM providers use these hooks instead of carrying a provider-local copy. */
 .k-dashboard-tile > :not([hidden]) ~ :not([hidden]) { margin-block-start: 12px; }
@@ -285,7 +285,7 @@ html.light .k-card {
 }
 .k-dashboard-action:disabled { cursor: not-allowed; opacity: 0.4; }
 
-/* ── Buttons ──────────────────────────────────────────────────────────────*/
+/* Buttons */
 .k-btn {
   display: inline-flex;
   align-items: center;
@@ -389,7 +389,7 @@ html.light .k-card {
   }
 }
 
-/* ── Route-owned create page ──────────────────────────────────────────────
+/* Route-owned create page
  * One hierarchy across providers: back action, one page heading, one form
  * surface, and a right-aligned Cancel → primary footer. Providers own field
  * content and may opt into the wide surface for dense provisioning tasks. */
@@ -620,7 +620,7 @@ html.light .k-create-surface {
   background: color-mix(in srgb, var(--color-danger, #ff5d5d) 18%, transparent);
 }
 
-/* ── Input ────────────────────────────────────────────────────────────────*/
+/* Input */
 .k-input {
   width: 100%;
   border-radius: 4px;
@@ -671,7 +671,7 @@ html.light .k-create-surface {
   box-shadow: 0 0 0 3px var(--color-accent-subtle, rgba(139, 107, 255, 0.14));
 }
 
-/* ── Menu (dropdown / context) ────────────────────────────────────────────
+/* Menu (dropdown / context)
  * 6px panel, 4px items. Selection is accent-subtle WITHOUT glow — menus are
  * not navigation. Destructive items sit below a .k-menu-sep hairline. */
 .k-menu {
@@ -730,7 +730,7 @@ html.light .k-menu {
   background: var(--color-border-subtle, rgba(255, 255, 255, 0.07));
 }
 
-/* ── Action menu / icon action ────────────────────────────────────────────
+/* Action menu / icon action
  * Compact overflow controls use one square target on desktop and the shared
  * 44px coarse-pointer target. The trigger is tooltip-compatible through the
  * global [data-k-tip] recipe above; the menu keeps the ordinary k-menu item
@@ -820,7 +820,7 @@ html.light .k-menu {
   }
 }
 
-/* ── Form select ──────────────────────────────────────────────────────────
+/* Form select
  * FormSelect composes the input and menu recipes above. The panel is
  * teleported to body, so k-form-select__portal is an explicit generic scope
  * for the panel and its descendants rather than relying on the root element. */
@@ -897,7 +897,7 @@ faros-form-select {
   position: absolute;
 }
 
-/* ── Layout selector ──────────────────────────────────────────────────────
+/* Layout selector
  * Compact controlled grid/list menu. It uses the menu selection language but
  * never glows: layout is a presentation preference, not a primary action. */
 .k-layout-selector {
@@ -988,7 +988,7 @@ faros-form-select {
   color: var(--color-accent, #8b6bff);
 }
 
-/* ── Kbd (shortcut key-cap) ───────────────────────────────────────────────*/
+/* Kbd (shortcut key-cap) */
 .k-kbd {
   font-family: var(--font-mono, "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace);
   font-size: 9px;
@@ -1003,7 +1003,7 @@ faros-form-select {
   color: var(--color-text-secondary, #8a8ca6);
 }
 
-/* ── Tooltip (CSS-only) ───────────────────────────────────────────────────
+/* Tooltip (CSS-only)
  * <button data-k-tip="Restart the pod">…</button> — shows after 300ms on
  * hover AND keyboard focus. Two lines max by convention; longer content is a
  * popover, not a tooltip. Never glows. */
@@ -1057,7 +1057,7 @@ html.light [data-k-tip]::after {
   transition-delay: 0.3s;
 }
 
-/* ── Progress bar ─────────────────────────────────────────────────────────*/
+/* Progress bar */
 .k-progress {
   height: 6px;
   border-radius: 2px;
@@ -1073,7 +1073,7 @@ html.light [data-k-tip]::after {
 .k-progress__bar--warning { background: var(--color-warning, #f0a63a); }
 .k-progress__bar--danger { background: var(--color-danger, #ff5d5d); }
 
-/* ── Toggle switch (sharp — 3px track, 2px knob; not the iOS pill) ────────
+/* Toggle switch (sharp — 3px track, 2px knob; not the iOS pill)
  * <button class="k-toggle" role="switch" aria-checked="true">
  *   <span class="k-toggle__knob" /></button> */
 .k-toggle {
@@ -1107,7 +1107,7 @@ html.light [data-k-tip]::after {
 }
 .k-toggle[aria-checked="true"] .k-toggle__knob { left: 21px; }
 
-/* ── Avatar (mono initials; prefer the email chip for identity) ───────────*/
+/* Avatar (mono initials; prefer the email chip for identity) */
 .k-avatar {
   display: inline-flex;
   align-items: center;
@@ -1126,7 +1126,7 @@ html.light [data-k-tip]::after {
 }
 .k-avatar--sm { width: 20px; height: 20px; font-size: 8px; }
 
-/* ── File dropzone ────────────────────────────────────────────────────────
+/* File dropzone
  * Drag-over is a TARGET state, not an action: accent border + tint, no glow. */
 .k-dropzone {
   display: flex;
@@ -1154,7 +1154,7 @@ html.light [data-k-tip]::after {
   color: var(--color-danger, #ff5d5d);
 }
 
-/* ── grid-layout-plus drag placeholder (default is a red block) ────────────*/
+/* grid-layout-plus drag placeholder (default is a red block) */
 .vgl-item--placeholder {
   background: var(--color-accent-subtle, rgba(139, 107, 255, 0.14)) !important;
   border: 1px dashed color-mix(in srgb, var(--color-accent, #8b6bff) 40%, transparent) !important;
@@ -1162,7 +1162,7 @@ html.light [data-k-tip]::after {
   opacity: 1 !important;
 }
 
-/* ── Provider route tabs ──────────────────────────────────────────────────
+/* Provider route tabs
  * Route/section navigation shared by host-compiled and standalone providers.
  * Keep this recipe in the host stylesheet and sync the exact file into
  * standalone bundles; Tabs and the vanilla helpers only emit these classes. */
@@ -1274,7 +1274,7 @@ html.light [data-k-tip]::after {
   font-size: inherit;
 }
 
-/* ── Modal / confirmation dialog ──────────────────────────────────────────
+/* Modal / confirmation dialog
  * Both the vanilla confirmModal helper and Vue ConfirmDialog emit this one
  * recipe. It is global by design: standalone light-DOM providers inject the
  * exact copied stylesheet through portalkit/styles.ts. */
@@ -1386,7 +1386,7 @@ html.light [data-k-tip]::after {
   from { opacity: 0; transform: translateY(10px) scale(0.98); }
 }
 
-/* ── Toast / snackbar ──────────────────────────────────────────────────────
+/* Toast / snackbar
  * The toast helper only creates DOM and behavior; the visual recipe lives
  * here so host and standalone providers cannot drift. */
 #k-toasts {
@@ -1455,7 +1455,7 @@ html.light [data-k-tip]::after {
 .k-toast__dismiss svg { width: 12px; height: 12px; }
 .k-toast__dismiss:hover { background: var(--color-surface-hover, #1e2033); color: inherit; }
 
-/* ── Vue toast host and contextual notifications ──────────────────────────
+/* Vue toast host and contextual notifications
  * Vue providers share a document-level queue. The host owns one visual stack;
  * status and alert live channels stay mounted independently for assistive
  * technology and never duplicate the visible cards. */
@@ -1581,7 +1581,7 @@ html.light [data-k-tip]::after {
   outline-offset: 2px;
 }
 
-/* ── Resource table states and actions ────────────────────────────────────
+/* Resource table states and actions
  * ResourceTable uses `.k-table` for the shell and these namespaced descendants
  * for non-table states. The ordinary table geometry above remains the single
  * source for headers, rows and cells. */
@@ -2273,7 +2273,7 @@ faros-resource-table-filter { display: contents; }
   }
 }
 
-/* ── Status / conditions ──────────────────────────────────────────────────
+/* Status / conditions
  * Standalone bundles cannot rely on the host's main.css for the live dot. */
 @keyframes live-pulse {
   0%, 100% { opacity: 1; }
@@ -2287,7 +2287,7 @@ faros-resource-table-filter { display: contents; }
 .k-conditions__message { white-space: normal; color: var(--color-text-primary, #e9e9f2); }
 .k-conditions__muted { color: var(--color-text-muted, #8587a1); }
 
-/* ── Resource page ────────────────────────────────────────────────────────
+/* Resource page
  * ResourcePage keeps page composition consistent across the host portal and
  * standalone Vue providers. Read-state presentation is deliberately
  * separate from the caller-owned body and actions. */
