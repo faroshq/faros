@@ -237,7 +237,7 @@ defineExpose({ loadCatalog, loadUsage })
   <div :class="createRoute || creating || editingCredential ? 'k-create-page' : 'agents-panel agents-route-panel agents-models-page'">
     <template v-if="createRoute || creating || editingCredential">
       <button type="button" class="k-btn k-btn--ghost k-back-action" :disabled="editor?.locked" @click="editor?.cancel()"><ArrowLeft :stroke-width="1.75" /> Models</button>
-      <header class="k-create-header"><h1 class="k-create-title">{{ editingCredential ? 'Edit model' : 'Connect model' }}</h1><p class="k-create-description">Configure a workspace model connection for your agents.</p></header>
+      <header class="k-create-header"><h1 class="k-create-title">{{ editingCredential ? 'Edit model' : 'Connect model' }}</h1><p class="k-create-description">Configure a workspace model connection.</p></header>
       <ModelConnectionEditor ref="editor" :key="`${editorGeneration}:${createSession}:${editName || 'new'}`" :api="api" :credential="editingCredential" :busy="createBusy" :error="saveError" @save="saveModel" @cancel="cancelCreate" />
     </template>
     <template v-else>

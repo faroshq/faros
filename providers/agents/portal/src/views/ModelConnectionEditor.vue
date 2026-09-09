@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { Check, Loader2, RefreshCw } from 'lucide-vue-next'
 import type { ApiClient } from '../api'
 import type { Credential, CredentialWrite, CredentialTestResult } from '../types'
 import { PROVIDER_PRESETS } from '../conn-defs'
-import FormSelect from '../portalkit/FormSelect.vue'
-import ModelIDSelector from '../portalkit/ModelIDSelector.vue'
+import ModelConnectionForm from '../portalkit/ModelConnectionForm.vue'
 import { confirmDialog } from '../portalkit/confirm'
 
 const props = defineProps<{ api: ApiClient; credential?: Credential; busy: boolean; error?: string | null }>()
@@ -29,9 +27,13 @@ let generation = 0
 const fingerprint = computed(() => JSON.stringify([provider, baseURL.value.trim(), model.value.trim(), apiKey.value.trim()]))
 const baseline = fingerprint.value
 const verified = computed(() => testedFingerprint.value === fingerprint.value)
+const baseURLError = computed(() => preset.value === 'custom' && !baseURL.value.trim() ? 'Base URL is required.' : '')
 const locked = computed(() => props.busy || testing.value || discovering.value)
 const discoveredModels = computed(() => models.value.map(id => ({ id, name: id, compatibility: 'available' as const })))
 const credentialChanged = computed(() => !props.credential || baseURL.value.replace(/\/+$/, '') !== (props.credential.baseURL || PROVIDER_PRESETS[0].baseURL).replace(/\/+$/, ''))
+const providerGuidance = computed(() => preset.value === 'openai'
+  ? 'Uses OpenAI’s standard API endpoint.'
+  : 'Use a provider or gateway that implements OpenAI Chat Completions and GET /models.')
 watch(fingerprint, () => { generation++; testedFingerprint.value = ''; testError.value = ''; validationError.value = '' })
 watch([baseURL, apiKey], () => { models.value = []; discoveryError.value = '' })
 onBeforeUnmount(() => { generation++; apiKey.value = '' })
@@ -74,35 +76,47 @@ async function cancel() {
 defineExpose({ cancel, locked })
 </script>
 <template>
- <form class="agents-model-create k-create-surface k-create-surface--wide k-model-form" aria-label="Model configuration form" :aria-busy="locked" @submit.prevent="submit">
-  <div class="k-create-body">
-   <label class="k-model-form-field">Name
-    <input v-model="name" class="k-input" name="name" required pattern="[a-z0-9]+(-[a-z0-9]+)*" :disabled="locked || !!credential" placeholder="e.g. everyday" />
-    <span class="k-model-form-hint">Use lowercase letters, numbers, and hyphens. The name is used in agent assignments.</span>
-   </label>
-   <section class="k-model-form-section" aria-labelledby="agents-model-provider-heading">
-    <h5 id="agents-model-provider-heading" class="k-model-form-heading">Connection</h5>
-    <div class="k-model-form-columns">
-     <label class="k-model-form-field"><span id="agents-model-provider-label">Provider</span><FormSelect :model-value="preset" :options="options" labelledby="agents-model-provider-label" :disabled="locked" @update:model-value="preset = $event; baseURL = PROVIDER_PRESETS.find(item => item.id === $event)?.baseURL || baseURL" /><span class="k-model-form-hint">Use an OpenAI-compatible provider or gateway.</span></label>
-     <label class="k-model-form-field">{{ preset === 'custom' ? 'Base URL' : 'API endpoint' }}<input v-model="baseURL" class="k-input mono" name="baseURL" type="url" required :readonly="preset !== 'custom'" :disabled="locked" /><span v-if="preset === 'custom'" class="k-model-form-hint">Agents adds /chat/completions and queries /models.</span></label>
-    </div>
-   </section>
-   <section class="k-model-form-section" aria-labelledby="agents-model-credential-heading">
-    <h5 id="agents-model-credential-heading" class="k-model-form-heading">Credential</h5>
-    <label for="agents-model-key" class="sr-only">API key</label>
-    <input id="agents-model-key" v-model="apiKey" class="k-input" name="apiKey" type="password" autocomplete="new-password" :required="credentialChanged" :disabled="locked" :placeholder="credential ? 'API key (leave blank to keep current)' : 'API key'" aria-describedby="agents-model-key-help" />
-    <p id="agents-model-key-help" class="k-model-form-hint">{{ credential ? 'The saved key can only be reused with the same provider endpoint.' : 'Stored for this workspace and never returned to the browser.' }}</p>
-   </section>
-   <section class="k-model-form-section" aria-labelledby="agents-model-selection-heading">
-    <div class="k-model-form-row"><h5 id="agents-model-selection-heading" class="k-model-form-heading">Model</h5><button class="k-btn k-btn--ghost" type="button" :disabled="locked || (!apiKey.trim() && (credentialChanged || credential?.hasAPIKey === false))" @click="probe(true)"><Loader2 v-if="discovering" :stroke-width="1.75" /><RefreshCw v-else :stroke-width="1.75" />{{ discovering ? 'Finding models…' : 'Find models' }}</button></div>
-    <label for="model-id" class="k-model-form-field">Model ID<ModelIDSelector v-model="model" :models="discoveredModels" :disabled="locked" described-by="agents-model-help" /><span id="agents-model-help" class="k-model-form-hint">Use the exact model identifier. Find models to load the full catalog, then search or enter an ID.</span></label>
-    <p v-if="discoveryError" class="k-inline-notification k-inline-notification--error" role="alert">{{ discoveryError }} You can still enter a model ID manually.</p>
-   </section>
-   <p v-if="validationError || error" class="k-inline-notification k-inline-notification--error" role="alert">{{ validationError || error }}</p>
-   <p v-if="testError" class="k-inline-notification k-inline-notification--error" role="alert">{{ testError }}</p>
-   <p v-else-if="verified" class="k-inline-notification k-inline-notification--success" role="status">Connection verified. The model responded successfully.</p>
-  </div>
-  <p class="k-model-form-test-hint">Testing sends a small model request and may incur a charge.</p>
-  <footer class="k-create-actions"><button type="button" class="k-btn k-btn--ghost" :disabled="locked" @click="cancel">Cancel</button><button type="button" class="k-btn k-btn--ghost" :disabled="locked || !model.trim()" @click="probe(false)"><Loader2 v-if="testing" :stroke-width="1.75" /><Check v-else-if="verified" :stroke-width="1.75" /><RefreshCw v-else :stroke-width="1.75" />{{ testing ? 'Testing…' : verified ? 'Connection verified' : 'Test connection' }}</button><button type="submit" class="k-btn k-btn--primary" :disabled="locked || !verified"><Loader2 v-if="busy" :stroke-width="1.75" /><Check v-else :stroke-width="1.75" />{{ busy ? (credential ? 'Saving changes…' : 'Connecting model…') : credential ? 'Save changes' : 'Connect model' }}</button></footer>
- </form>
+ <ModelConnectionForm
+  class="agents-model-create"
+  :name="name"
+  :name-disabled="Boolean(credential)"
+  name-pattern="[a-z0-9]+(-[a-z0-9]+)*"
+  :provider-preset="preset"
+  :provider-options="options"
+  provider-label-id="agents-model-provider-label"
+  :provider-guidance="providerGuidance"
+  :base-u-r-l="baseURL"
+  :base-u-r-l-error="baseURLError"
+  :credential="apiKey"
+  credential-label="API key"
+  :credential-required="credentialChanged"
+  :credential-placeholder="credential ? 'API key (leave blank to keep current)' : 'API key'"
+  :credential-hint="credential ? 'The saved key can only be reused with the same provider endpoint.' : 'Stored for this workspace and never returned to the browser.'"
+  :model="model"
+  model-hint="Use the exact model identifier shown by your provider."
+  :discovered-models="discoveredModels"
+  :discovery-loading="discovering"
+  :discovery-error="discoveryError"
+  :discover-disabled="!apiKey.trim() && (credentialChanged || credential?.hasAPIKey === false)"
+  discover-disabled-reason="Enter an API key before finding models."
+  :testing="testing"
+  :test-error="testError"
+  :form-error="validationError || error"
+  :connection-tested="verified"
+  :test-disabled="!model.trim()"
+  :save-disabled="!verified"
+  :busy="busy"
+  :editing="Boolean(credential)"
+  wide
+  @update:name="name = $event"
+  @update:provider="preset = $event; baseURL = PROVIDER_PRESETS.find(item => item.id === $event)?.baseURL ?? baseURL"
+  @update:base-u-r-l="baseURL = $event"
+  @update:credential="apiKey = $event"
+  @update:model="model = $event"
+  @select-model="model = $event.id"
+  @discover="probe(true)"
+  @test="probe(false)"
+  @cancel="cancel"
+  @save="submit"
+ />
 </template>

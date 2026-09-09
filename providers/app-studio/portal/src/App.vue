@@ -505,7 +505,6 @@ const OPENAI_DEFAULT_MODEL = 'gpt-5.4'
 const GEMINI_DEFAULT_MODEL = 'gemini-3.5-flash'
 const GOOGLE_CLOUD_DEFAULT_MODEL = 'google/gemini-3.5-flash'
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com'
-const GOOGLE_CLOUD_BASE_URL = 'https://aiplatform.googleapis.com'
 const CREATE_PROJECT_ROUTE = '~new'
 const MODELS_ROUTE = '~models'
 const CREATE_MODEL_ROUTE = 'create/model'
@@ -1945,6 +1944,7 @@ const isProjectIndexRoute = computed(() => routeSegment.value === '')
 const isCreateRoute = computed(() => routeSegment.value === CREATE_PROJECT_ROUTE)
 const isModelsRoute = computed(() => routeSegment.value === MODELS_ROUTE)
 const isCreateModelRoute = computed(() => routePath.value === CREATE_MODEL_ROUTE)
+const modelCreateHeadingRef = ref<HTMLHeadingElement | null>(null)
 const projectIndexRoutePending = computed(() =>
   isProjectIndexRoute.value &&
   projects.value.length === 0 &&
@@ -1964,9 +1964,6 @@ function shouldKeepProjectBoundFirstSubmission(): boolean {
 
 const modelsReturnRoute = ref('')
 const llmCreateReturnLabel = computed(() => modelsReturnRoute.value === CREATE_PROJECT_ROUTE ? 'Workspace setup' : 'Models')
-const llmCreateDescription = computed(() => modelsReturnRoute.value === CREATE_PROJECT_ROUTE
-  ? 'Connect and verify the model App Studio will use for project creation and chat.'
-  : 'Configure the model credentials App Studio uses when creating and chatting in projects.')
 const projectRouteLoading = computed(() => Boolean(
   projectOpenLoading.value ||
   (
@@ -2202,15 +2199,11 @@ const productionSummaryTarget = computed(() => {
   return previewURL || 'Project has no deployable preview URL yet.'
 })
 const isGoogleGeminiProvider = computed(() => llmProvider.value.trim().toLowerCase() === GOOGLE_AI_STUDIO_PROVIDER)
-const isCustomLLMProvider = computed(() => llmProviderPreset.value === 'custom')
 const isGoogleServiceAccountMode = computed(() =>
   isGoogleGeminiProvider.value && llmCredentialMode.value === 'service-account-json',
 )
 const llmCredentialRequired = computed(() =>
   !llmEditingModelID.value || llmSettings.value?.models.find((saved) => saved.id === llmEditingModelID.value)?.configured === false,
-)
-const llmBaseURLPlaceholder = computed(() =>
-  isGoogleServiceAccountMode.value ? GOOGLE_CLOUD_BASE_URL : isGoogleGeminiProvider.value ? GEMINI_BASE_URL : 'Base URL',
 )
 const llmApiKeyPlaceholder = computed(() =>
   isGoogleServiceAccountMode.value ? 'Service account JSON' : isGoogleGeminiProvider.value ? 'Gemini API key' : 'API key',
@@ -3108,7 +3101,7 @@ watch(
 
 watch(llmProvider, () => {
   llmBaseURL.value = normalizeLLMBaseURLInput(llmProvider.value, llmBaseURL.value, llmCredentialMode.value)
-  llmModel.value = normalizeLLMModelInput(llmProvider.value, llmModel.value, llmCredentialMode.value)
+  llmModel.value = normalizeLLMModelForEditor(llmProvider.value, llmModel.value, llmCredentialMode.value)
 })
 
 watch(llmApiKey, (value) => {
@@ -3119,7 +3112,7 @@ watch(llmApiKey, (value) => {
 
 watch(llmCredentialMode, () => {
   llmBaseURL.value = normalizeLLMBaseURLInput(llmProvider.value, llmBaseURL.value, llmCredentialMode.value)
-  llmModel.value = normalizeLLMModelInput(llmProvider.value, llmModel.value, llmCredentialMode.value)
+  llmModel.value = normalizeLLMModelForEditor(llmProvider.value, llmModel.value, llmCredentialMode.value)
 })
 
 watch(settingsProject, (project, previousProject) => {
@@ -4436,7 +4429,7 @@ function selectLLMProvider(preset: LLMProviderPreset) {
     llmModel.value = GEMINI_DEFAULT_MODEL
     return
   }
-  llmModel.value = preset === 'openai' ? OPENAI_DEFAULT_MODEL : ''
+  llmModel.value = preset === 'openai' && llmEditingModelID.value ? OPENAI_DEFAULT_MODEL : ''
 }
 
 function updateLLMCredentialMode(mode: LLMCredentialMode) {
@@ -4470,7 +4463,7 @@ function openLLMEditor(modelID?: string) {
   llmProviderPreset.value = inferLLMProviderPreset(provider, saved?.baseURL ?? 'https://api.openai.com/v1')
   llmCredentialMode.value = isGoogleCloudBaseURL(saved?.baseURL ?? '') ? 'service-account-json' : 'api-key'
   llmBaseURL.value = normalizeLLMBaseURLInput(provider, saved?.baseURL ?? '', llmCredentialMode.value)
-  llmModel.value = normalizeLLMModelInput(provider, saved?.model ?? '', llmCredentialMode.value)
+  llmModel.value = saved ? normalizeLLMModelInput(provider, saved.model ?? '', llmCredentialMode.value) : ''
   llmApiKey.value = ''
   llmValidationAttempted.value = false
   clearLLMDiscovery()
@@ -4579,6 +4572,14 @@ watch(
   { immediate: true, flush: 'sync' },
 )
 
+watch(
+  isCreateModelRoute,
+  (active) => {
+    if (active) void nextTick(() => modelCreateHeadingRef.value?.focus({ preventScroll: true }))
+  },
+  { immediate: true, flush: 'post' },
+)
+
 async function applyStarterPrompt(value: string) {
   replaceAssistantComposerText(value)
   await nextTick()
@@ -4649,6 +4650,15 @@ function normalizeLLMModelInput(provider: string, model: string, credentialMode:
     return normalizedModel
   }
   return credentialMode === 'service-account-json' ? GOOGLE_CLOUD_DEFAULT_MODEL : GEMINI_DEFAULT_MODEL
+}
+
+function normalizeLLMModelForEditor(provider: string, model: string, credentialMode: LLMCredentialMode): string {
+  // A new OpenAI-compatible/custom connection starts with an honest empty
+  // model so the shared form asks the user to choose one. Google keeps its
+  // provider-specific default because the credential mode determines the
+  // Vertex/Gemini model namespace.
+  if (!llmEditingModelID.value && !model.trim() && provider.trim().toLowerCase() !== GOOGLE_AI_STUDIO_PROVIDER) return ''
+  return normalizeLLMModelInput(provider, model, credentialMode)
 }
 
 const llmConnectionFingerprint = computed(() => JSON.stringify([
@@ -9114,13 +9124,13 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         </main>
       </div>
 
-      <section v-else-if="isModelsRoute || isCreateModelRoute" :class="isCreateModelRoute ? 'k-create-page pb-6' : 'min-h-0 pb-6'">
+      <section v-else-if="isModelsRoute || isCreateModelRoute" :class="isCreateModelRoute ? 'k-create-page' : 'min-h-0 pb-6'">
         <button v-if="isCreateModelRoute" type="button" class="k-btn k-btn--ghost k-back-action" :disabled="llmSaving" @click="cancelLLMEditor">
           <ArrowLeft class="h-3.5 w-3.5" :stroke-width="1.75" /> {{ llmCreateReturnLabel }}
         </button>
         <header v-if="isCreateModelRoute" class="k-create-header">
-          <h1 class="k-create-title">Connect model</h1>
-          <p class="k-create-description">{{ llmConnectionTestRequired ? llmCreateDescription : 'Add a credentialed model connection for project creation and chat.' }}</p>
+          <h1 ref="modelCreateHeadingRef" class="k-create-title" tabindex="-1">Connect model</h1>
+          <p class="k-create-description">Configure a workspace model connection.</p>
         </header>
         <div id="app-studio-models-host" class="min-h-[420px]" />
       </section>
@@ -10999,7 +11009,6 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             :creation-route="isCreateModelRoute"
             :editing-model-i-d="llmEditingModelID"
             :name="llmName"
-            :provider="llmProvider"
             :provider-preset="llmProviderPreset"
             :credential-mode="llmCredentialMode"
             :base-u-r-l="llmBaseURL"
@@ -11010,14 +11019,12 @@ function isMissingCodeConnectionError(value: string | null): boolean {
             :model-error="llmModelError"
             :credential-error="llmCredentialError"
             :credential-required="llmCredentialRequired"
-            :base-u-r-l-placeholder="llmBaseURLPlaceholder"
             :api-key-placeholder="llmApiKeyPlaceholder"
             :api-key-hint="llmApiKeyHint"
             :provider-guidance="llmProviderGuidance"
             :model-hint="llmModelHint"
             :google-provider="isGoogleGeminiProvider"
             :google-service-account-mode="isGoogleServiceAccountMode"
-            :custom-provider="isCustomLLMProvider"
             :discovered-models="llmDiscoveredModels"
             :discovery-loading="llmDiscoveryLoading"
             :discovery-error="llmDiscoveryError"

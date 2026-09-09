@@ -28,7 +28,6 @@ const baseProps = {
   creationRoute: false,
   editingModelID: null,
   name: '',
-  provider: 'openai-compatible',
   providerPreset: 'openai',
   credentialMode: 'api-key',
   baseURL: 'https://api.openai.com/v1',
@@ -39,14 +38,12 @@ const baseProps = {
   modelError: '',
   credentialError: '',
   credentialRequired: true,
-  baseURLPlaceholder: 'Base URL',
   apiKeyPlaceholder: 'API key',
   apiKeyHint: '',
   providerGuidance: 'Use an OpenAI-compatible provider.',
   modelHint: 'Use the provider model ID.',
   googleProvider: false,
   googleServiceAccountMode: false,
-  customProvider: false,
   discoveredModels: [],
   discoveryLoading: false,
   discoveryError: null,
@@ -147,7 +144,7 @@ test('route-owned model creation keeps the form actionable when settings load fa
   assert.match(html, /Could not load model settings\./)
   assert.match(html, />Retry</)
   assert.match(html, /aria-label="Model configuration form"/)
-  assert.match(html, /Display name/)
+  assert.match(html, />\s*Name\s*</)
   assert.doesNotMatch(html, />New model</)
   assert.doesNotMatch(html, /No models configured/)
 })
@@ -156,7 +153,6 @@ test('renders a guided provider, endpoint, and credential form', async () => {
   const html = await render({
     editorOpen: true,
     name: 'Gemini Fast',
-    provider: 'google-ai-studio',
     providerPreset: 'google',
     credentialMode: 'service-account-json',
     baseURL: 'https://aiplatform.googleapis.com',
@@ -172,7 +168,7 @@ test('renders a guided provider, endpoint, and credential form', async () => {
   assert.match(html, /aria-label="Model configuration form"/)
   assert.match(html, /id="model-provider"/)
   assert.match(html, /Use a Gemini API key for Google AI Studio/)
-  assert.match(html, /Display name/)
+  assert.match(html, />\s*Name\s*</)
   assert.match(html, /Credential method/)
   assert.match(html, /Vertex AI service account/)
   assert.match(html, /Find models/)
@@ -190,7 +186,6 @@ test('offers known provider endpoints and keeps custom endpoints editable', asyn
   const custom = await render({
     editorOpen: true,
     providerPreset: 'custom',
-    customProvider: true,
     baseURL: 'https://gateway.example/v1',
   })
   assert.match(custom, /Custom OpenAI-compatible/)
@@ -295,7 +290,7 @@ test('first-time setup requires a verified model response before save and finish
   const html = await render({ creationRoute: true, name: 'OpenAI', apiKey: 'test-key', requireConnectionTest: true })
   assert.match(html, /Test connection/)
   assert.match(html, /Connect model/)
-  assert.match(html, /<button class="k-btn k-btn--primary" disabled>[\s\S]*Connect model/)
+  assert.match(html, /<button[^>]*class="k-btn k-btn--primary"[^>]*disabled[^>]*>[\s\S]*Connect model/)
 
   const verified = await render({
     creationRoute: true,
