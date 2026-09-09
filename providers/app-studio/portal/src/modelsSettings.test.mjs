@@ -246,6 +246,19 @@ test('editing replaces the collection with one focused form', async () => {
   assert.doesNotMatch(html, /aria-label="Model GPT High"/)
 })
 
+test('Models-route editing uses the wide full-page form without an inner editor heading', async () => {
+  const html = await render({
+    routePage: true,
+    editorOpen: true,
+    editingModelID: 'gpt-high',
+    name: 'GPT High',
+  })
+
+  assert.match(html, /class="k-create-surface k-model-form k-create-surface--wide"/)
+  assert.match(html, /aria-label="Model configuration form"/)
+  assert.doesNotMatch(html, /<h4[^>]*>Edit model<\/h4>/)
+})
+
 test('associates field guidance and validation errors with their controls', async () => {
   const html = await render({
     editorOpen: true,
@@ -308,6 +321,7 @@ test('App Studio owns save state while the extracted surface owns presentation',
 
   assert.match(app, /const CREATE_MODEL_ROUTE = 'create\/model'/)
   assert.match(app, /const isCreateModelRoute = computed\(\(\) => routePath\.value === CREATE_MODEL_ROUTE\)/)
+  assert.match(app, /const isModelEditorPage = computed\(\(\) => isCreateModelRoute\.value \|\| \(isModelsRoute\.value && llmEditorOpen\.value\)\)/)
   assert.match(app, /const routePath = computed\(\(\) => \(props\.ctx\?\.subPath \?\? ''\)\.split\('\/'\)\.filter\(Boolean\)\.join\('\/'\)\)/)
   assert.match(app, /v-if="showSettings[\s\S]*\(\(isModelsRoute \|\| isCreateModelRoute\) && !\(initializing && !loading\)\)"/)
   assert.match(app, /<ModelsSettings[\s\S]*:creation-route="isCreateModelRoute"/)

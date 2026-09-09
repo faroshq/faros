@@ -1944,6 +1944,7 @@ const isProjectIndexRoute = computed(() => routeSegment.value === '')
 const isCreateRoute = computed(() => routeSegment.value === CREATE_PROJECT_ROUTE)
 const isModelsRoute = computed(() => routeSegment.value === MODELS_ROUTE)
 const isCreateModelRoute = computed(() => routePath.value === CREATE_MODEL_ROUTE)
+const isModelEditorPage = computed(() => isCreateModelRoute.value || (isModelsRoute.value && llmEditorOpen.value))
 const modelCreateHeadingRef = ref<HTMLHeadingElement | null>(null)
 const projectIndexRoutePending = computed(() =>
   isProjectIndexRoute.value &&
@@ -4573,7 +4574,7 @@ watch(
 )
 
 watch(
-  isCreateModelRoute,
+  isModelEditorPage,
   (active) => {
     if (active) void nextTick(() => modelCreateHeadingRef.value?.focus({ preventScroll: true }))
   },
@@ -9124,12 +9125,12 @@ function isMissingCodeConnectionError(value: string | null): boolean {
         </main>
       </div>
 
-      <section v-else-if="isModelsRoute || isCreateModelRoute" :class="isCreateModelRoute ? 'k-create-page' : 'min-h-0 pb-6'">
-        <button v-if="isCreateModelRoute" type="button" class="k-btn k-btn--ghost k-back-action" :disabled="llmSaving" @click="cancelLLMEditor">
+      <section v-else-if="isModelsRoute || isCreateModelRoute" :class="isModelEditorPage ? 'k-create-page' : 'min-h-0 pb-6'">
+        <button v-if="isModelEditorPage" type="button" class="k-btn k-btn--ghost k-back-action" :disabled="llmSaving" @click="cancelLLMEditor">
           <ArrowLeft class="h-3.5 w-3.5" :stroke-width="1.75" /> {{ llmCreateReturnLabel }}
         </button>
-        <header v-if="isCreateModelRoute" class="k-create-header">
-          <h1 ref="modelCreateHeadingRef" class="k-create-title" tabindex="-1">Connect model</h1>
+        <header v-if="isModelEditorPage" class="k-create-header">
+          <h1 ref="modelCreateHeadingRef" class="k-create-title" tabindex="-1">{{ llmEditingModelID ? 'Edit model' : 'Connect model' }}</h1>
           <p class="k-create-description">Configure a workspace model connection.</p>
         </header>
         <div id="app-studio-models-host" class="min-h-[420px]" />

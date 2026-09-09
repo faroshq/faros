@@ -148,7 +148,8 @@ test('App Studio removes collection tabs and nested settings chrome from model c
   ])
   assert.match(app, /<Tabs[\s\S]*v-if="!isCreateModelRoute"/)
   assert.match(app, /v-if="!publishingInWorkbench && !historyInWorkbench && !isCreateModelRoute && !isModelsRoute"/)
-  assert.match(settings, /<template v-if="!creationRoute" #before-name>[\s\S]*<div class="flex flex-wrap items-start/)
+  assert.match(settings, /:wide="routePage \|\| creationRoute"/)
+  assert.match(settings, /<template v-if="!routePage && !creationRoute" #before-name>[\s\S]*<div class="flex flex-wrap items-start/)
 })
 
 test('route-owned Databricks import removes modal close chrome', async () => {

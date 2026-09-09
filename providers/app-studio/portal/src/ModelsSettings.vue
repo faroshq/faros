@@ -204,7 +204,7 @@ const emit = defineEmits<{
         :save-disabled="testing || (requireConnectionTest && !connectionTested)"
         :busy="saving"
         :editing="Boolean(editingModelID)"
-        :wide="creationRoute"
+        :wide="routePage || creationRoute"
         novalidate
         @update:name="emit('update:name', $event)"
         @update:provider="emit('selectProvider', $event as LLMProviderPreset)"
@@ -217,7 +217,7 @@ const emit = defineEmits<{
         @cancel="emit('cancelEditor')"
         @save="emit('save')"
       >
-        <template v-if="!creationRoute" #before-name>
+        <template v-if="!routePage && !creationRoute" #before-name>
           <div class="flex flex-wrap items-start gap-3">
             <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface text-text-muted"><KeyRound class="h-4 w-4" :stroke-width="1.75" /></div>
             <div class="min-w-0">
