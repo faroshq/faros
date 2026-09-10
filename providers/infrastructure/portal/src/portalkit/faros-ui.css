@@ -660,17 +660,17 @@ html.light .k-create-surface {
   flex-shrink: 0;
   padding: 0 12px;
   border-radius: 6px;
-  border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
-  background: var(--color-danger);
-  color: var(--color-on-accent);
+  border-color: color-mix(in srgb, var(--color-danger, #ff5d5d) 30%, transparent);
+  background: var(--color-danger, #ff5d5d);
+  color: var(--color-on-accent, #0a0b12);
   font-weight: 500;
   box-shadow: none;
 }
 .k-btn--danger-solid:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-danger) 90%, transparent);
+  background: color-mix(in srgb, var(--color-danger, #ff5d5d) 90%, transparent);
 }
 .k-btn--danger-solid:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--color-accent, #8b6bff);
   outline-offset: 2px;
 }
 .k-btn--danger-solid:disabled {
