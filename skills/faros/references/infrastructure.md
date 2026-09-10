@@ -133,20 +133,37 @@ with hot reload, and files are pushed with the data plane or MCP. Node.js is
 the only toolchain in the shipped dev images. Dev instances default to
 `access: private`.
 
-Data-plane verbs (through the hub, as you; production instances answer 409):
+Data-plane verbs (through the hub, as you; production instances answer 409).
+`scripts/faros-dev.sh` wraps all of them; verified against a live hub
+2026-09-10:
 
 ```
 GET  /services/providers/infrastructure/dataplane/clusters/{cluster}/instances/{name}/status
-GET  …/instances/{name}/components/{c}/log        (stream)
-POST …/instances/{name}/components/{c}/sync
+GET  …/instances/{name}/components/{c}/log        (stream; bound it with timeout)
+GET  …/instances/{name}/components/{c}/process    → {running, port, portReachable, sourceRevision, sourceDigest, …}
+POST …/instances/{name}/components/{c}/sync       {files[{path,content}], deletePaths[], restart ""|auto|always, sourceRevision?, sourceDigest?}
+                                                   → {phase:"Synced", changed[], deleted[], reloadRuns[], restarted, sourceRevision, sourceDigest}
 POST …/instances/{name}/components/{c}/restart
 POST …/instances/{name}/components/{c}/env
-GET  …/instances/{name}/components/{c}/process
-POST …/instances/{name}/components/{c}/exec       {argv, workdir, timeoutSeconds ≤120, sourceRevision, sourceDigest} → {state, exitCode, stdout, stderr, truncated}
+POST …/instances/{name}/components/{c}/exec       start: header Idempotency-Key (required) + {action:"start", argv[], workdir?, timeoutSeconds ≤120, sourceRevision, sourceDigest} → {sessionID, requestID, state:"queued"}
+                                                   poll:  {action:"poll", sessionID} → {state queued|running|succeeded|failed…, exitCode, stdout, stderr, truncated}
+                                                   cancel: {action:"cancel", sessionID}
 ```
 
-Exec is refused until the instance is Ready and its network phase is
-`runtime`; there is no MCP tool for exec. There is no metrics surface.
+- Sync paths are relative to the component's `workspacePath`; at most 512
+  files. `sourceRevision` and `sourceDigest` go together or not at all. With
+  them the sync is **authoritative**: it replaces the component's managed
+  file set, the revision must not go backwards, and the digest must equal
+  sha256 over `path` NUL `content` NUL for every file sorted by path (hex, an
+  optional `sha256:` prefix is ignored) or the call is a 409. Without them
+  files are written but the component has no source revision, and exec
+  refuses with `sourceRevision is required for start`.
+- Exec runs argv in a separate stateless executor: no shell (pass
+  `sh -c '…'` yourself), none of the app's environment (`$PORT`,
+  `DATABASE_URL` unset; env is `HOME LANG PATH PWD TMPDIR NPM_CONFIG_CACHE`),
+  working directory the component workspace. Exec is refused until the
+  instance is Ready and its network phase is `runtime`.
+- There is no metrics surface.
 
 ## 9. MCP tools (`infrastructure__*`)
 

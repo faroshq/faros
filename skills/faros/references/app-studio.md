@@ -95,7 +95,9 @@ GET    /api/projects/{p}/checkpoints                     → {items:[{key Templa
 `existingRepositoryRef?`.
 
 `ProjectView`: `name`, `uid`, `deleting`, `displayName`, `description`,
-`phase`, `template`, `repository {repositoryRef, name, connectionRef, htmlURL, status, ready, commits[]…}`,
+`phase`, `template`, `repository {ref, name, connectionRef, htmlURL, status, ready, commits[{name, phase, branch, commitSHA, commitURL, message, fileCount, createdAt, completedAt}]}`
+(`ref` is the code `Repository` name every `code__*` call wants; it can differ
+from the project name),
 `memory`, `sharing`, `environments[]`, `createdAt`, `updatedAt`,
 `sourceRevision`, `thumbnail`.
 
@@ -147,9 +149,11 @@ GET|POST /api/projects/{p}/preview                        {mode public|restricte
 GET|POST /api/projects/{p}/preview/grants ; POST …/preview/grants/{grant} (revoke)
 ```
 
-No start or stop route: the sandbox exists while `spec.template` is set. No
-exec route: command execution is the assistant's `exec_command` tool
-(argv only, no shell, bounded time and output, revision-verified). Runtime
+No start or stop route: the sandbox exists while `spec.template` is set. App
+Studio has no exec route of its own; the assistant uses `exec_command`, and
+you use the infrastructure data plane's `exec` on `<project>-dev` directly
+(infrastructure reference, section 8; `scripts/faros-dev.sh exec`).
+`sync-development` returns `{result: {<component>: {phase, changed, restarted, sourceRevision, sourceDigest}}}`. Runtime
 mutations such as `npm install` inside the sandbox are not synced back.
 
 ### Assistant
@@ -160,8 +164,8 @@ Thread → Turn → Item.
 GET|POST   /api/projects/{p}/assistant/threads                    GET ?includeArchived&limit&cursor → {items,nextCursor}; POST {id?,title?}
 PATCH|DELETE /api/projects/{p}/assistant/threads/{t}              {title?,archived?}
 GET        /api/projects/{p}/assistant/threads/{t}/items          ?limit&beforeSequence
-GET        /api/projects/{p}/assistant/threads/{t}/events         SSE; Last-Event-ID resumes; closing does not cancel
-POST       /api/projects/{p}/assistant/threads/{t}/turns          {content,clientUserMessageID,modelID?,collaborationMode Default|Plan|Review,skills?[],contextResources?[],contentParts?[]} → {thread,turn,continuationOfTurnID?}
+GET        /api/projects/{p}/assistant/threads/{t}/events         SSE; replays from sequence 1 unless Last-Event-ID; ends after turn.completed; closing does not cancel
+POST       /api/projects/{p}/assistant/threads/{t}/turns          {content,clientUserMessageID,modelID?,collaborationMode default|plan|review (lowercase; anything else is 400),skills?[],contextResources?[],contentParts?[]} → {thread,turn,continuationOfTurnID?}
 POST       /api/projects/{p}/assistant/threads/{t}/reviews        {target,clientUserMessageID,modelID?,skills?}  read-only Review turn
 GET        /api/projects/{p}/assistant/threads/{t}/turns/active   204 when idle
 GET        /api/projects/{p}/assistant/threads/{t}/turns/{turn}   {turn,effectiveSettings?}
@@ -308,8 +312,18 @@ declare `spec.development` with `components.<name> {workspacePath, imageInput, d
 
 Scaffold fetch is a tarball download (400 files, 8 MiB total, 1 MiB per file,
 text only) seeded only into an empty workspace and marked uncommitted so the
-reconciler lands it as the first commit. Scaffold contents are external and
-were not inspected (UNVERIFIED whether they ship an `AGENTS.md`).
+reconciler lands it as the first commit. Both shipped scaffolds (v0.1.3,
+checked 2026-09-10) include a root `AGENTS.md` stating the runtime contract,
+`.github/workflows/build.yaml` (smoke test, then one Railpack image per
+component pushed as `sha-<commit>` and `latest`, multi-arch), and
+`package.json` files with both `dev` and `start` scripts. CI smoke-tests
+`/api/health` (application) and `/` — keep them answering.
+
+The same reconciler commits whatever the workspace holds that is not yet in
+git whenever the project goes idle — in practice 5–15 s after every assistant
+turn that changed files, with the message `Update N files in <dirs>` and a
+file list. There is no switch for it and asking the model not to commit does
+not stop it.
 
 App Studio injects the workspace-root `AGENTS.md` (32 KiB cap) into every
 model sample. Project memory is injected too.

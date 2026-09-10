@@ -32,6 +32,24 @@ to call MCP tools from a plain shell, which 403s are not about permissions,
 and which alarming states are just latency. Read it before you conclude
 something is broken.
 
+### Fast path: use the scripts
+
+`scripts/` holds tested helpers that replace most of the hand-written curl in
+this file. Use them before writing your own; each was built because doing it
+by hand went wrong at least once.
+
+| Script | Does |
+|---|---|
+| `. scripts/faros-env.sh` | Resolves `HUB`, `CLUSTER`, `ORG`, `WS`, `TOKEN`, `AS`, `MCP_URL`, `MCP_TOKEN` from the `faros` kubeconfig context (OIDC or static token) and defines `fc` (REST with tenant headers) and `mcp <tool> '<json>'\|@file` (JSON-RPC call; exits 1 on `isError`). Source it in every shell call; tokens are short-lived. |
+| `scripts/faros-commit.sh <repositoryRef>` | Sends your local, unpushed git commits to `code__commit_files`, then resets your clone onto the faros-recorded SHA. The promotable way to ship local edits (section 5). |
+| `scripts/faros-dev.sh sync\|exec\|logs\|restart\|status <instance> [component]` | Drives any development-mode `Instance` through the hub data plane: push files, run a command and get its exit code, tail logs. Works when `infrastructure__*` tools are absent. |
+
+```bash
+. ~/.claude/skills/faros/scripts/faros-env.sh     # adjust to where the skill lives
+fc "$AS/api/projects" | jq -r '.items[].name'
+mcp code__list_repositories '{}'
+```
+
 ## 1. Rules that override everything else
 
 1. **There is no default hub.** `faros login` needs `--hub-url` or
@@ -123,6 +141,10 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
 
 ### 2.2 Get a bearer token for curl
 
+`. scripts/faros-env.sh` does 2.2, 2.3 and the MCP half of 2.5 in one step
+after `faros login`. The manual route, for when you need to understand or
+override it:
+
 | Hub auth | How to get `$TOKEN` |
 |---|---|
 | Static token | The token you logged in with. Also in the kubeconfig: `kubectl config view --raw -o jsonpath='{.users[?(@.name=="faros")].user.token}'` |
@@ -158,11 +180,17 @@ federates providers.
 
 **The catalog is the authority, and it differs per org.** Read it before you
 plan anything; do not assume a provider is present, ready, or platform-scoped.
-On one dev hub in 2026-09 the catalog held exactly six entries — `agents`,
-`app-studio`, `code`, `edges`, `infrastructure`, `kuery` — none of which
-advertised `builtin`, and `infrastructure` was `scope: org` (a self-hosted
-provider shadowing the platform one). `scope` is the field that decides
-whether a provider's tools reach the MCP aggregate; see section 9.
+`scope` is `global` for a platform provider and `org` for a self-hosted one;
+an `org` entry also carries `ownerOrg` and, when it replaces a platform
+provider of the same name, `shadowsPlatform: true`. On one dev hub in 2026-09
+the catalog held exactly six entries — `agents`, `app-studio`, `code`,
+`edges`, `infrastructure`, `kuery` — none advertised `builtin`, and
+`infrastructure` was `scope: org`. `scope` decides whether a provider's tools
+reach the MCP aggregate; see section 9.
+
+```bash
+fc "$HUB/api/providers" | jq -c '.items[] | {name, scope, ready, shadowsPlatform}'
+```
 
 ```bash
 curl -s "$HUB/api/providers" -H "$A" -H "X-Faros-Org: $ORG"          # catalog with ready, dependencies, permissionClaims
@@ -218,12 +246,15 @@ Per-edge endpoints exist too: `faros mcp url --edge <name>` (Kubernetes edges on
 
 REST calls to a provider need three headers: `Authorization: Bearer`,
 `X-Faros-Org`, `X-Faros-Workspace`. Errors come back as Kubernetes `Status`
-JSON. Lists are `{"items":[…]}`.
+JSON. Most lists are `{"items":[…]}`, but not all — `development-templates`
+is `{"templates":[…]}`, `files` is `{"files":[…]}` — so an empty `jq '.items[]'`
+means "look at the raw body", not "nothing there".
 
 **Two things to settle before you pick a row.** First, an `MCP <provider>__*`
-cell is a promise only if that provider is platform-scoped in this org —
+cell is a promise only if that provider is `scope: global` in this org —
 org-scoped providers are excluded from the aggregate, so `infrastructure__*`
-may simply not exist for you. Second, you do not need an MCP client to use
+may simply not exist for you (`scripts/faros-dev.sh` covers the dev-sandbox
+tools through the data plane instead). Second, you do not need an MCP client to use
 those tools: the endpoint is plain JSON-RPC over HTTP. Both are in section 9.
 
 ## 4. Playbook: build and ship an app with App Studio
@@ -269,7 +300,7 @@ curl -s "$AS/api/projects/llm-settings" -H "$A" $T          # configured:true, d
 ### Step 1: pick a template
 
 ```bash
-curl -s "$AS/api/projects/development-templates" -H "$A" $T
+fc "$AS/api/projects/development-templates" | jq -c '.templates[] | {name, components, hasScaffold}'
 ```
 
 | Template | Shape | Public URL | Dev toolchain |
@@ -279,9 +310,24 @@ curl -s "$AS/api/projects/development-templates" -H "$A" $T
 | `worker` | Deployment, no Service | no | |
 | `universal-coding-sandbox` | scratch sandbox | no | disabled by default |
 
+**If the app needs a database, the answer is `application`.** It is the only
+template that wires a database into a workload. The standalone `database`
+and `redis-cache` templates put their credentials in a Secret on the runtime
+cluster, and no workload template (`simple-webapp`, `worker`, `cron-job`) has
+an input that can reference a Secret — their only env input is a
+world-readable map. Planning "`simple-webapp` plus a `database` instance"
+produces two healthy instances that cannot talk to each other.
+
 Read the template's `spec.agent.usage` before writing code; it is the
 runtime contract (bind `0.0.0.0`, `$PORT`, `DATABASE_URL`, retry the first
-DB connect, same-origin `/api/*`):
+DB connect, same-origin `/api/*`). Put the schema setup *inside* that retry
+loop, not after it: the scaffold retries only `select 1`, and against a
+freshly booting Postgres the first real query can still fail
+(`read ECONNRESET`), leaving the api up but answering `database not ready`. The scaffold also ships a root `AGENTS.md`
+with the same rules plus two that bite: keep `/api/health` answering (CI
+smoke-tests it) and keep both `dev` and `start` scripts working (the sandbox
+runs `dev`; the Railpack-built production image runs `start`). Do not add a
+Dockerfile; images are built by Railpack from each component directory.
 
 ```bash
 kubectl get template application -o jsonpath='{.spec.agent.usage}'
@@ -296,6 +342,17 @@ For a blueprint from a prompt without creating anything:
 the set — repository, first commit, dev instance — and ownership is what
 later makes promotion and publishing work. There is no supported way to
 assemble a project out of parts you created yourself.
+
+**Check the name is free first**, on all three sides. A deleted project
+leaves its `Repository` CR and GitHub repo behind (step 7), and a taken name
+silently gets a suffix instead of failing:
+
+```bash
+N=shop
+fc "$AS/api/projects" | jq -r '.items[].name' | grep -x "$N"          # an App Studio project
+kubectl get repositories.code.faros.sh "$N" 2>/dev/null               # a code Repository CR (maybe orphaned)
+gh repo view "$(kubectl get connection.code.faros.sh -o jsonpath='{.items[0].spec.owner}')/$N" >/dev/null 2>&1 && echo "GitHub repo exists"
+```
 
 | Want | Do | Not |
 |---|---|---|
@@ -313,7 +370,17 @@ Other creation modes: `{"prompt":"…","inferDevelopmentTemplate":true}` lets
 the assistant choose; `{"existingRepositoryRef":"<code Repository name>"}`
 adopts an existing repository CR and hydrates the workspace from it
 (candidates: `GET $AS/api/projects/import-repositories`). `POST $AS/api/projects/stream`
-is the same call as SSE with progress events.
+is the same call as SSE with progress events. Creating a project does **not**
+start an assistant turn, even with `prompt`; you open a thread yourself.
+
+**The repository name is not always the project name.** With `prompt` the
+repository is named from the generated display name (project `focus-timer`
+got repository `pomodoro-focus-timer`), and a taken name gets a suffix.
+Every `code__*` call takes the repository name, so read it, never assume it:
+
+```bash
+REPO_REF=$(fc "$AS/api/projects/shop" | jq -r .repository.ref)   # the field is `ref`
+```
 
 What happens, all from that one request: a `code.faros.sh` `Repository` CR is
 created (private, `autoInit`), the code provider creates the GitHub repo, the
@@ -331,15 +398,21 @@ independently yours.
 Wait and inspect. **`phase: Ready` on the project is not the gate** — the
 project reports Ready while its repository is still being created, and a
 `code__commit_files` against it fails with `repository "shop" not found`.
-Poll `.repository.ready == true` before you commit anything; a fresh project
-can report `repository.status: RepositoryMissing` for the first few seconds.
+Gate on two things before you clone or commit: `.repository.ready == true`,
+and a `Succeeded` scaffold commit in `.repository.commits` — clone earlier and
+you get GitHub's bare `Initial commit` with none of the scaffold files.
 
 ```bash
-curl -s "$AS/api/projects/shop" -H "$A" $T | jq '{phase, repoReady: .repository.ready, repoStatus: .repository.status}'
-curl -s "$AS/api/projects/shop" -H "$A" $T | jq '{phase, template, repository, environments}'
-curl -s "$AS/api/projects/shop/checkpoints" -H "$A" $T     # Template / Git / CI / Production, each done|pending|blocked|error with remediation
+until fc "$AS/api/projects/shop" | jq -e '.repository.ready == true and ([.repository.commits[]? | select(.phase=="Succeeded")] | length > 0)' >/dev/null; do sleep 5; done
+fc "$AS/api/projects/shop/checkpoints" | jq -c '.items[] | {key, state, reason}'   # Template / Git / CI / Production
 kubectl get instance shop-dev -o jsonpath='{.status.phase} {.status.url}'
 ```
+
+Measured on a dev hub, 2026-09-10, for two fresh projects: repository ready
+~10 s after create; scaffold commit landed 15–40 s after create (the
+reconciler retries it by itself if GitHub rate-limits — you will see one or
+two `Failed` commits before the `Succeeded` one, which is not your problem);
+dev instance Ready ~2.5 min after create.
 
 ### Step 3: develop
 
@@ -350,48 +423,81 @@ them mid-turn.
 
 ```bash
 TH=thread-cart      # you may choose the id; omit it and read `.id` from the 201 response instead
-curl -s -X POST "$AS/api/projects/shop/assistant/threads" -H "$A" $T -H 'Content-Type: application/json' -d "{\"id\":\"$TH\",\"title\":\"cart\"}"
-curl -s -X POST "$AS/api/projects/shop/assistant/threads/$TH/turns" -H "$A" $T -H 'Content-Type: application/json' \
-  -d '{"content":"Add a cart page backed by /api/cart. Do not commit.","clientUserMessageID":"m1","collaborationMode":"Default"}'
-curl -N "$AS/api/projects/shop/assistant/threads/$TH/events" -H "$A" $T      # SSE; Last-Event-ID resumes
-curl -s "$AS/api/projects/shop/assistant/threads/$TH/turns/active" -H "$A" $T # 204 when idle
+fc -X POST "$AS/api/projects/shop/assistant/threads" -H 'Content-Type: application/json' -d "{\"id\":\"$TH\",\"title\":\"cart\"}"
+fc -X POST "$AS/api/projects/shop/assistant/threads/$TH/turns" -H 'Content-Type: application/json' \
+  -d '{"content":"Add a cart page backed by /api/cart.","clientUserMessageID":"m1","collaborationMode":"default"}'
+# 202 {"thread":{…},"turn":{"id":"run-…","status":"in_progress",…}}
+curl -sN "$AS/api/projects/shop/assistant/threads/$TH/events" -H "Authorization: Bearer $TOKEN" \
+  -H "X-Faros-Org: $ORG" -H "X-Faros-Workspace: $WS" > events.log     # blocks until the turn ends
+fc "$AS/api/projects/shop/assistant/threads/$TH/turns/active" -w '%{http_code}\n'   # 204 when idle
 ```
+
+- `collaborationMode` is **lowercase**: `default`, `plan`, or `review`.
+  `"Default"` is a 400 (`collaborationMode must be default, plan, or review`)
+  — and if you pipe the reply to `jq` you only see nulls, so print the raw
+  body when a turn "does nothing".
+- **The events stream ends by itself after `turn.completed`**, so a plain
+  `curl -N … > file` doubles as "wait for the turn". Each event is
+  `id: <sequence>` / `event: <type>` / `data: {…}`. Without a header the
+  stream replays the thread from sequence 1; send `Last-Event-ID: <last seen
+  sequence>` to get only what follows (start the turn first, then attach —
+  nothing is lost, the replay covers the gap). Item types are
+  `userMessage`, `agentMessage`, `plan`, `dynamicToolCall`; the final
+  `agentMessage` is the summary. One-line digest of a log:
+  `sed -n 's/^data: //p' events.log | jq -r 'select(.type=="item.completed") | [.sequence, .payload.item.type, (.payload.item.content|tostring|.[0:120])] | @tsv'`
+- **The reconciler commits the assistant's edits for you**, about 5–15 s after
+  the turn ends, as `Update N files in <dirs>`. You do not ask for a commit
+  and you do not call `code__commit_files`; poll `.repository.commits[0]`. A
+  `plan` turn edits nothing and produces no commit.
+- Measured 2026-09-10: a whole small single-page app in one default turn took
+  3 min; a follow-up feature 70 s; a plan turn 13 s.
+- The assistant's own browser check of the preview can fail ("Preview
+  navigation failed"); it says so in its summary and still verifies build and
+  reachability. Look at the UI yourself before calling it done.
 
 Approvals and questions arrive as events; answer with
 `POST …/turns/{turn}/approval {"requestID":"…","decision":"allow"}` or
-`…/input {"requestID":"…","answer":"…"}`. `collaborationMode` is `Default`,
-`Plan`, or `Review`. Steer a running turn with `…/turns/{turn}/steer`,
-stop it with `…/interrupt`. The assistant's `exec_command` is the only way to
-run commands inside the sandbox from outside.
+`…/input {"requestID":"…","answer":"…"}`. Steer a running turn with
+`…/turns/{turn}/steer`, stop it with `…/interrupt`.
 
 **B. Local editor plus `code__commit_files` (recommended for a coding agent).**
 
 ```bash
-REPO=$(curl -s "$AS/api/projects/shop" -H "$A" $T | jq -r .repository.htmlURL)
-git clone "$REPO" shop && cd shop            # GitHub credentials, not a faros token
-# edit locally, run tests locally, then commit THROUGH faros:
+gh repo clone "$(fc "$AS/api/projects/shop" | jq -r '.repository.htmlURL | sub("https://github.com/";"")')" shop && cd shop
+# edit, run the project's checks locally (npm install && npm run build …), then:
+git add -A && git commit -m "Add cart"        # local only — never push
+scripts/faros-commit.sh "$REPO_REF"            # records it through faros, prints the SHA
 ```
 
-Call the MCP tool `code__commit_files` with
-`{"repositoryRef":"shop","branch":"main","message":"Add cart","files":[{"path":"api/cart.js","content":"…"}],"deletePaths":[]}`.
-Limits: 500 files, 2 MiB per file, 16 MiB total, UTF-8 text only. A helper
-that turns `git diff --name-status <base>` into that payload keeps the loop
-honest.
+`faros-commit.sh` sends every file that differs between `origin/main` and
+your `HEAD` to `code__commit_files` (deletions as `deletePaths`), keeps the
+message under the 512-byte cap, waits for `Succeeded`, then fetches and
+resets your branch onto the faros-recorded commit after checking the trees
+match. Round trip ~7 s. The raw tool, if you need it:
+`{"repositoryRef":"<.repository.ref>","branch":"main","message":"…","files":[{"path":"api/cart.js","content":"…"}],"deletePaths":[]}`.
+Limits: 500 files, 2 MiB per file, 16 MiB total, UTF-8 text only, and a
+**512-byte commit message** — longer fails with
+`RepositoryCommit.code.faros.sh "…" is invalid: spec.message: Too long`, an
+error naming a CRD you never touched.
 
 **If you have no MCP client wired, you can still call it.** The aggregate is
-plain JSON-RPC over HTTP, so a shell session is not blocked — see section 9.2
-for the exact invocation. This matters because `code__commit_files` is the
-only way to record a promotable commit, so "I have no MCP tools" is never a
-reason to fall back to `git push`.
+plain JSON-RPC over HTTP (`mcp` in `faros-env.sh`, or section 9.2 by hand).
+`code__commit_files` is the only way to record a promotable commit, so "I
+have no MCP tools" is never a reason to fall back to `git push`.
 
-Then pull the workspace and sandbox up to date:
+Then bring the App Studio workspace and the sandbox up to date:
 
 ```bash
-curl -s -X POST "$AS/api/projects/shop/hydrate-workspace" -H "$A" $T -H 'Content-Type: application/json' -d '{}'   # git → workspace
-curl -s -X POST "$AS/api/projects/shop/sync-development" -H "$A" $T                                                # workspace → sandbox
+fc -X POST "$AS/api/projects/shop/hydrate-workspace" -H 'Content-Type: application/json' -d '{}' | jq -c '{commitSHA, written: (.written|length)}'  # git → workspace
+fc -X POST "$AS/api/projects/shop/sync-development" | jq -c '.result'   # workspace → sandbox; {<component>: {phase: "Synced", changed, restarted, sourceRevision, sourceDigest}}
 ```
 
-Then `git pull` locally so your clone matches the commit faros created.
+In both runs so far (two projects), the first `sync-development` after a hydrate
+already returned `changed: null, restarted: false` — the sandbox had the new
+revision, so hydrate appears to push it on its own. Treat sync as a cheap,
+idempotent "make sure", and prove the new code is live by hitting something
+only your change has: `scripts/faros-dev.sh exec shop-dev api -- node -e 'fetch("http://127.0.0.1:8080/api/<new route>").then(r=>r.text()).then(console.log)'`
+(the `web` component answers on the same port in its own container).
 
 **C. Plain `git push`.** Works for CI and for the GitHub repo, but see rule 12:
 App Studio will not see the commit for promotion. Use it only when you plan to
@@ -401,17 +507,30 @@ user accepts that limitation.
 **Preview, logs, restart** (any path):
 
 ```bash
-curl -s -X POST "$AS/api/projects/shop/authorize-development-preview" -H "$A" $T
-# {"ready":true,"previewURL":"https://shop-dev-<hash>.<domain>","desiredAccess":"private",…}
-curl -N "$AS/api/projects/shop/development-logs?component=api" -H "$A" $T
-curl -s "$AS/api/projects/shop/development-status" -H "$A" $T
-curl -s -X POST "$AS/api/projects/shop/restart-development?component=api" -H "$A" $T
-curl -s "$AS/api/projects/shop/files" -H "$A" $T
-curl -s "$AS/api/projects/shop/files/content?path=api/cart.js" -H "$A" $T
+fc -X POST "$AS/api/projects/shop/authorize-development-preview" | jq -c '{ready, previewURL, desiredAccess}'
+timeout 5 curl -sN "$AS/api/projects/shop/development-logs?component=api" -H "Authorization: Bearer $TOKEN" -H "X-Faros-Org: $ORG" -H "X-Faros-Workspace: $WS"   # streams; bound it
+fc "$AS/api/projects/shop/development-status"
+fc -X POST "$AS/api/projects/shop/restart-development?component=api"
+fc "$AS/api/projects/shop/files" | jq -r '.files[].path'
+fc "$AS/api/projects/shop/files/content?path=api/cart.js" | jq -r .content
 ```
 
-Dev previews are private by default; `POST …/preview {"mode":"public"}` opens
-them, `…/preview/grants {"user":"…"}` invites a workspace member.
+**A private URL cannot be tested with a bearer token.** Dev previews (and
+unpublished prod instances) sit behind the access gate, which answers every
+non-browser request — with or without `Authorization` — with a 302 to
+`<hub>/auth/apps/authorize?…`. That 302 is useful on its own: it proves DNS,
+TLS, and the route are up. To test the app itself from a shell, run the
+request *inside* the sandbox (the dev instance is `<project>-dev`):
+
+```bash
+scripts/faros-dev.sh exec shop-dev api -- node -e 'fetch("http://127.0.0.1:8080/api/health").then(r=>r.text()).then(console.log)'
+```
+
+The executor does not get the app's environment (`$PORT`, `DATABASE_URL`
+are unset there), so name the port. Otherwise open the URL in a browser
+where the user is signed in, or open the preview with
+`POST …/preview {"mode":"public"}` (`…/preview/grants {"user":"…"}` invites
+a workspace member).
 
 Expect **409** on template switch, hydrate, sync, and delete while an
 assistant turn owns the project. Wait for `turns/active` to return 204.
@@ -425,13 +544,17 @@ two minutes. A release is promotable only when every component has a digest
 for the exact newest faros-recorded commit.
 
 ```bash
-curl -s "$AS/api/projects/shop/promotion" -H "$A" $T | jq '{promotable, build: .build.status, missing: .build.missing, commit: .build.commitSHA}'
-curl -s "$AS/api/projects/shop/releases" -H "$A" $T
+fc "$AS/api/projects/shop/promotion" | jq -c '{promotable, build: .build.status, missing: .build.missing, commit: .build.commitSHA, prod: .production}'
+fc "$AS/api/projects/shop/releases" | jq -c '.items[] | {commitSHA, deployable, live}'
+# wait for it:
+until fc "$AS/api/projects/shop/promotion" | jq -e '.promotable == true' >/dev/null; do sleep 20; done
 ```
 
-If `build.status` is `incomplete` or `none`, check CI with MCP
-`code__build_status {"repositoryRef":"shop","workflowFileName":"build.yaml","maxLogLines":200}`
+If `build.status` is `incomplete` or `none`, check CI with
+`mcp code__build_status '{"repositoryRef":"<ref>","workflowFileName":"build.yaml","maxLogLines":200}'`
 and re-run with `code__rebuild`. Both need the `workflow` scope on the PAT.
+To see what the crawler has found so far:
+`kubectl get packages.code.faros.sh -l code.faros.sh/repository=<ref> -o json | jq -c '.items[] | {p: .status.packageName, tags: [.status.versions[]? | (.tags // [])[]]}'`.
 
 **`none` usually means "not yet", not "wrong".** There are two distinct causes
 and they need opposite responses:
@@ -441,26 +564,53 @@ and they need opposite responses:
 | Your commit's SHA | CI has not finished, or the ghcr crawler has not run | Wait. The crawl is every two minutes, so `none` for a couple of minutes *after* a green CI run is normal |
 | Missing, or an older SHA | The commit was not recorded through faros | Re-commit with `code__commit_files` |
 
-Measured on a dev hub in 2026-09: image build ~3.5 min, then `built` roughly
-two minutes after CI went green. Budget about six minutes from commit to
-promotable and do not diagnose anything before then.
+Measured on a dev hub, 2026-09-09/10, five commits across three projects:
+commit → `built` took 3.2–4.5 min (CI ~3 min, then the next crawl).
+Budget five minutes and do not diagnose anything before then.
+
+To catch database bugs before that five-minute loop, reproduce the
+scaffold's CI smoke test locally: `docker run -d --rm -p 5432:5432 -e
+POSTGRES_USER=appuser -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=appdb postgres:16`,
+then `PORT=8081 DATABASE_URL=postgres://appuser:pw@localhost:5432/appdb npm start`
+in `api/` and probe `/api/health` plus the routes you added.
 
 ### Step 5: promote to production
 
 ```bash
-curl -s -X POST "$AS/api/projects/shop/promote" -H "$A" $T -H 'Content-Type: application/json' \
-  -d '{"values":{"access":"private","expose":{"hostnamePrefix":"shop"}}}'
-# {"environment":"production","instance":"shop-prod","rolloutRevision":"…","commitSHA":"…","components":[…]}
+fc "$AS/api/projects/shop/promotion" | jq -c '{prod: .production, immutable: .immutableProductionInputs}'   # prod null = never deployed
+fc -X POST "$AS/api/projects/shop/promote" -H 'Content-Type: application/json' \
+  -d '{"values":{"expose":{"hostnamePrefix":"shop"}}}'
+  | jq -c '{instance, commitSHA, rolloutRevision, components: [.components[] | {name, built}]}'   # the raw body also embeds the whole Project, several KB
 kubectl get instance shop-prod -o jsonpath='{.status.phase} {.status.url}'
 ```
 
 Promotion creates or updates one infrastructure `Instance` named
 `<project>-prod` with `farosMode: production` and each image input pinned
 to the built digest. `name`, `farosMode`, image inputs, `farosRedeployRevision`,
-`farosCluster`, `credentialsSecretName` are platform-owned; anything you pass
-for them is overridden. `expose.hostnamePrefix` is settable on first deploy
-only. Re-promoting keeps the instance name, URL, and grants and rolls only
-pods. Pass `{"commitSHA":"…"}` to promote a specific faros-recorded commit.
+`farosCluster`, `credentialsSecretName`, and `access` are platform-owned;
+anything you pass for them is overridden (visibility is step 6).
+Pass `{"commitSHA":"…"}` to promote a specific faros-recorded commit.
+
+- **Choose the hostname on the first promote; you cannot change it later.**
+  `immutableProductionInputs` lists `expose.hostnamePrefix` (plus
+  `database.size`/`database.version` for `application`). Once
+  `.production` is non-null, re-sending the *same* prefix is accepted and a
+  different one is `400 production setting "expose.hostnamePrefix" is locked
+  after the first deployment`. When you did not do the first deploy yourself
+  (the portal or the assistant's `promote_project` may have), read
+  `.production` first and promote with `{}`.
+- Each promote rolls pods, even for the same commit (a fresh
+  `rolloutRevision`); it is not a no-op to retry.
+- Measured: prod instance Ready 1–1.5 min after the first promote; the new
+  hostname then fails TLS until 4–6 min after the promote (section 9.4). Do
+  not debug before 10 minutes.
+
+**Verify production.** Production has no exec or log path, so check it in
+two steps: `curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://<host>/`
+gives 200 once published publicly, or a 302 to `<hub>/auth/apps/authorize`
+while private — either proves DNS, TLS, and the route. Then exercise the app
+where the user is signed in (their browser), or on a public URL with curl.
+An unpublished app cannot be tested from a shell at all.
 
 ### Step 6: publish and share
 
@@ -471,6 +621,9 @@ curl -s -X POST "$AS/api/projects/shop/publishing/grants" -H "$A" $T -H 'Content
 curl -s -X DELETE "$AS/api/projects/shop/publishing" -H "$A" $T          # back to private, drops grants
 ```
 
+After the first promote, `GET …/publishing` already reports
+`published: true` with `mode: restricted` — that is the private default
+(signed-in members with a grant), not a publication you forgot about.
 Visibility is the prod instance's `access` value behind an
 infrastructure-owned access gate; changing it never redeploys. Grants are
 plain kcp RBAC (ClusterRole `faros-app-access.<instance>` plus one binding
@@ -515,22 +668,24 @@ Use this when the user wants to work in their own editor against an App
 Studio project and still ship through App Studio.
 
 1. Confirm the project is settled: `GET …/assistant/threads/…/turns/active` is
-   204 for every thread, and `GET …/checkpoints` shows Git `done`.
+   204 for every thread, and `GET …/checkpoints` shows Git `done`. An
+   assistant turn that just ended is followed by the reconciler's commit a
+   few seconds later; clone after it lands.
 2. Clone `repository.htmlURL`. Never push to `main` directly (rule 12).
-   Local branches are fine for your own iteration.
-3. Make the change locally. Run the project's own tests locally. The dev
-   toolchain in the sandbox is Node.js only for `application` and
+   Local branches and local commits are fine; they are how you stage work.
+3. Make the change locally. Run the project's own checks locally — for the
+   shipped scaffolds that is `npm install && npm run build` in `web/`
+   (or the root for `simple-webapp`) and `node --check` on the server. The
+   dev toolchain in the sandbox is Node.js only for `application` and
    `simple-webapp`; a Dockerfile does not change that.
-4. Record the change through faros with `code__commit_files` (section 4,
-   step 3B). One call per logical commit. Deleted files go in `deletePaths`.
-5. `POST …/hydrate-workspace {}` then `POST …/sync-development`. Check
-   `authorize-development-preview` and `development-logs`.
-6. `git pull` locally. Wait for `GET …/promotion` to report `built`, then promote.
+4. `git add -A && git commit` locally, then `scripts/faros-commit.sh <ref>`.
+   One run per logical change; it leaves your clone on the faros SHA, so no
+   `git pull` is needed.
+5. `POST …/hydrate-workspace {}` then `POST …/sync-development`. Verify with
+   `development-logs` and `faros-dev.sh exec <project>-dev <component> -- …`.
+6. Wait for `GET …/promotion` to report `promotable: true`, then promote.
 7. If the user only needs the dev sandbox and not App Studio's git loop,
-   skip App Studio: provision an `Instance` with `farosMode: development`
-   through `infrastructure__provision` and push files with
-   `infrastructure__dev_sync` (16 MiB cap, paths must fall under a declared
-   component `workspacePath`). Logs: `infrastructure__dev_logs`.
+   skip App Studio: see section 6.1.
 
 ## 6. Playbook: deploy without App Studio
 
@@ -576,15 +731,56 @@ kubectl get instance hello -o jsonpath='{.status.phase} {.status.url}'
   such as `database.version`).
 - Invalid values are admitted and reported as condition `Valid=False`
   reason `InvalidValues`; the last good runtime keeps running.
-- `database` (Postgres) and `redis-cache` are `exposure: internal`: no URL,
-  consumed pod-to-pod inside the runtime cluster. Outputs land in
-  `status.host`, `status.port`, and a connection Secret named in status.
+- `database` (Postgres) and `redis-cache` are `exposure: internal`: no URL.
+  Outputs land in `status.host`, `status.port`, and a connection Secret named
+  in status that lives on the runtime cluster. **No shipped workload template
+  can consume that Secret** (section 4, step 1), so a standalone database is
+  only useful to something you run outside these templates. For an app with
+  a database, use `application`.
 - Workloads run on the provider's private runtime cluster. You cannot kubectl
   into it; production instances have no exec or log path. Development-mode
   instances expose `log`, `sync`, `restart`, `exec` through the data plane
-  and the `infrastructure__dev_*` tools.
+  (section 6.1) and, where present, the `infrastructure__dev_*` tools.
 - Never set `expose.fqdn`, `farosCluster`, `credentialsSecretName`,
   `farosRedeployRevision`, `farosNetworkPhase`, or `farosActions*`.
+- Measured 2026-09-10: a production `simple-webapp` from a public image
+  (the template's own `sampleValues`, `nginx:latest` on port 80) and a
+  development-mode one were each Ready in about a minute.
+
+### 6.1 A live dev sandbox with no git loop
+
+A development-mode `Instance` is a hot-reloading Node.js sandbox you push
+files into. No repository, no image, no promotion — useful for a throwaway
+tool or a prototype, and the fastest way to see code running.
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: infrastructure.faros.sh/v1alpha1
+kind: Instance
+metadata: { name: scratch, labels: { faros.sh/template: simple-webapp } }
+spec:
+  template: simple-webapp
+  values: { name: scratch, farosMode: development, port: 8080, access: private }
+EOF
+# once Ready (~1 min):
+scripts/faros-dev.sh sync scratch app ./scratch          # {"phase":"Synced","changed":[…],"reloadRuns":["npm install …"],"restarted":true}
+scripts/faros-dev.sh exec scratch app -- node -e 'fetch("http://127.0.0.1:8080/").then(r=>console.log(r.status))'
+timeout 5 scripts/faros-dev.sh logs scratch app
+```
+
+The component is the template's: `app` for `simple-webapp` (workspace `.`),
+`web` and `api` for `application`, `worker` for `worker`. Three things the
+data plane does that you would not guess — the full contract is in
+[references/infrastructure.md](references/infrastructure.md) §8:
+
+- Sync with `sourceRevision` + `sourceDigest` (an *authoritative* sync);
+  without them files land but exec refuses with
+  `sourceRevision is required for start`.
+- Exec is start (with an `Idempotency-Key` header) then poll, argv only, and
+  runs without the app's environment — name the port, there is no `$PORT`.
+- `simple-webapp`'s dev start runs `npm run dev -- --host 0.0.0.0 --port $PORT
+  --config .faros-vite.config.mjs`; a non-Vite `dev` script receives those
+  flags as arguments, so ignore them and read `process.env.PORT`.
 
 ## 7. Playbook: hosted agents
 
@@ -603,11 +799,24 @@ curl -s -X POST "$AG/api/credentials/main/test" -H "$A" $T
 curl -s -X POST "$AG/api/agents" -H "$A" $T -H 'Content-Type: application/json' \
   -d '{"name":"researcher","displayName":"Researcher","systemPrompt":"You are a careful research assistant. Cite sources.","autonomy":"auto","modelCredential":"main","interactiveFamilies":["core","web","spawn"],"backgroundFamilies":["core","web"],"budgetUSD":"25"}'
 # 3. invoke and wait (wait caps at 120 s)
-curl -s -X POST "$AG/api/agents/researcher/runs" -H "$A" $T -H 'Content-Type: application/json' \
-  -d '{"task":"Compare X and Y with sources.","wait":120,"idempotencyKey":"cmp-1"}'
-curl -s "$AG/api/runs/$RUN_ID/wait?timeoutSeconds=300" -H "$A" $T
-curl -s "$AG/api/runs/$RUN_ID" -H "$A" $T | jq '{phase, output, sources, steps, children}'
+fc -X POST "$AG/api/agents/researcher/runs" -H 'Content-Type: application/json' --max-time 150 \
+  -d '{"task":"Compare X and Y with sources.","wait":120,"idempotencyKey":"cmp-1"}' | jq -r '.run.output'
+# finished within wait → 200 {runId, phase, reused, run:{…, output}}; the output is under .run, not top level
+# still running → 202 {runId, phase}; then:
+fc "$AG/api/runs/$RUN_ID/wait?timeoutSeconds=300"
+fc "$AG/api/runs/$RUN_ID" | jq '{phase, output, steps: [.steps[]? | {tool, args}], usdMicros, durationMS}'
 ```
+
+Check what exists before creating: `GET $AG/api/credentials` lists model
+credentials (`hasAPIKey`), and `GET $AG/api/agents` returns the `Agent` CRs
+themselves, so read `.items[].spec.models.chat` — the create body's
+`modelCredential` is stored there, and `budgetUSD` becomes
+`spec.budget {usdLimit, window: month}`. Re-posting a run with the same
+`idempotencyKey` returns the original run with `reused: true` and does not
+run again. Measured 2026-09-10: a two-`web_fetch` digest task took 14 s and
+3,330 µUSD on `gpt-5-mini`. A background run's `web_fetch` reaches public
+URLs, including a *published* faros app's JSON API; private apps answer it
+with the sign-in redirect.
 
 Same thing over MCP: `agents__save_model_credential`, `agents__create_agent`,
 `agents__update_agent`, `agents__run_agent {"agent":"researcher","task":"…","wait":120}`,
@@ -719,9 +928,19 @@ Three parsing details, all verified 2026-09-09:
 - **Replies are always SSE**, even for a single result:
   `content-type: text/event-stream`, an `event: message` line, then
   `data: {…}`. Strip the leading `data: ` and parse the last JSON object.
-- **A failing tool still returns HTTP 200.** The failure is prose inside
-  `result.content[].text` — that is where `repository "x" not found` and the
-  GitHub rate-limit message arrive. Check the body, never just the status.
+- **A failing tool still returns HTTP 200.** The result carries
+  `"isError": true` and the reason is prose in `result.content[0].text` —
+  that is where `repository "x" not found` and the GitHub rate-limit message
+  arrive. On success the same `text` field holds the tool's JSON output as a
+  string, so parse it with `jq '.result.content[0].text | fromjson'`. Test
+  `isError`, never the HTTP status.
+
+One shell trap that corrupts all of the above: **in zsh, `echo "$json"`
+turns every `\n` inside a JSON string into a real newline**, and jq then fails
+with `Invalid string: control characters … must be escaped`. Commit messages
+and file contents are full of `\n`. Pipe responses straight into `jq`, or
+use `printf '%s' "$json"`, never `echo`. (The Bash tool in Claude Code runs
+the user's login shell, which is often zsh.)
 
 ### 9.3 `tools/list` is the only honest inventory
 
@@ -750,13 +969,30 @@ to the two is opposite — wait, or rebuild.
 
 | Symptom | Usually | Confirm it is only latency |
 |---|---|---|
-| New `Instance` URL fails the TLS handshake (curl exit 35) | The certificate for that hostname is still being issued; allow five to ten minutes | An older instance on the same base domain serves 200, and `openssl s_client -connect <host>:443 -servername <host>` shows no matching subject CN yet |
+| New `Instance` URL fails the TLS handshake (curl exit 35) | The certificate for that hostname is still being issued; allow 4–6 minutes after the instance is created or first promoted; do not debug before 10 | An older instance on the same base domain serves 200, and `openssl s_client -connect <host>:443 -servername <host>` shows no matching subject CN yet |
 | `promotion.build.status: none` right after a green CI run | The ghcr crawler runs every two minutes | `build.commitSHA` already equals your commit |
-| Fresh project, `repository.status: RepositoryMissing` | The `Repository` CR is still being created | `phase` is Ready but `.repository.ready` is false; poll it |
+| `build.status: incomplete`, one component `missing`, CI green | The crawler has seen one package and not yet the other | Both jobs succeeded in `code__build_status`; the next crawl fixes it |
+| Fresh project, `repository.status: RepositoryMissing` with the message `Repository resource "<name>" no longer exists.` — even in the 201 create response | The `Repository` CR is still being created; "no longer exists" is misleading wording | `phase` is Ready but `.repository.ready` is false; poll it |
+| Fresh project, one or two `Failed` commits before the scaffold lands | The reconciler retrying its own scaffold commit through a GitHub rate limit | A later commit with the same message is `Succeeded` |
+| Private URL returns 302 to `/auth/apps/authorize` | Not a failure: the access gate wants a browser sign-in | Route and TLS are fine; test inside the sandbox (section 4, step 3) |
 | `Instance` phase Ready but no `status.url` | Not latency. The template is `exposure: internal` and never gets one | `kubectl get template <t> -o jsonpath='{.spec.exposure}'` |
 
 The last row is the one that is *not* latency, and it is why "wait and retry"
 must never be the automatic response.
+
+Reference timeline for one App Studio project, measured 2026-09-10 on a dev
+hub (sub-minute figures vary little; CI dominates):
+
+| From → to | Took |
+|---|---|
+| `POST /api/projects` → repository ready | ~10 s |
+| create → scaffold commit `Succeeded` | 15–40 s |
+| create → dev instance Ready | ~2.5 min |
+| `faros-commit.sh` → commit recorded | ~7 s |
+| commit → `promotable: true` | 3.2–4.5 min |
+| first promote → prod Ready | 1–1.5 min |
+| first promote → new hostname serves TLS | 4–6 min (three runs: ~4, ~5, 5 m 20 s) |
+| assistant turn end → reconciler commit | 5–15 s |
 
 ### 9.5 A rate-limited GitHub PAT reports itself as a scope problem
 
@@ -770,7 +1006,16 @@ The limit is **per token**, so `gh api rate_limit` showing 5000/5000 proves
 nothing about the PAT in the code `Connection` — that is a different token for
 the same user. Wait for the window and retry; each failed attempt leaves a
 `RepositoryCommit` in phase `Failed`, so a repository full of failed commits
-is the signature of a loop that retried through a rate limit.
+is the signature of a loop that retried through a rate limit. (One or two
+right after project creation are App Studio's own retries of the scaffold
+commit, which succeed on their own.)
+
+The Connection's token is shared by everything the code provider does for
+the workspace — every project's commits, checkouts, and build-status checks,
+and (it is why the PAT needs `read:packages`) the package crawl — so a
+workspace with many projects burns through it faster than your own call
+count suggests. Read the failure text with:
+`kubectl get repositorycommits.code.faros.sh <name> -o jsonpath='{.status.conditions[0].message}'`.
 
 ## 10. Troubleshooting
 
@@ -798,6 +1043,13 @@ is the signature of a loop that retried through a rate limit.
 | New instance URL fails TLS, curl exit 35 | The hostname's certificate is still being issued; wait (section 9.4) |
 | An `<provider>__*` tool does not exist | That provider is org-scoped, so it is excluded from the aggregate; use kubectl or its REST API (section 9.3) |
 | MCP endpoint returns `400 Accept must contain both …` | Send `Accept: application/json, text/event-stream` (section 9.2) |
+| `collaborationMode must be default, plan, or review` | Lowercase it; `Default` is rejected (section 4 step 3A) |
+| `code__commit_files` → `spec.message: Too long: may not be more than 512 bytes` | Commit message cap; shorten the body, keep the subject (section 4 step 3B) |
+| `production setting "expose.hostnamePrefix" is locked after the first deployment` | Something already deployed prod; promote with `{}` or the same prefix (section 4 step 5) |
+| Data-plane exec → `sourceRevision is required for start` | The component was never synced authoritatively; sync with revision + digest first (section 6.1) |
+| Data-plane exec → `Idempotency-Key is required for start` / `action must be "start", "poll", or "cancel"` | Exec is start-then-poll with a header, not a single call (section 6.1) |
+| jq: `Invalid string: control characters … must be escaped` | zsh `echo` expanded `\n` in the JSON; pipe or `printf '%s'` (section 9.2) |
+| `code__commit_files` on a prompt-created project → `repository "<project>" not found` | The repository has a different name; use `.repository.ref` (section 4 step 2) |
 
 ## 11. Known stale documentation
 
@@ -820,3 +1072,12 @@ Do not repeat them:
 - `Edge` and `VirtualWorkload` kinds in `faros.sh/v1alpha1` (only `MCPServer` remains).
 - Workspace paths `root:faros:orgs:…` (code uses `root:faros:tenants:…`, and you never type them anyway).
 - `timeoutSeconds` in the agents invoke body (not implemented).
+- **`collaborationMode` `Default|Plan|Review`** (this skill said so until
+  2026-09-10). The API accepts only lowercase `default|plan|review`.
+- **"The assistant's `exec_command` is the only way to run commands inside the
+  sandbox from outside"** (this skill, until 2026-09-10). The infrastructure
+  data plane's `exec` works for you on any development-mode instance,
+  including `<project>-dev`; see section 6.1.
+- **"Ask the assistant not to commit"** as a way to keep its edits
+  uncommitted. The App Studio reconciler commits workspace changes after
+  every turn regardless (observed 2026-09-10).
