@@ -150,6 +150,313 @@ func TestCancelRemainsCancellingUntilAdapterExits(t *testing.T) {
 	waitForPhase(t, runner, receipt.AttemptID, PhaseCancelled)
 }
 
+func TestClosePersistsResumableNeedsInputAndResumeKeepsSessionAndWorktree(t *testing.T) {
+	source, commit := testGitSource(t)
+	stateDir := t.TempDir()
+	started := make(chan struct{})
+	firstAdapter := &fakeAdapter{run: func(ctx context.Context, launch harness.Launch, emit harness.Emit) (harness.Result, error) {
+		if err := emit(harness.Event{Type: EventStarted, SessionID: "session-shutdown", Message: "started"}); err != nil {
+			return harness.Result{}, err
+		}
+		close(started)
+		<-ctx.Done()
+		return harness.Result{Phase: string(PhaseCancelled), SessionID: launch.SessionID}, nil
+	}}
+	first := newTestRunnerAt(t, firstAdapter, stateDir, source, commit)
+	request := testStartRequest(commit)
+	request.TaskID = "task-shutdown"
+	request.AttemptID = "attempt-shutdown"
+	request.RequestID = "start-shutdown"
+	startedReceipt, err := first.Start(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("adapter did not start")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	checkpoint, err := first.Inspect(context.Background(), startedReceipt.AttemptID)
+	if err != nil {
+		t.Fatalf("Inspect after Close: %v", err)
+	}
+	if checkpoint.Phase != PhaseNeedsInput || checkpoint.SessionID != "session-shutdown" || checkpoint.Workdir != startedReceipt.Workdir {
+		t.Fatalf("shutdown checkpoint = %+v, want needs_input with exact session/worktree", checkpoint)
+	}
+	if !strings.Contains(checkpoint.Blocker, "shut down") {
+		t.Fatalf("shutdown blocker = %q, want shutdown reconciliation", checkpoint.Blocker)
+	}
+
+	secondAdapter := &fakeAdapter{run: func(_ context.Context, launch harness.Launch, _ harness.Emit) (harness.Result, error) {
+		if launch.SessionID != checkpoint.SessionID || launch.Workdir != checkpoint.Workdir {
+			return harness.Result{}, fmt.Errorf("resume launch = session %q/workdir %q, want %q/%q", launch.SessionID, launch.Workdir, checkpoint.SessionID, checkpoint.Workdir)
+		}
+		return harness.Result{Phase: string(PhaseCompleted), SessionID: launch.SessionID}, nil
+	}}
+	second := newTestRunnerAt(t, secondAdapter, stateDir, source, commit)
+	resumed, err := second.Resume(context.Background(), ResumeRequest{
+		ProtocolVersion: ProtocolVersion,
+		RequestID:       "resume-shutdown",
+		TaskID:          checkpoint.TaskID,
+		AttemptID:       checkpoint.AttemptID,
+		AttemptEpoch:    checkpoint.AttemptEpoch,
+		SessionID:       checkpoint.SessionID,
+		Resolution:      "continue after the runner restarted",
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	waitForPhase(t, second, resumed.AttemptID, PhaseCompleted)
+	if got := secondAdapter.runs.Load(); got != 1 {
+		t.Fatalf("resumed adapter runs = %d, want one", got)
+	}
+}
+
+func TestClosePreservesIndependentAdapterFailure(t *testing.T) {
+	source, commit := testGitSource(t)
+	started := make(chan struct{})
+	adapter := &fakeAdapter{run: func(ctx context.Context, launch harness.Launch, emit harness.Emit) (harness.Result, error) {
+		if err := emit(harness.Event{Type: EventStarted, SessionID: "session-failure"}); err != nil {
+			return harness.Result{}, err
+		}
+		close(started)
+		<-ctx.Done()
+		return harness.Result{Phase: string(PhaseFailed), SessionID: launch.SessionID}, errors.New("adapter failed independently")
+	}}
+	runner := newTestRunner(t, adapter, source, commit)
+	receipt, err := runner.Start(context.Background(), testStartRequest(commit))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-started
+	if err := runner.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, err := runner.Inspect(context.Background(), receipt.AttemptID)
+	if err != nil {
+		t.Fatalf("Inspect after Close: %v", err)
+	}
+	if got.Phase != PhaseFailed || !strings.Contains(got.Blocker, "adapter failed independently") {
+		t.Fatalf("failure receipt = %+v, want failed independent of shutdown", got)
+	}
+}
+
+func TestClosePreservesAdapterErrorWhenResultLooksInterrupted(t *testing.T) {
+	for _, resultPhase := range []Phase{PhaseCancelled, PhaseNeedsInput} {
+		t.Run(string(resultPhase), func(t *testing.T) {
+			source, commit := testGitSource(t)
+			started := make(chan struct{})
+			adapter := &fakeAdapter{run: func(ctx context.Context, launch harness.Launch, emit harness.Emit) (harness.Result, error) {
+				if err := emit(harness.Event{Type: EventStarted, SessionID: launch.SessionID}); err != nil {
+					return harness.Result{}, err
+				}
+				close(started)
+				<-ctx.Done()
+				return harness.Result{Phase: string(resultPhase), SessionID: launch.SessionID}, errors.New("adapter failed independently")
+			}}
+			runner := newTestRunner(t, adapter, source, commit)
+			receipt, err := runner.Start(context.Background(), testStartRequest(commit))
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			<-started
+			if err := runner.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			got, err := runner.Inspect(context.Background(), receipt.AttemptID)
+			if err != nil {
+				t.Fatalf("Inspect after Close: %v", err)
+			}
+			if got.Phase != PhaseFailed || !strings.Contains(got.Blocker, "adapter failed independently") {
+				t.Fatalf("result phase %s with adapter error = %+v, want failed independent of shutdown", resultPhase, got)
+			}
+		})
+	}
+}
+
+func TestCloseRejectsNewAdmissionsAndConcurrentCloseWaitsForDrain(t *testing.T) {
+	source, commit := testGitSource(t)
+	stateDir := t.TempDir()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	adapter := &fakeAdapter{run: func(ctx context.Context, launch harness.Launch, _ harness.Emit) (harness.Result, error) {
+		close(started)
+		<-ctx.Done()
+		<-release
+		return harness.Result{Phase: string(PhaseCancelled), SessionID: launch.SessionID}, nil
+	}}
+	runner := newTestRunnerAt(t, adapter, stateDir, source, commit)
+	receipt, err := runner.Start(context.Background(), testStartRequest(commit))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	<-started
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runner.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before adapter drained: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	if _, err := runner.Start(context.Background(), StartRequest{
+		ProtocolVersion: ProtocolVersion,
+		RequestID:       "start-after-close",
+		TaskID:          "task-after-close",
+		AttemptID:       "attempt-after-close",
+		AttemptEpoch:    1,
+		RepositoryID:    "repo",
+		BaseCommit:      commit,
+		Instructions:    "must be rejected",
+		ApprovedInput:   json.RawMessage(`{"provenance":{"source":"test"}}`),
+	}); err == nil {
+		t.Fatal("Start after Close was admitted")
+	} else {
+		assertProtocolCode(t, err, ErrorUnavailable)
+	}
+	secondCloseDone := make(chan error, 1)
+	go func() { secondCloseDone <- runner.Close() }()
+	select {
+	case err := <-secondCloseDone:
+		t.Fatalf("concurrent Close returned before adapter drained: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := <-secondCloseDone; err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	final, err := runner.Inspect(context.Background(), receipt.AttemptID)
+	if err != nil {
+		t.Fatalf("Inspect after concurrent Close: %v", err)
+	}
+	if final.Phase != PhaseNeedsInput {
+		t.Fatalf("final phase = %s, want %s", final.Phase, PhaseNeedsInput)
+	}
+}
+
+func TestLegacyShutdownReceiptMigrationRequiresDurableProof(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*persistedState, *attemptRecord)
+	}{
+		{name: "cancel pending", mutate: func(_ *persistedState, attempt *attemptRecord) { attempt.CancelPending = true }},
+		{name: "cancel operation", mutate: func(state *persistedState, attempt *attemptRecord) {
+			state.Operations[operationKey("cancel", attempt.Receipt.TaskID, attempt.Receipt.AttemptID, attempt.Receipt.AttemptEpoch, "cancel-legacy")] = operationRecord{AttemptID: attempt.Receipt.AttemptID}
+		}},
+		{name: "different blocker", mutate: func(_ *persistedState, attempt *attemptRecord) {
+			attempt.Receipt.Blocker = "operator cancelled the attempt"
+		}},
+		{name: "missing session", mutate: func(_ *persistedState, attempt *attemptRecord) { attempt.Receipt.SessionID = "" }},
+		{name: "output or duration limit", mutate: func(_ *persistedState, attempt *attemptRecord) { attempt.LimitExceeded = true }},
+		{name: "durable adapter error", mutate: func(_ *persistedState, attempt *attemptRecord) {
+			attempt.Receipt.LastError = &Error{Code: ErrorUnavailable, Message: "adapter failed"}
+		}},
+		{name: "current state version", mutate: func(state *persistedState, _ *attemptRecord) { state.Version = stateVersion }},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			state, attempt := legacyShutdownState()
+			testCase.mutate(&state, attempt)
+			writeRunnerState(t, stateDir, state)
+			runner, err := New(Config{RunnerID: "legacy-migration", StateDir: stateDir, Token: "test-token", Listen: "127.0.0.1:0"}, &fakeAdapter{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			defer func() { _ = runner.Close() }()
+			got, err := runner.Inspect(context.Background(), attempt.Receipt.AttemptID)
+			if err != nil {
+				t.Fatalf("Inspect: %v", err)
+			}
+			if got.Phase != PhaseCancelled {
+				t.Fatalf("migrated phase = %s, want %s", got.Phase, PhaseCancelled)
+			}
+		})
+	}
+
+	stateDir := t.TempDir()
+	state, attempt := legacyShutdownState()
+	writeRunnerState(t, stateDir, state)
+	adapter := &fakeAdapter{}
+	runner, err := New(Config{RunnerID: "legacy-migration-positive", StateDir: stateDir, Token: "test-token", Listen: "127.0.0.1:0"}, adapter)
+	if err != nil {
+		t.Fatalf("New positive migration: %v", err)
+	}
+	defer func() { _ = runner.Close() }()
+	if adapter.runs.Load() != 0 {
+		t.Fatalf("legacy migration auto-started adapter %d times", adapter.runs.Load())
+	}
+	got, err := runner.Inspect(context.Background(), attempt.Receipt.AttemptID)
+	if err != nil {
+		t.Fatalf("Inspect positive migration: %v", err)
+	}
+	if got.Phase != PhaseNeedsInput || got.SessionID != "session-legacy" || !strings.Contains(got.Blocker, "shut down") {
+		t.Fatalf("positive migration receipt = %+v", got)
+	}
+	loaded, err := newStateStore(stateDir)
+	if err != nil {
+		t.Fatalf("newStateStore: %v", err)
+	}
+	persisted, err := loaded.load()
+	if err != nil {
+		t.Fatalf("load migrated state: %v", err)
+	}
+	if persisted.Version != stateVersion || persisted.Attempts[attempt.Receipt.AttemptID].Receipt.Phase != PhaseNeedsInput {
+		t.Fatalf("persisted migration state = %+v", persisted)
+	}
+}
+
+func TestRunnerRejectsUnknownStateVersion(t *testing.T) {
+	for _, version := range []int{0, stateVersion + 1} {
+		t.Run(fmt.Sprintf("version-%d", version), func(t *testing.T) {
+			stateDir := t.TempDir()
+			state, _ := legacyShutdownState()
+			state.Version = version
+			writeRunnerState(t, stateDir, state)
+			_, err := New(Config{RunnerID: "unknown-version", StateDir: stateDir, Token: "test-token", Listen: "127.0.0.1:0"}, &fakeAdapter{})
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("unsupported runner state version %d", version)) {
+				t.Fatalf("New(%d) error = %v, want unsupported-version rejection", version, err)
+			}
+		})
+	}
+}
+
+func legacyShutdownState() (persistedState, *attemptRecord) {
+	state := emptyPersistedState()
+	state.Version = legacyStateVersion
+	attempt := &attemptRecord{Receipt: Receipt{
+		ProtocolVersion: ProtocolVersion,
+		TaskID:          "task-legacy",
+		AttemptID:       "attempt-legacy",
+		AttemptEpoch:    1,
+		Phase:           PhaseCancelled,
+		SessionID:       "session-legacy",
+		Workdir:         "/tmp/legacy-worktree",
+		Blocker:         legacyShutdownCancellationBlocker,
+		AcceptedAt:      eventNow(),
+		UpdatedAt:       eventNow(),
+	}}
+	state.Attempts[attempt.Receipt.AttemptID] = attempt
+	state.Events[attempt.Receipt.AttemptID] = []Event{{Cursor: 1, AttemptEpoch: 1, Type: EventCancelled, Message: legacyShutdownCancellationBlocker}}
+	return state, attempt
+}
+
+func writeRunnerState(t *testing.T, stateDir string, state persistedState) {
+	t.Helper()
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal runner state: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "state.json"), append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write runner state: %v", err)
+	}
+}
+
 func TestRestartConvergesRecoveredActiveAttemptToNeedsInput(t *testing.T) {
 	source, commit := testGitSource(t)
 	adapter := &fakeAdapter{}

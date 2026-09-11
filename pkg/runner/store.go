@@ -23,10 +23,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
-const stateVersion = 1
+const (
+	legacyStateVersion = 1
+	stateVersion       = 2
+)
 
 type persistedState struct {
 	Version      int                          `json:"version"`
@@ -35,6 +39,11 @@ type persistedState struct {
 	Events       map[string][]Event           `json:"events"`
 	Artifacts    map[string]artifactRecord    `json:"artifacts"`
 	Reservations map[string]reservationRecord `json:"reservations"`
+
+	// migratedLegacyShutdown holds one-shot in-memory markers. They let the
+	// runner append a truthful needs_input event after the narrowly-scoped
+	// v1 receipt migration without persisting migration bookkeeping.
+	migratedLegacyShutdown map[string]struct{} `json:"-"`
 }
 
 type attemptRecord struct {
@@ -91,7 +100,12 @@ func (s *stateStore) load() (persistedState, error) {
 	if err := decoder.Decode(&state); err != nil {
 		return state, fmt.Errorf("decode runner state: %w", err)
 	}
-	if state.Version != stateVersion {
+	switch state.Version {
+	case stateVersion:
+	case legacyStateVersion:
+		state.Version = stateVersion
+		state.migratedLegacyShutdown = migrateLegacyShutdownReceipts(state)
+	default:
 		return state, fmt.Errorf("unsupported runner state version %d", state.Version)
 	}
 	if state.Attempts == nil {
@@ -114,13 +128,60 @@ func (s *stateStore) load() (persistedState, error) {
 
 func emptyPersistedState() persistedState {
 	return persistedState{
-		Version:      stateVersion,
-		Attempts:     map[string]*attemptRecord{},
-		Operations:   map[string]operationRecord{},
-		Events:       map[string][]Event{},
-		Artifacts:    map[string]artifactRecord{},
-		Reservations: map[string]reservationRecord{},
+		Version:                stateVersion,
+		Attempts:               map[string]*attemptRecord{},
+		Operations:             map[string]operationRecord{},
+		Events:                 map[string][]Event{},
+		Artifacts:              map[string]artifactRecord{},
+		Reservations:           map[string]reservationRecord{},
+		migratedLegacyShutdown: map[string]struct{}{},
 	}
+}
+
+// migrateLegacyShutdownReceipts repairs only the runner/v1 receipt produced by
+// the old Close path. That path used the same blocker as explicit cancellation,
+// so reopening is safe only when the durable record proves all of the
+// following: the receipt is cancelled, CancelPending is false, no cancel
+// operation references the attempt, the blocker is exact, and a session ID is
+// present. Newer state versions intentionally do not apply this migration.
+func migrateLegacyShutdownReceipts(state persistedState) map[string]struct{} {
+	recovered := make(map[string]struct{})
+	for attemptID, attempt := range state.Attempts {
+		if attempt == nil || attempt.Receipt.Phase != PhaseCancelled || attempt.CancelPending || attempt.LimitExceeded || attempt.Receipt.Blocker != legacyShutdownCancellationBlocker || attempt.Receipt.LastError != nil || !validSessionID(attempt.Receipt.SessionID) {
+			continue
+		}
+		if hasCancelOperation(state.Operations, attemptID) {
+			continue
+		}
+		attempt.Receipt.Phase = PhaseNeedsInput
+		attempt.Receipt.Blocker = shutdownBlocker
+		attempt.Receipt.UpdatedAt = eventNow()
+		recovered[attemptID] = struct{}{}
+	}
+	return recovered
+}
+
+func hasCancelOperation(operations map[string]operationRecord, attemptID string) bool {
+	for key, operation := range operations {
+		if !strings.HasPrefix(key, "cancel\x00") {
+			continue
+		}
+		if operation.AttemptID == attemptID {
+			return true
+		}
+		// The operation value is authoritative in normal state, but parsing the
+		// stable key as a defensive fallback prevents a malformed cancel record
+		// from being mistaken for proof that no operator cancellation exists.
+		parts := strings.Split(key, "\x00")
+		if len(parts) >= 3 && parts[2] == attemptID {
+			return true
+		}
+	}
+	return false
+}
+
+func validSessionID(sessionID string) bool {
+	return sessionID != "" && sessionID == strings.TrimSpace(sessionID) && len(sessionID) <= maxIdentifierBytes
 }
 
 func (s *stateStore) save(state persistedState) error {
