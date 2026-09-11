@@ -145,15 +145,62 @@ func (a *Adapter) Probe(ctx context.Context) (harness.Info, error) {
 	}
 	var accountResult struct {
 		Account            json.RawMessage `json:"account"`
-		RequiresOpenAIAuth bool            `json:"requiresOpenaiAuth"`
+		RequiresOpenAIAuth json.RawMessage `json:"requiresOpenaiAuth"`
 	}
 	if err := json.Unmarshal(account.Result, &accountResult); err != nil {
 		return info, fmt.Errorf("decoding Codex account/read response: %w", err)
 	}
-	if accountResult.RequiresOpenAIAuth {
+	requiresOpenAIAuth, validAuthRequirement := parseAuthRequirement(accountResult.RequiresOpenAIAuth)
+	accountType, validAccount := parseAccountType(accountResult.Account)
+	if !validAuthRequirement || !validAccount {
+		info.Reasons = append(info.Reasons, "Codex authentication state is unavailable")
+	} else if requiresOpenAIAuth && !isAuthenticatedAccountType(accountType) {
 		info.Reasons = append(info.Reasons, "Codex authentication is not configured")
 	}
 	return infoWithReady(info), nil
+}
+
+func parseAuthRequirement(raw json.RawMessage) (bool, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return false, false
+	}
+
+	var required bool
+	if err := json.Unmarshal(raw, &required); err != nil {
+		return false, false
+	}
+	return required, true
+}
+
+func parseAccountType(raw json.RawMessage) (string, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", true
+	}
+
+	var account map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &account); err != nil || account == nil {
+		return "", false
+	}
+	typeRaw, ok := account["type"]
+	if !ok {
+		return "", false
+	}
+	var accountType string
+	if err := json.Unmarshal(typeRaw, &accountType); err != nil || accountType == "" {
+		return "", false
+	}
+	return accountType, true
+}
+
+func isAuthenticatedAccountType(accountType string) bool {
+	switch accountType {
+	case "apiKey", "chatgpt":
+		return true
+	default:
+		return false
+	}
 }
 
 func infoWithReady(info harness.Info) harness.Info {

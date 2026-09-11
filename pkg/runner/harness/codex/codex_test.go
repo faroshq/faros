@@ -55,6 +55,50 @@ func TestProbeUsesVersionAndAccountReadWithoutModelCall(t *testing.T) {
 	}
 }
 
+func TestProbeAccountReadAuthenticationState(t *testing.T) {
+	tests := []struct {
+		name       string
+		scenario   string
+		wantReady  bool
+		wantReason bool
+	}{
+		{name: "chatgpt account", scenario: "auth-chatgpt", wantReady: true},
+		{name: "api key account", scenario: "auth-api-key", wantReady: true},
+		{name: "missing account", scenario: "auth-missing", wantReason: true},
+		{name: "null account", scenario: "auth-null", wantReason: true},
+		{name: "malformed account", scenario: "auth-malformed", wantReason: true},
+		{name: "malformed account without auth requirement", scenario: "auth-malformed-noauth", wantReason: true},
+		{name: "missing auth requirement", scenario: "auth-missing-flag", wantReason: true},
+		{name: "malformed auth requirement", scenario: "auth-wrong-type-flag", wantReason: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := fakeCodexBinary(t, tc.scenario)
+			adapter := New(Config{Binary: binary, Home: t.TempDir(), ExpectedVersion: "0.147.0"})
+
+			info, err := adapter.Probe(context.Background())
+			if err != nil {
+				t.Fatalf("Probe: %v", err)
+			}
+			if info.Ready != tc.wantReady {
+				t.Fatalf("ready = %v, want %v (info = %+v)", info.Ready, tc.wantReady, info)
+			}
+			if (len(info.Reasons) > 0) != tc.wantReason {
+				t.Fatalf("reasons = %v, want reason presence %v", info.Reasons, tc.wantReason)
+			}
+			infoData, err := json.Marshal(info)
+			if err != nil {
+				t.Fatalf("marshal probe info: %v", err)
+			}
+			for _, secret := range []string{"user@example.com", "sk-test-secret", "access-token-secret"} {
+				if strings.Contains(string(infoData), secret) {
+					t.Fatalf("probe info exposed account data %q: %+v", secret, info)
+				}
+			}
+		})
+	}
+}
+
 func TestRunLifecycleStartsSessionBeforeTurnAndSanitizesEnvironment(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), "env.json")
 	binary := fakeCodexBinaryWithEnvFile(t, "success", envFile)
@@ -320,9 +364,43 @@ func TestFakeAppServerProcess(t *testing.T) {
 		case "initialize":
 			writeResponse(map[string]any{"id": id, "result": map[string]any{"userAgent": "fake", "codexHome": os.Getenv("CODEX_HOME"), "platformFamily": "unix", "platformOs": "linux"}})
 		case "account/read":
-			if scenario == "auth" {
+			switch scenario {
+			case "auth":
 				writeResponse(map[string]any{"id": id, "error": map[string]any{"code": 401, "message": "authentication required"}})
-			} else {
+			case "auth-chatgpt":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{
+					"account":            map[string]any{"type": "chatgpt", "email": "user@example.com", "planType": "pro"},
+					"requiresOpenaiAuth": true,
+				}})
+			case "auth-api-key":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{
+					"account":            map[string]any{"type": "apiKey"},
+					"requiresOpenaiAuth": true,
+				}})
+			case "auth-missing":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{"requiresOpenaiAuth": true}})
+			case "auth-null":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{"account": nil, "requiresOpenaiAuth": true}})
+			case "auth-malformed":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{
+					"account":            map[string]any{"type": []string{"chatgpt"}, "token": "access-token-secret", "apiKey": "sk-test-secret"},
+					"requiresOpenaiAuth": true,
+				}})
+			case "auth-missing-flag":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{
+					"account": map[string]any{"type": "chatgpt", "email": "user@example.com"},
+				}})
+			case "auth-wrong-type-flag":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{
+					"account":            map[string]any{"type": "chatgpt", "email": "user@example.com"},
+					"requiresOpenaiAuth": "true",
+				}})
+			case "auth-malformed-noauth":
+				writeResponse(map[string]any{"id": id, "result": map[string]any{
+					"account":            []string{"not-an-account"},
+					"requiresOpenaiAuth": false,
+				}})
+			default:
 				writeResponse(map[string]any{"id": id, "result": map[string]any{"account": nil, "requiresOpenaiAuth": false}})
 			}
 		case "thread/start":
