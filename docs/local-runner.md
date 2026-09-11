@@ -132,6 +132,10 @@ entries from the managed worktree root through the task checkout, preventing
 project trust from enabling local configuration or hooks. Library consumers
 must explicitly supply `codex.Config.WorktreeRoot` to enable this exception.
 The runner preserves the trust file and existing authentication/session state.
+Codex-owned `plugins` cache and staging directories may remain in the dedicated
+home. Every app-server launch explicitly disables apps, plugins, and hooks,
+including readiness probes and resumed sessions. A symlink or non-directory
+`plugins` entry is rejected; the runner does not remove cache files.
 It runs Codex with a sanitized
 environment: the runner-owned home is used for `HOME`, `CODEX_HOME`, and XDG
 directories, while GitHub tokens, API keys, SSH-agent settings, and global Git

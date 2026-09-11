@@ -138,7 +138,7 @@ func TestRunRejectsForeignResumeResponseAndCompletion(t *testing.T) {
 }
 
 func TestEnsureHomeRejectsInteractiveConfiguration(t *testing.T) {
-	for _, name := range []string{"config.toml", "mcp.json", "plugins", "hooks"} {
+	for _, name := range []string{"config.toml", "mcp.json", "hooks"} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, name)
@@ -347,5 +347,92 @@ func TestFakeCleanupAppServerProcess(t *testing.T) {
 	}
 	for {
 		time.Sleep(time.Hour)
+	}
+}
+
+func TestPluginCacheDoesNotEnableExtensions(t *testing.T) {
+	binary := fakeCodexBinary(t, "success")
+	home := t.TempDir()
+	for _, name := range []string{"cache", ".remote-plugin-install-staging"} {
+		if err := os.MkdirAll(filepath.Join(home, "plugins", name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(home, "plugins", "cache", "fixture.txt")
+	if err := os.WriteFile(marker, []byte("preserve cache"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := New(Config{Home: home, Binary: binary, ExpectedVersion: "0.147.0"})
+	checkArgs := func() {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(binary), "argv"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		for _, feature := range []string{"apps", "plugins", "hooks"} {
+			found := false
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "--disable" && args[i+1] == feature {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s not disabled: %v", feature, args)
+			}
+		}
+	}
+	for range 2 {
+		info, err := adapter.Probe(context.Background())
+		if err != nil || !info.Ready {
+			t.Fatalf("probe=%+v err=%v", info, err)
+		}
+		checkArgs()
+	}
+	for _, method := range readMethods(t, filepath.Join(filepath.Dir(binary), "methods")) {
+		if method == "thread/start" || method == "thread/resume" || method == "turn/start" {
+			t.Fatal("probe started model")
+		}
+	}
+	for _, session := range []string{"", "original-session"} {
+		result, err := adapter.Run(context.Background(), harness.Launch{Workdir: t.TempDir(), Instructions: "approved", SessionID: session}, nil)
+		if err != nil || result.Phase != "completed" {
+			t.Fatalf("run=%+v err=%v", result, err)
+		}
+		if session != "" && result.SessionID != session {
+			t.Fatal("resume replaced session")
+		}
+		checkArgs()
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil || string(raw) != "preserve cache" {
+		t.Fatal("cache changed")
+	}
+}
+
+func TestPluginCacheRejectsUnsafeHomeEntries(t *testing.T) {
+	for _, kind := range []string{"file", "symlink", "case-variant"} {
+		t.Run(kind, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "plugins")
+			switch kind {
+			case "file":
+				if err := os.WriteFile(path, []byte("not a cache directory"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink(t.TempDir(), path); err != nil {
+					t.Fatal(err)
+				}
+			case "case-variant":
+				if err := os.Mkdir(filepath.Join(home, "Plugins"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a := &Adapter{cfg: Config{Home: home}}
+			if err := a.ensureHome(); err == nil {
+				t.Fatal("unsafe plugin entry accepted")
+			}
+		})
 	}
 }

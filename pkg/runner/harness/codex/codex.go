@@ -47,9 +47,9 @@ const (
 	interruptTimeout       = 1500 * time.Millisecond
 )
 
-// Codex creates its worker skills directory during the first probe, so skills
-// is deliberately absent; interactive config, MCP, plugin, and hook entries
-// remain rejected.
+// Codex creates skills and plugin cache directories in its own home. Plugin
+// caches are permitted below, but extensions are explicitly disabled for every
+// app-server process. Interactive config, MCP, and hook entries remain rejected.
 var unsafeHomeEntries = map[string]struct{}{ //nolint:gochecknoglobals // immutable worker-home policy
 	".codex":      {},
 	".mcp.json":   {},
@@ -375,6 +375,9 @@ func (a *Adapter) ensureHome() error {
 	}
 	for _, entry := range entries {
 		name := strings.ToLower(entry.Name())
+		if entry.Name() == "plugins" && entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
 		if name == codexConfigName && entry.Name() == codexConfigName {
 			if _, err := validateCodexConfig(home, a.cfg.WorktreeRoot); err != nil {
 				return err
@@ -524,7 +527,10 @@ type serverProcess struct {
 }
 
 func (a *Adapter) startServer(ctx context.Context, workdir string) (*serverProcess, error) {
-	cmd := exec.Command(a.cfg.Binary, "app-server", "--listen", "stdio://")
+	// Keep extension execution policy independent of whether Codex has created
+	// its cache directories. Apply it to probes, new sessions, and resumed ones.
+	cmd := exec.Command(a.cfg.Binary, "app-server", "--listen", "stdio://",
+		"--disable", "apps", "--disable", "plugins", "--disable", "hooks")
 	cmd.Env = safeEnv(a.cfg.Home)
 	if workdir != "" {
 		cmd.Dir = workdir
