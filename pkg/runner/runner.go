@@ -41,6 +41,13 @@ import (
 const (
 	maxIdentifierBytes = 128
 	maxMessageBytes    = 8 << 10
+
+	// This is the blocker that runner/v1 wrote when Close cancelled an
+	// adapter. Keep it exact because the v1 -> v2 migration only reopens this
+	// ambiguous receipt when the rest of the durable state proves that no
+	// operator cancellation was requested.
+	legacyShutdownCancellationBlocker = "harness exited after cancellation"
+	shutdownBlocker                   = "runner shut down while harness was active; reconcile the existing harness session before resuming"
 )
 
 // Runner is the generic local execution service. It owns protocol state and
@@ -58,6 +65,9 @@ type Runner struct {
 	wg           sync.WaitGroup
 	listener     net.Listener
 	closed       bool
+	closeDone    chan struct{}
+	closeErr     error
+	shutdown     map[string]struct{}
 	capabilities Capabilities
 }
 
@@ -160,6 +170,8 @@ func New(cfg Config, adapter harness.Adapter) (*Runner, error) {
 		lock:         lock,
 		running:      map[string]context.CancelFunc{},
 		subscribers:  map[string]map[chan Event]struct{}{},
+		closeDone:    make(chan struct{}),
+		shutdown:     map[string]struct{}{},
 		capabilities: capabilities,
 	}
 	if err := r.recoverLocked(); err != nil {
@@ -243,16 +255,24 @@ func (r *Runner) ListenAndServe(ctx context.Context) error {
 	return err
 }
 
-// Close cancels active adapters, waits for them to exit, closes the listener,
-// and releases the singleton state lock.
+// Close gracefully drains active adapters, waits for them to exit, closes the
+// listener, and releases the singleton state lock. An adapter interrupted by
+// this shutdown remains resumable; an explicit Cancel request is still
+// terminal.
 func (r *Runner) Close() error {
 	r.mu.Lock()
 	if r.closed {
+		done := r.closeDone
 		r.mu.Unlock()
-		return nil
+		<-done
+		r.mu.Lock()
+		err := r.closeErr
+		r.mu.Unlock()
+		return err
 	}
 	r.closed = true
-	for _, cancel := range r.running {
+	for attemptID, cancel := range r.running {
+		r.shutdown[attemptID] = struct{}{}
 		cancel()
 	}
 	listener := r.listener
@@ -261,7 +281,12 @@ func (r *Runner) Close() error {
 		_ = listener.Close()
 	}
 	r.wg.Wait()
-	return r.lock.Close()
+	closeErr := r.lock.Close()
+	r.mu.Lock()
+	r.closeErr = closeErr
+	close(r.closeDone)
+	r.mu.Unlock()
+	return closeErr
 }
 
 // Start accepts an approved attempt and returns once its receipt and accepted
@@ -650,10 +675,13 @@ func (r *Runner) execute(ctx context.Context, launch harness.Launch, attemptID s
 	defer r.mu.Unlock()
 	attempt, ok := r.state.Attempts[attemptID]
 	if !ok {
+		delete(r.shutdown, attemptID)
 		delete(r.running, attemptID)
 		return
 	}
 	delete(r.running, attemptID)
+	_, shutdown := r.shutdown[attemptID]
+	delete(r.shutdown, attemptID)
 	if attempt.Receipt.LastError != nil {
 		blocker := attempt.Receipt.Blocker
 		if blocker == "" {
@@ -669,16 +697,27 @@ func (r *Runner) execute(ctx context.Context, launch harness.Launch, attemptID s
 		r.finishLocked(attempt, PhaseFailed, "harness returned a foreign session ID", errors.New("foreign session ID"))
 		return
 	}
-	if attempt.CancelPending || errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		if attempt.LimitExceeded || errors.Is(ctx.Err(), context.DeadlineExceeded) && !attempt.CancelPending {
-			blocker := attempt.Receipt.Blocker
-			if blocker == "" && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				blocker = "harness exceeded the approved execution duration"
-			}
-			r.finishLocked(attempt, PhaseFailed, blocker, nil)
-			return
+	if attempt.LimitExceeded || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		blocker := attempt.Receipt.Blocker
+		if blocker == "" && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			blocker = "harness exceeded the approved execution duration"
 		}
-		r.finishLocked(attempt, PhaseCancelled, "harness exited after cancellation", nil)
+		r.finishLocked(attempt, PhaseFailed, blocker, nil)
+		return
+	}
+	if attempt.CancelPending {
+		r.finishLocked(attempt, PhaseCancelled, legacyShutdownCancellationBlocker, nil)
+		return
+	}
+	// Close cancels the adapter context so the child process can be drained.
+	// That cancellation is a resumable interruption, unlike an explicit
+	// Cancel request. Only map a context cancellation to needs_input here; if
+	// an adapter completed or failed before shutdown won the reconciliation
+	// race, its terminal result below remains authoritative.
+	resultPhase := Phase(result.Phase)
+	shutdownInterrupted := (resultPhase == PhaseCancelled || resultPhase == PhaseNeedsInput || resultPhase == "") && (runErr == nil || errors.Is(runErr, context.Canceled))
+	if shutdown && errors.Is(ctx.Err(), context.Canceled) && shutdownInterrupted {
+		r.finishLocked(attempt, PhaseNeedsInput, shutdownBlocker, nil)
 		return
 	}
 	if runErr != nil {
@@ -983,6 +1022,14 @@ func (r *Runner) recoverLocked() error {
 	for attemptID, attempt := range r.state.Attempts {
 		if attempt == nil {
 			delete(r.state.Attempts, attemptID)
+			changed = true
+			continue
+		}
+		if _, migrated := r.state.migratedLegacyShutdown[attemptID]; migrated {
+			delete(r.state.migratedLegacyShutdown, attemptID)
+			if _, err := r.appendEventLocked(attemptID, EventNeedsInput, attempt.Receipt.Blocker, nil); err != nil {
+				return err
+			}
 			changed = true
 			continue
 		}

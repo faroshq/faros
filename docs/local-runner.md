@@ -216,10 +216,13 @@ receipt with `Inspect` and replayable server-sent events. Events have ordered
 cursors; a cursor gap or `cursor_expired` response requires inspecting the
 receipt before continuing. Progress is an observation, not proof of completion.
 
-Cancellation has two states. A cancel request first returns `cancelling`; it is
-complete only after the harness exits and the receipt or event reports
-`cancelled`. A process shutdown also cancels active child processes, but it is
-not a substitute for observing the attempt's terminal receipt.
+Cancellation has two states. An explicit cancel request first returns
+`cancelling`; it is complete only after the harness exits and the receipt or
+event reports `cancelled`. That cancellation remains terminal across process
+shutdown. A graceful shutdown drains active child processes and persists a
+shutdown interruption as `needs_input`, retaining the recorded session and
+worktree for same-session recovery. Adapter failures and approved output or
+duration limits retain failure precedence when shutdown overlaps them.
 
 Interactive approval, authentication, a missing Codex session, or another
 operator decision moves an attempt to `needs_input`. Resume requires the same
@@ -238,6 +241,14 @@ reconciliation blocker. Inspect the receipt, verify that the enrolled source,
 approved commit, worktree, and session still exist, then resume only when the
 same session can be recovered. If that evidence is unavailable, leave the
 attempt in `needs_input` with its blocker instead of claiming recovery.
+
+When loading a v1 journal, the runner upgrades it to v2. The migration reopens
+only the old shutdown receipt that was recorded as `cancelled` with the exact
+legacy shutdown blocker, a valid session ID, and no `CancelPending`, cancel
+operation, durable error, or limit-exceeded marker. It changes that receipt to
+`needs_input` and records no execution; all other cancelled receipts remain
+terminal. A v1 runner rejects the upgraded v2 journal, so do not downgrade the
+binary over an upgraded state directory.
 
 Do not copy the state directory to another machine or assume raw Codex session
 files are portable. Cross-machine continuation, migration, scheduling, and
