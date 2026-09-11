@@ -308,7 +308,7 @@ func fakeCodexBinaryWithEnvFile(t *testing.T, scenario, envFile string) string {
 	methodsFile := filepath.Join(dir, "methods")
 	requestsFile := filepath.Join(dir, "requests")
 	script := filepath.Join(dir, "codex")
-	content := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.147.0; exit 0; fi\nFAROS_FAKE_CODEX_CHILD=1 exec %q -test.run=TestFakeAppServerProcess\n", os.Args[0])
+	content := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo codex-cli 0.147.0; exit 0; fi\nprintf '%%s\\n' \"$@\" > %q\nFAROS_FAKE_CODEX_CHILD=1 exec %q -test.run=TestFakeAppServerProcess\n", filepath.Join(dir, "argv"), os.Args[0])
 	if err := os.WriteFile(script, []byte(content), 0700); err != nil {
 		t.Fatal(err)
 	}
