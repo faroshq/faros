@@ -12,6 +12,7 @@ package providers
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -309,7 +310,7 @@ func TestUIGrantPinIsCachedPerVersion(t *testing.T) {
 
 func mintTestGrant(t *testing.T, claims uiGrantClaims) string {
 	t.Helper()
-	secret, _ := uiGrantTestKey.DelegatedProofKey(nil)
+	secret, _ := uiGrantTestKey.DelegatedProofKey(context.Background())
 	grant, err := sealUIGrant(secret, rand.Reader, claims)
 	if err != nil {
 		t.Fatal(err)
@@ -339,7 +340,7 @@ func TestUIProxyRefusesBadGrants(t *testing.T) {
 		{
 			name: "another hub's key",
 			grant: func(t *testing.T) string {
-				secret, _ := otherKey.DelegatedProofKey(nil)
+				secret, _ := otherKey.DelegatedProofKey(context.Background())
 				g, err := sealUIGrant(secret, rand.Reader, validClaims())
 				if err != nil {
 					t.Fatal(err)
