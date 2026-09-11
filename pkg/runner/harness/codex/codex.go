@@ -72,7 +72,9 @@ type Config struct {
 	Binary string
 	// Home is a runner-owned CODEX_HOME. It must be separate from an
 	// interactive user's Codex home and independently signed in by the worker.
-	Home            string
+	Home string
+	// WorktreeRoot permits trust-only configuration for managed task checkouts.
+	WorktreeRoot    string
 	Model           string
 	ExpectedVersion string
 }
@@ -232,6 +234,9 @@ func (a *Adapter) Run(ctx context.Context, launch harness.Launch, emit harness.E
 	if err := validateLaunch(launch); err != nil {
 		return result, err
 	}
+	if err := a.validateLaunchConfiguration(launch.Workdir); err != nil {
+		return result, err
+	}
 	proc, err := a.startServer(ctx, launch.Workdir)
 	if err != nil {
 		return result, err
@@ -370,6 +375,12 @@ func (a *Adapter) ensureHome() error {
 	}
 	for _, entry := range entries {
 		name := strings.ToLower(entry.Name())
+		if name == codexConfigName && entry.Name() == codexConfigName {
+			if _, err := validateCodexConfig(home, a.cfg.WorktreeRoot); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, unsafe := unsafeHomeEntries[name]; unsafe {
 			return fmt.Errorf("codex runner home contains interactive configuration %q; use a dedicated worker home", entry.Name())
 		}
