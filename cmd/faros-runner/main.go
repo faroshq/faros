@@ -90,9 +90,14 @@ func run() (runErr error) {
 	if opts.codexHome == "" {
 		opts.codexHome = filepath.Join(cfg.StateDir, "codex-home")
 	}
+	stateRoot, err := filepath.Abs(cfg.StateDir)
+	if err != nil {
+		return fmt.Errorf("resolve runner state directory: %w", err)
+	}
 	adapter := codex.New(codex.Config{
 		Binary:          opts.codexBinary,
 		Home:            opts.codexHome,
+		WorktreeRoot:    filepath.Join(stateRoot, "worktrees"),
 		ExpectedVersion: opts.versionPin,
 	})
 	r, err := runner.New(cfg, adapter)

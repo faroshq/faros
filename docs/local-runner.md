@@ -123,7 +123,16 @@ The command also accepts `--state-dir`, `--listen`, `--token-file`, and
 `--codex-home`. If `--codex-home` is omitted, it is
 `<stateDir>/codex-home`. The Codex home is created with owner-only permissions
 and must be dedicated to the runner account. The adapter rejects symlinks and
-interactive configuration entries in that home. It runs Codex with a sanitized
+interactive configuration entries in that home. The CLI permits a bounded
+`config.toml` containing only project `trust_level` records (`trusted` or
+`untrusted`) for existing task/attempt directories under its managed
+`stateDir/worktrees` root. Parent paths, symlinks, and additional settings are
+rejected. When this configuration exists, a launch also rejects `.codex`
+entries from the managed worktree root through the task checkout, preventing
+project trust from enabling local configuration or hooks. Library consumers
+must explicitly supply `codex.Config.WorktreeRoot` to enable this exception.
+The runner preserves the trust file and existing authentication/session state.
+It runs Codex with a sanitized
 environment: the runner-owned home is used for `HOME`, `CODEX_HOME`, and XDG
 directories, while GitHub tokens, API keys, SSH-agent settings, and global Git
 configuration are removed.
