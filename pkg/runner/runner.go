@@ -147,10 +147,15 @@ func New(cfg Config, adapter harness.Adapter) (*Runner, error) {
 		Architecture:    runtime.GOARCH,
 		Toolchains:      append([]string(nil), cfg.Toolchains...),
 		Environment:     append([]string(nil), cfg.Environment...),
-		Verification:    appendUnique(append([]string(nil), cfg.Verification...), gitResultCapability),
 		Capacity:        Capacity{Maximum: cfg.MaximumCapacity},
 		Ready:           probeErr == nil && info.Ready && len(info.Reasons) == 0,
 	}
+	verificationCapabilities := append([]string(nil), cfg.Verification...)
+	verificationCapabilities = appendUnique(verificationCapabilities, gitResultCapability)
+	if hasFetchRemote(cfg.Repositories) {
+		verificationCapabilities = appendUnique(verificationCapabilities, gitFetchCapability)
+	}
+	capabilities.Verification = verificationCapabilities
 	harnessReasons := append([]string(nil), info.Reasons...)
 	if probeErr != nil {
 		reason := "harness probe failed: " + probeErr.Error()
