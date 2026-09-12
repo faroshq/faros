@@ -223,6 +223,7 @@ export const useTenantStore = defineStore('tenant', () => {
   const error = ref<string | null>(null)
   let orgRequestEpoch = 0
   let orgPending = 0
+  let identityRevision = 0
   // The organization list is independent of the selected tenant headers, but
   // its result still belongs to the selection authority that started it. Keep
   // one request per selection revision so App bootstrap, the shell, and a
@@ -486,6 +487,38 @@ export const useTenantStore = defineStore('tenant', () => {
     clearError()
   }
 
+  function resetForIdentity(): void {
+    identityRevision++
+    selectionRevision++
+    orgRequestEpoch++
+    workspaceCreationSequence++
+    // Keep epochs monotonic so a new read cannot reuse an old request's ID.
+    for (const [org, epoch] of workspaceRequestEpochByOrg) workspaceRequestEpochByOrg.set(org, epoch + 1)
+    orgRequestsBySelectionRevision.clear()
+    listReadSequences.clear()
+    listReadContexts.clear()
+    orgPending = 0
+    workspacePendingByOrg.value = {}
+    orgs.value = []
+    orgListLoaded.value = false
+    orgLoadState.value = 'idle'
+    orgError.value = null
+    workspacesByOrg.value = {}
+    workspaceListLoadedByOrg.value = {}
+    workspaceLoadStateByOrg.value = {}
+    workspaceErrorByOrg.value = {}
+    listReadErrors.value = {}
+    listReadStatuses.value = {}
+    orgUUID.value = null
+    workspaceUUID.value = null
+    workspaceMode.value = 'workspace'
+    workspaceTransitionToken.value = null
+    bootstrapState.value = 'idle'
+    bootstrapAttempts.value = 0
+    clearError()
+    updateLoading()
+  }
+
   function clearError() {
     error.value = null
   }
@@ -501,6 +534,7 @@ export const useTenantStore = defineStore('tenant', () => {
   }
 
   function fetchOrgs(): Promise<void> {
+    const requestIdentity = identityRevision
     const selectionRevisionAtStart = selectionRevision
     const inFlight = orgRequestsBySelectionRevision.get(selectionRevisionAtStart)
     if (inFlight) return inFlight
@@ -577,8 +611,10 @@ export const useTenantStore = defineStore('tenant', () => {
           resetStaleLoadState()
         }
       } finally {
-        orgPending = Math.max(0, orgPending - 1)
-        updateLoading()
+        if (requestIdentity === identityRevision) {
+          orgPending = Math.max(0, orgPending - 1)
+          updateLoading()
+        }
         // Only the request that installed this entry may remove it. This
         // keeps an older fenced request from deleting a newer same-key entry
         // and makes the next call retry after either success or failure.
@@ -596,6 +632,7 @@ export const useTenantStore = defineStore('tenant', () => {
     options: { selectDefault?: boolean } = {},
   ): Promise<void> {
     if (!targetOrgUUID) return
+    const requestIdentity = identityRevision
     const { epoch, selectionRevisionAtStart } = beginWorkspaceRequest(targetOrgUUID)
     if (targetOrgUUID === orgUUID.value) clearError()
     try {
@@ -667,7 +704,7 @@ export const useTenantStore = defineStore('tenant', () => {
         [targetOrgUUID]: message,
       }
     } finally {
-      finishWorkspaceRequest(targetOrgUUID)
+      if (requestIdentity === identityRevision) finishWorkspaceRequest(targetOrgUUID)
     }
   }
 
@@ -1345,6 +1382,7 @@ export const useTenantStore = defineStore('tenant', () => {
     // state
     routeManaged,
     activateRouteContext,
+    resetForIdentity,
     orgUUID,
     workspaceUUID,
     workspaceMode,

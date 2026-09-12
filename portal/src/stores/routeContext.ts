@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { authFetch } from '@/auth/session'
 import { useAuthStore } from './auth'
 import { useTenantStore, type OrgRow, type WorkspaceRow } from './tenant'
@@ -12,6 +12,16 @@ export const useRouteContextStore = defineStore('route-context', () => {
   const generation = ref(0)
   const target = ref<NavigationScope | null>(null)
   let identity = ''
+  const auth = useAuthStore()
+  const tenant = useTenantStore()
+
+  // Clear authority synchronously on logout/account changes, before another
+  // route or an old response can reuse the previous identity's metadata.
+  watch(() => JSON.stringify(auth.user), () => {
+    invalidate()
+    tenant.resetForIdentity()
+    auth.setClusterName(null)
+  }, { flush: 'sync' })
 
   function blocksRoute(path: string, publicRoute: boolean): boolean {
     if (state.value === 'loading') return true
@@ -20,7 +30,6 @@ export const useRouteContextStore = defineStore('route-context', () => {
     // remount an outgoing login page (which redirects) or resource in that gap.
     if (target.value && (!scope || scope.orgUUID !== target.value.orgUUID || scope.workspaceUUID !== target.value.workspaceUUID)) return true
     if (!scope || publicRoute) return false
-    const tenant = useTenantStore()
     return state.value !== 'ready' || scope.orgUUID !== tenant.orgUUID || scope.workspaceUUID !== tenant.workspaceUUID
   }
 
@@ -32,8 +41,6 @@ export const useRouteContextStore = defineStore('route-context', () => {
   }
 
   async function resolve(scope: NavigationScope, force = false): Promise<boolean> {
-    const auth = useAuthStore()
-    const tenant = useTenantStore()
     tenant.routeManaged = true
     const key = JSON.stringify([scope.orgUUID, scope.workspaceUUID, auth.user])
     if (!force && key === identity && state.value === 'ready') return true

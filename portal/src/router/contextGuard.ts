@@ -1,4 +1,4 @@
-import { isNavigationFailure, NavigationFailureType, type Router } from 'vue-router'
+import { isNavigationFailure, NavigationFailureType, type Router, type RouteLocationNormalized } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useAdminStore } from '@/stores/admin'
 import { useTenantStore } from '@/stores/tenant'
@@ -8,9 +8,32 @@ import { rememberPortalNext } from '@/auth/portalNext'
 
 export function installContextGuard(router: Router): void {
   let navigation = 0
+  const attempts = new WeakMap<RouteLocationNormalized, number>()
+
+  function restoreCommittedContext(): void {
+    navigation++
+    const committed = router.currentRoute.value
+    const context = useRouteContextStore()
+    context.invalidate()
+    context.destination = committed.fullPath
+    const scope = parsePortalScope(committed.path)
+    if (scope && !committed.meta.public && useAuthStore().token) void context.resolve(scope, true)
+    else useAuthStore().setClusterName(null)
+  }
+
+  // Context resolution precedes lazy component loading. A failed import or
+  // later guard rejection must restore the route Vue actually kept. Ignore
+  // failures from superseded navigations so they cannot undo newer context.
+  router.onError((_error, to) => {
+    if (attempts.get(to) === navigation) restoreCommittedContext()
+  })
   // Vue Router skips guards when the user returns to the already-current URL
   // while another navigation is pending. Cancel that pending authority read too.
   router.afterEach((to, _from, failure) => {
+    if (isNavigationFailure(failure, NavigationFailureType.aborted) && attempts.get(to) === navigation) {
+      restoreCommittedContext()
+      return
+    }
     if (!isNavigationFailure(failure, NavigationFailureType.duplicated)) return
     const context = useRouteContextStore()
     if (context.state !== 'loading' && context.destination === to.fullPath) return
@@ -22,6 +45,7 @@ export function installContextGuard(router: Router): void {
   })
   router.beforeEach(async (to) => {
     const attempt = ++navigation
+    attempts.set(to, attempt)
     const current = () => attempt === navigation
     const context = useRouteContextStore()
     context.destination = to.fullPath

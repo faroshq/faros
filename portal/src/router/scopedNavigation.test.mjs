@@ -202,3 +202,99 @@ test('deep-link detail metadata does not pretend the org and workspace lists wer
   assert.equal(tenant.workspaceListLoadedByOrg[O], true)
   assert.equal(tenant.workspaceUUID, W)
 })
+
+
+test('account changes discard cached metadata and fence old list responses', async () => {
+  const { router, tenant, auth, context } = setup()
+  await router.push(resource)
+  const real = globalThis.fetch
+  globalThis.fetch = async (path, init) => path === `/api/orgs/${O}/workspaces`
+    ? response({ items: [{ uuid: W, orgUUID: O, clusterName: 'w' }, { uuid: B, orgUUID: O, displayName: 'Private', role: 'admin' }] })
+    : real(path, init)
+  await tenant.fetchOrgs()
+  await tenant.fetchWorkspaces(O)
+  // Ordinary bearer refresh must not discard the current identity's cache.
+  auth.token = 'refreshed-token'
+  assert.equal(tenant.workspaceListLoadedByOrg[O], true)
+  const releases = []
+  globalThis.fetch = (path, init) => path === '/api/orgs' || path === `/api/orgs/${O}/workspaces`
+    ? new Promise(resolve => releases.push(() => resolve(response({ items: [{ uuid: B, orgUUID: O, displayName: 'Old account' }] }))))
+    : real(path, init)
+  const oldLists = Promise.all([tenant.fetchOrgs(), tenant.fetchWorkspaces(O)])
+  while (releases.length !== 2) await new Promise(resolve => setImmediate(resolve))
+  await router.push('/login')
+  auth.logout()
+  assert.deepEqual(tenant.orgs, [])
+  assert.deepEqual(tenant.workspacesByOrg, {})
+  assert.equal(context.state, 'idle')
+  auth.loginFromOIDCResponse({ idToken: 'other-token', expiresAt: 9999999999, email: 'other@example.test', userId: 'other' })
+  globalThis.fetch = real
+  await router.push(resource)
+  assert.equal(tenant.orgListLoaded, false)
+  assert.equal(tenant.workspaceListLoadedByOrg[O], undefined)
+  // Finishing old reads must neither restore private rows nor finish a new
+  // account's in-flight loading indicator for the same organization.
+  let finishNew
+  globalThis.fetch = (path, init) => path === `/api/orgs/${O}/workspaces`
+    ? new Promise(resolve => { finishNew = () => resolve(response({ items: [{ uuid: W, orgUUID: O, clusterName: 'w' }] })) })
+    : real(path, init)
+  const newList = tenant.fetchWorkspaces(O)
+  while (!finishNew) await new Promise(resolve => setImmediate(resolve))
+  releases.forEach(release => release())
+  await oldLists
+  assert.equal(tenant.workspacePendingByOrg[O], 1)
+  assert.deepEqual(tenant.orgs.map(row => row.uuid), [O])
+  assert.deepEqual(tenant.workspacesByOrg[O].map(row => row.uuid), [W])
+  finishNew()
+  await newList
+  assert.equal(tenant.workspacePendingByOrg[O], undefined)
+  assert.equal(tenant.workspaceListLoadedByOrg[O], true)
+})
+
+test('a failed page import restores the committed URL context and permits retry', async () => {
+  const { router, context, tenant, auth } = setup()
+  await router.push(resource)
+  const dashboard = router.getRoutes().find(record => record.name === 'dashboard')
+  const component = dashboard.components.default
+  dashboard.components.default = async () => { throw new Error('Failed to fetch dynamically imported module') }
+  await assert.rejects(router.push(`/${O}/${B}`), /Failed to fetch/)
+  while (context.state === 'loading') await new Promise(resolve => setImmediate(resolve))
+  assert.equal(router.currentRoute.value.fullPath, resource)
+  assert.equal(context.destination, resource)
+  assert.equal(tenant.workspaceUUID, W)
+  assert.equal(auth.clusterName, `cluster-${W}`)
+  assert.equal(context.blocksRoute(router.currentRoute.value.path, false), false)
+  dashboard.components.default = component
+  await router.push(`/${O}/${B}`)
+  assert.equal(tenant.workspaceUUID, B)
+  assert.equal(context.blocksRoute(router.currentRoute.value.path, false), false)
+})
+
+test('late import failures cannot undo a newer navigation', async () => {
+  const { router, tenant, context } = setup()
+  await router.push(resource)
+  let rejectImport
+  router.getRoutes().find(record => record.name === 'dashboard').components.default = () => new Promise((_resolve, reject) => { rejectImport = reject })
+  const failed = assert.rejects(router.push(`/${O}/${B}`), /Import failed/)
+  while (!rejectImport) await new Promise(resolve => setImmediate(resolve))
+  const latest = `/${O}/${W}/mcp`
+  await router.push(latest)
+  const generation = context.generation
+  rejectImport(new Error('Import failed'))
+  await failed
+  assert.equal(router.currentRoute.value.fullPath, latest)
+  assert.equal(context.destination, latest)
+  assert.equal(context.generation, generation)
+  assert.equal(tenant.workspaceUUID, W)
+})
+
+test('a later guard rejection restores the committed context', async () => {
+  const { router, tenant, context } = setup()
+  await router.push(resource)
+  router.beforeResolve(to => to.params.workspaceID === B ? false : undefined)
+  await router.push(`/${O}/${B}`)
+  while (context.state === 'loading') await new Promise(resolve => setImmediate(resolve))
+  assert.equal(router.currentRoute.value.fullPath, resource)
+  assert.equal(tenant.workspaceUUID, W)
+  assert.equal(context.blocksRoute(router.currentRoute.value.path, false), false)
+})
