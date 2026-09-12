@@ -542,6 +542,10 @@ verify-agentkit: ## Verify optional AgentKit style loading and conversation cont
 	@node --test provider-sdk/agentkit/styles.conformance.test.mjs
 	@node --test provider-sdk/agentkit-vue/conversation.conformance.test.mjs
 
+.PHONY: test-scoped-navigation
+test-scoped-navigation: ## Verify scoped portal URLs, login returns, and provider request isolation
+	cd portal && node --test src/router/scopedNavigation.test.mjs src/providers/providerFetch.test.mjs
+
 test-portal: ## Run the complete portal test suite
 	cd portal && npm test
 

@@ -183,6 +183,7 @@ function savePersisted(value: PersistedTenant) {
 }
 
 export const useTenantStore = defineStore('tenant', () => {
+  const routeManaged = ref(false)
   const persisted = loadPersisted()
   const orgUUID = ref<string | null>(persisted.orgUUID)
   const workspaceUUID = ref<string | null>(persisted.workspaceUUID)
@@ -209,6 +210,7 @@ export const useTenantStore = defineStore('tenant', () => {
   const orgError = ref<string | null>(null)
   const orgListLoaded = ref(false)
   const workspacesByOrg = ref<Record<string, WorkspaceRow[]>>({})
+  const workspaceListLoadedByOrg = ref<Record<string, boolean>>({})
   type WorkspaceLoadState = 'idle' | 'loading' | 'ready' | 'error'
   const workspaceLoadStateByOrg = ref<Record<string, WorkspaceLoadState>>({})
   const workspaceErrorByOrg = ref<Record<string, string | null>>({})
@@ -459,6 +461,31 @@ export const useTenantStore = defineStore('tenant', () => {
     ([o, w, mode]) => savePersisted({ orgUUID: o, workspaceUUID: w, workspaceMode: mode }),
   )
 
+  // Called only after the URL's exact context was authorized. Metadata reads
+  // and creation completions cannot substitute an operating target afterward.
+  function activateRouteContext(org: OrgRow, workspace: WorkspaceRow | null): void {
+    routeManaged.value = true
+    selectionRevision++
+    orgRequestEpoch++
+    orgs.value = [...orgs.value.filter((item) => item.uuid !== org.uuid), org]
+    orgLoadState.value = 'ready'
+    orgError.value = null
+    orgUUID.value = org.uuid
+    workspaceUUID.value = workspace?.uuid ?? null
+    workspaceMode.value = workspace ? 'workspace' : 'organization'
+    if (workspace) {
+      // Invalidate list reads started before this authoritative detail read.
+      workspaceRequestEpochByOrg.set(org.uuid, (workspaceRequestEpochByOrg.get(org.uuid) ?? 0) + 1)
+      workspacesByOrg.value = { ...workspacesByOrg.value, [org.uuid]: [
+        ...(workspacesByOrg.value[org.uuid] ?? []).filter((item) => item.uuid !== workspace.uuid), workspace,
+      ] }
+      workspaceLoadStateByOrg.value = { ...workspaceLoadStateByOrg.value, [org.uuid]: 'ready' }
+      workspaceErrorByOrg.value = { ...workspaceErrorByOrg.value, [org.uuid]: null }
+    }
+    bootstrapState.value = 'ready'
+    clearError()
+  }
+
   function clearError() {
     error.value = null
   }
@@ -525,7 +552,7 @@ export const useTenantStore = defineStore('tenant', () => {
         // refresh can validate the selection against fresh data.
         if (selectionRevision !== selectionRevisionAtStart) return
         // Default selection: prefer the personal org; else first row.
-        if (!orgUUID.value && orgs.value.length > 0) {
+        if (!routeManaged.value && !orgUUID.value && orgs.value.length > 0) {
           const personal = orgs.value.find((o) => o.personal)
           selectionRevision++
           orgUUID.value = (personal ?? orgs.value[0]).uuid
@@ -534,7 +561,7 @@ export const useTenantStore = defineStore('tenant', () => {
           workspaceMode.value = 'workspace'
         }
         // Validate the persisted selection still exists; otherwise reset.
-        if (orgUUID.value && !orgs.value.find((o) => o.uuid === orgUUID.value)) {
+        if (!routeManaged.value && orgUUID.value && !orgs.value.find((o) => o.uuid === orgUUID.value)) {
           selectionRevision++
           orgUUID.value = orgs.value[0]?.uuid ?? null
           workspaceUUID.value = null
@@ -595,6 +622,7 @@ export const useTenantStore = defineStore('tenant', () => {
       if (epoch !== workspaceRequestEpochByOrg.get(targetOrgUUID)) return
       const list = data.items ?? []
       workspacesByOrg.value = { ...workspacesByOrg.value, [targetOrgUUID]: list }
+      workspaceListLoadedByOrg.value = { ...workspaceListLoadedByOrg.value, [targetOrgUUID]: true }
       workspaceLoadStateByOrg.value = {
         ...workspaceLoadStateByOrg.value,
         [targetOrgUUID]: 'ready',
@@ -607,7 +635,7 @@ export const useTenantStore = defineStore('tenant', () => {
       // Explicit organization switching opts out so choosing an authority
       // boundary never silently chooses an operating workspace as well.
       const allowDefault = options.selectDefault !== false && workspaceMode.value !== 'organization'
-      if (targetOrgUUID === orgUUID.value && selectionRevision === selectionRevisionAtStart) {
+      if (!routeManaged.value && targetOrgUUID === orgUUID.value && selectionRevision === selectionRevisionAtStart) {
         const selected = workspaceUUID.value
           ? list.find((w) => w.uuid === workspaceUUID.value)
           : null
@@ -715,7 +743,7 @@ export const useTenantStore = defineStore('tenant', () => {
     }
     const created = (await resp.json()) as OrgRow
     await fetchOrgs()
-    await selectOrganization(created.uuid)
+    if (!routeManaged.value) await selectOrganization(created.uuid)
     return created
   }
 
@@ -753,7 +781,7 @@ export const useTenantStore = defineStore('tenant', () => {
     if (!isCurrentWorkspaceCreate(targetOrgUUID, creationSequence, selectionRevisionAtStart)) return created
     if (
       isCurrentWorkspaceCreate(targetOrgUUID, creationSequence, selectionRevisionAtStart) &&
-      selectCreated &&
+      selectCreated && !routeManaged.value &&
       workspaceUUID.value === workspaceAtStart &&
       workspacesByOrg.value[targetOrgUUID]?.some((workspace) => workspace.uuid === created.uuid)
     ) {
@@ -782,6 +810,7 @@ export const useTenantStore = defineStore('tenant', () => {
   // and keep the settings/organization surfaces available during the read.
   // Idempotent: a second call while one is in flight is a no-op.
   async function bootstrap(): Promise<void> {
+    if (routeManaged.value) return
     if (bootstrapRunning) return
     bootstrapRunning = true
     try {
@@ -1314,6 +1343,8 @@ export const useTenantStore = defineStore('tenant', () => {
 
   return {
     // state
+    routeManaged,
+    activateRouteContext,
     orgUUID,
     workspaceUUID,
     workspaceMode,
@@ -1322,6 +1353,7 @@ export const useTenantStore = defineStore('tenant', () => {
     orgError,
     orgListLoaded,
     workspacesByOrg,
+    workspaceListLoadedByOrg,
     workspaceLoadStateByOrg,
     workspaceErrorByOrg,
     workspacePendingByOrg,
