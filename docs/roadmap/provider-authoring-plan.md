@@ -13,19 +13,24 @@ and [provider-publishing.md](../provider-publishing.md).
 
 ## 1. The target
 
-Someone who has never seen faros should be able to go from nothing to a
-provider running against a hub with three commands, and never open a YAML file
-they did not write:
+Someone who has never seen faros, using the SaaS hub with an ordinary org
+account, should be able to go from nothing to a provider running and visible
+in the portal with three commands, and never open a YAML file they did not
+write:
 
 ```sh
-faros provider init acme        # scaffold ./acme: Go backend, portal, chart, manifest, CI
-faros provider dev              # local hub + this provider, registered, enabled, hot reload
-faros provider install acme     # register on the hub, mint credential, helm install, wait Ready
+faros login https://faros.example.com   # the SaaS hub, an ordinary org account
+faros provider init acme                # scaffold ./acme: Go backend, portal, chart, manifest, CI
+faros provider dev                      # ephemeral edge + this provider as a local process,
+                                        # registered and enabled; change code, reload, repeat
+faros provider install acme             # for real: register, mint credential, helm install
+                                        # into a cluster connected as an edge, wait Ready
 ```
 
-The measure is the same one `helm install` meets: one command, one credential
-the user never copies by hand, idempotent, and a clear failure when a
-prerequisite is missing.
+`faros provider quickstart` is `init` + `dev` in one command for the very
+first run. No platform admin is involved at any step. The measure is the same
+one `helm install` meets: one command, one credential the user never copies
+by hand, idempotent, and a clear failure when a prerequisite is missing.
 
 ## 2. Where we are
 
@@ -237,7 +242,8 @@ A new `groupProviders` in `pkg/cli/cmd/root.go`, files under
 | Command | What it does | Hub surface |
 |---|---|---|
 | `init <name>` | Scaffold a provider directory from the embedded template. Flags: `--module`, `--ui vanilla\|vue\|none`, `--api-group`, `--port`. Prints next steps. | none |
-| `dev` | Local loop, see §3.5. | admin or org register |
+| `dev` | The iteration loop, section 3.5. Default: ephemeral in-process edge against the hub you are logged into. `--local` runs an embedded hub instead. `--edge` reuses a persistent edge. | org register (default) or admin |
+| `quickstart [name]` | `init` + `dev` in one command: scaffold, register, run, open the portal. The first-run experience. | as `dev` |
 | `register <name>` | Create the provider on the hub and print the credential and instructions. Org-scoped by default (the SaaS case); `--platform` for hub admins. `--edge ws/name` picks the tunnel; with one connected edge it is chosen automatically. `-o kubeconfig-file`. | `POST /api/orgs/{org}/providers`; `POST /api/admin/providers` + `GET .../kubeconfig` |
 | `install <name>` | `register`, then preflight (§3.6), then namespace + Secret + `helm upgrade --install` in-process (the CLI already links `helm.sh/helm/v3` for `faros dev`), then wait for `CatalogEntry` Ready. `--chart`, `--version`, `--set`, `--namespace`, `--kubeconfig`, `--enable` to enable in the current workspace. For a custom provider the instructions are rendered locally from the scaffolded manifest's `selfHosting` block (§3.6). | as above + enable |
 | `list`, `get`, `status` | Catalog view, endpoints, last heartbeat, Ready conditions. | `GET /api/providers`, `GET /api/orgs/{org}/providers` |
@@ -264,29 +270,111 @@ and `instructions` once provisioned, rendered with the same
 `RenderInstallInstructions` the BYO path uses. This also gives the portal's
 `/bonkers` page the same one-click experience the org page has.
 
-### 3.5 `faros provider dev`: the local loop
+### 3.5 `faros provider dev`: the iteration loop
 
-Replaces `make run-hub-embedded-static`, `install-provider-X`,
-`init-provider-X`, `run-provider-X` and the three Tilt resources with one
-command that works inside or outside the monorepo:
+The loop is: change code, the provider restarts, reload the portal, repeat.
+`dev` has two modes. The first is the default whenever the CLI is logged into
+a remote hub, which is every custom-provider author on SaaS. The second is for
+people developing the hub itself.
+
+#### 3.5.1 Against a remote hub, with an ephemeral edge (default)
+
+The person this is for writes a custom provider, uses the SaaS hub, is not a
+platform admin, and does not want to install an agent on their machine.
+`faros provider dev` therefore owns an edge that exists only while it runs.
+
+The inner loop is: change code, the provider restarts, reload the portal,
+repeat. Nothing in that loop talks to the hub except one cheap CatalogEntry
+re-apply (below). Session start and end do.
+
+*Session start:*
+
+1. Resolve hub, org and workspace from the CLI login. Preflight (§3.6 above).
+2. Create an ephemeral host edge in the current workspace:
+   `faros edge create dev-<provider>-<user>-<rand> --type server` (or `macos`),
+   labelled `faros.sh/ephemeral=true`, `faros.sh/owner=<user>`,
+   `faros.sh/provider=<name>`. Mint its join token
+   (`faros agent token create`) and run the agent **in-process**: the CLI
+   already links the agent package for `faros agent run`
+   (`pkg/cli/cmd/agent.go:222`), so no child binary and no launchd/systemd.
+   The agent runs with a loopback-only service policy.
+3. Register the provider bound to that edge, `POST /api/orgs/{org}/providers`
+   with `edge: {workspace, name}`. This is idempotent across sessions, and
+   `RecordProviderEdgeBinding` overwrites the previous session's edge
+   (`pkg/hub/kcp/edgeroute.go:104-110`), so the provider workspace and
+   credential persist while the edge is replaced each time. The credential is
+   cached at `~/.faros/providers/<hub>/<org>/<name>.kubeconfig` and re-fetched
+   from the kubeconfig endpoint if missing (same token).
+4. The hub reconciles the hub-owned edges Service `provider-<name>` with
+   `host: 127.0.0.1` and the declared port (needs the three hub changes
+   below).
+5. Run `init` once with the cached credential, then `serve` on the declared
+   port. On the first session, enable the provider in the current workspace
+   after showing the claim consent in the terminal. Print the portal URL and a
+   curl for the backend.
+
+*Inner loop:*
+
+- Go changes: rebuild, restart `serve`. Portal changes: `vite build --watch`
+  into `portal/dist`, and the SDK runtime serves the portal from disk when
+  `FAROS_PORTAL_DIR` is set, so a UI change needs no Go rebuild.
+- After every rebuild, re-apply the CatalogEntry with
+  `spec.version: <base>-dev.<n>`. This matters: the ui-grant caches the
+  bundle's SRI hash keyed by version and only re-hashes every ten minutes
+  (`pkg/hub/providers/ui_grant.go:525-531`, `ui_integrity.go:53`). Without
+  the bump the browser refuses the rebuilt `main.js` until the cache expires.
+  With it, the next portal reload gets a fresh pin. One apply, no
+  re-registration.
+
+*Session end:* on Ctrl-C, stop `serve`, stop the agent, delete the ephemeral
+edge. The provider workspace, credential and enablement stay, so the next
+`dev` is instant. `dev --clean` also deletes the org provider. The route is
+unusable between sessions and the portal shows the provider as unreachable,
+which is correct.
+
+*Orphans:* a crashed session leaves an edge behind. Two guards: `dev` deletes
+any ephemeral edge with its own owner and provider labels on start, and the
+edges provider sweeps ephemeral edges that have been disconnected for more
+than an hour.
+
+*Hub changes this needs, all small:*
+
+- `install-targets` and the registration preflight list and accept only
+  `KubernetesCluster` edges (`pkg/hub/kcp/edgetargets.go:78`,
+  `pkg/hub/restapi/org_providers.go:466`). Accept `LinuxServer` and
+  `MacOSServer` too.
+- `EnsureProviderEdgeService` hardcodes `edgeRef.kind: KubernetesCluster` and a
+  `targetRef` (`pkg/hub/kcp/edgeroute.go:264`). For a host edge, emit
+  `host: 127.0.0.1` and `port` instead; the Service type already supports it
+  (`providers/edges/apis/v1alpha1/types_service.go:155-181`).
+- `ParseClusterServiceTarget` refuses anything but cluster DNS
+  (`pkg/hub/kcp/edgeroute.go:221`). Allow a loopback backend URL only when
+  the bound edge is a host edge.
+- Ephemeral-edge sweeper in the edges provider, keyed on the label.
+
+`faros provider quickstart` is `init` + `dev` in one command for the very
+first run: scaffold, ephemeral edge, register, run, open the portal. A local
+kind/k3d cluster as the edge remains the fallback for a provider that must
+run in-cluster, with an image reload instead of a process restart.
+
+#### 3.5.2 Against an embedded hub (`dev --local`)
+
+For hub developers and CI. Replaces `make run-hub-embedded-static`,
+`install-provider-X`, `init-provider-X`, `run-provider-X` and the three Tilt
+resources:
 
 1. Start an embedded-kcp hub in-process (`faros init` already does this) with a
-   static dev token and `--hub-external-url` set, unless `--hub` points at a
-   running one.
+   static dev token and `--hub-external-url` set.
 2. Create the Provider and CatalogEntry through the admin API, not kubectl.
 3. Wait for the minted Secret, write the runtime kubeconfig to the data dir.
    This replaces the `printf` kubeconfig in `Makefile:1417-1426`.
-4. `go run . init`, then `go run . serve` with `FAROS_*` env set, restarting on
-   file change (`portal/` triggers `vite build`, Go files trigger rebuild).
+4. Same inner loop as 3.5.1, but the hub dials `localhost` directly; no edge.
 5. Enable the provider in the default dev workspace and print the portal URL and
    a curl for the backend.
 
 The existing `test/e2e/suites/provider` suite already drives this exact
-sequence as a test harness; `dev` is the same sequence as a user command and the
-suite should be refactored to call it.
-
-Against a remote hub, `dev --hub` follows §3.6: a local cluster connected as
-an edge in the near term, a plain process behind a macOS or server edge later.
+sequence as a test harness; `dev --local` is the same sequence as a user
+command and the suite should be refactored to call it.
 
 ### 3.6 The SaaS path: a custom provider with no platform admin
 
@@ -321,19 +409,8 @@ the things that fail silently today and refuse with a specific message:
   (skipped for pure UI/backend providers);
 - the ui-grant route is available on this hub when the manifest declares a UI.
 
-**A laptop loop against SaaS.** Two stages:
-
-1. *Phase 3, works with today's hub:* `dev --hub <saas>` creates or reuses a
-   local kind/k3d cluster, connects it as an edge (`faros edge create` +
-   `faros install --type kubernetes`, both exist), builds the image, loads it
-   into the cluster, and runs `install`. Rebuild on change is an image reload
-   plus rollout restart. Heavier than `go run .`, but it is the real BYO path
-   end to end, which is also what a tenant will run.
-2. *Phase 5, needs the edges provider:* a macOS or server edge that fronts a
-   host port, so `dev --hub` can run the provider as a plain process. Today
-   `EdgeRoute` assumes a `KubernetesCluster` edge and a Service in the
-   tenant's cluster; extending that is edges-provider work and is tracked
-   separately.
+**Iterating on a custom provider against SaaS** is section 3.5.1: an
+ephemeral in-process edge, the provider as a local process, nothing installed.
 
 **What the SaaS operator must provide.** None of this works if the platform is
 not set up for BYO: a publicly dialable virtual-workspace URL on every shard,
@@ -351,9 +428,9 @@ Each phase is one or two PRs and leaves `make e2e-provider` green.
 | 0 | Fix stale text: quickstart README "not in this iteration" list, `manifest.yaml` header (`schemas[]`), chart README's `/bonkers` references. Half a day. | P7 |
 | 1 | `provider-sdk/runtime` + `ClaimsFromCatalogEntry` + embedded manifest and schemas. Quickstart adopts; `init_cmd.go` and the chart ConfigMap go. | P1, P4 |
 | 2 | `faros provider init` with embedded template and `make sync-scaffold`/`verify-scaffold`. CI job scaffolds `acme` into a temp dir, builds it, runs it under the provider e2e suite. `faros provider dev --local`. | P3, P5 |
-| 3 | `faros provider register/install/list/status/enable/disable/delete/credentials rotate/validate`, org-scoped by default with edge selection, local instruction rendering and the §3.6 preflight. `dev --hub` via a local kind/k3d edge. Admin create returns kubeconfig and instructions; portal `/bonkers` uses it. Docs and `skills/faros` updated; `verify-docs-cli` regenerates the CLI reference. | P2, SaaS gap |
+| 3 | `faros provider register/install/list/status/enable/disable/delete/credentials rotate/validate`, org-scoped by default with edge selection, local instruction rendering and the §3.6 preflight. `dev` with an ephemeral in-process host edge (three small hub changes plus a sweeper, §3.5.1) and `faros provider quickstart`. Admin create returns kubeconfig and instructions; portal `/bonkers` uses it. Docs and `skills/faros` updated; `verify-docs-cli` regenerates the CLI reference. | P2, SaaS gap |
 | 4 | `faros-provider` library chart published; quickstart chart shrinks to four files; `helm-build.sh` covers it. Optional: register request accepts an inline `selfHosting` recipe so the portal shows steps for custom providers. | P4 (chart half) |
-| 5 | Standalone-repo story: `init` emits a GitHub workflow that builds image and chart on `v*` tags (a generalised `provider-release.yaml`); `faros provider publish` cuts the tag; macOS/server edge route so `dev --hub` runs a plain process. | P6 |
+| 5 | Standalone-repo story: `init` emits a GitHub workflow that builds image and chart on `v*` tags (a generalised `provider-release.yaml`); `faros provider publish` cuts the tag. | P6 |
 
 Phases 1 and 2 are where most of the smoothness comes from and they do not
 depend on any hub change. Phase 3 is the one that touches the hub and is the
@@ -382,9 +459,15 @@ depend on any hub change. Phase 3 is the one that touches the hub and is the
   manifest's `selfHosting` block needs no hub change and ships in phase 3.
   Accepting the recipe in the register request additionally lights up the
   portal panel, and can follow in phase 4.
-- **Laptop dev against SaaS.** A local cluster as an edge is the honest path
-  with today's hub and is what tenants actually run. A process behind a macOS
-  or server edge is nicer and waits on the edges provider.
+- **Laptop dev against SaaS.** An ephemeral host edge run in-process by the
+  CLI, with the provider as a plain local process, needs three small hub
+  changes plus a sweeper (§3.6) and gives the change-rerun-reload loop people
+  expect with no agent installed. A local kind/k3d cluster works with today's
+  hub but iterates through image builds. Recommended: the ephemeral-edge
+  path, in phase 3.
+- **Persistent or ephemeral edge for `dev`.** Ephemeral by default: it leaves
+  nothing on the machine and nothing in the org after Ctrl-C. `--edge` reuses
+  an existing edge for people who already run one.
 
 ## 6. Out of scope
 
