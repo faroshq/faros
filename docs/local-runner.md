@@ -411,7 +411,7 @@ interruption, restart, and same-session resume evidence.
 loading enrollment, credentials, or Codex. The running capabilities response
 reports the executable's build version; enrollment cannot override it.
 
-`make package-runner-darwin` builds arm64/amd64 archives containing the binary,
+`make package-runner-darwin` builds plain arm64/amd64 tar archives containing the binary,
 manager, and `install.sh`, plus archive SHA-256 files. Verify the archive digest
 from your trusted distribution before extracting and running `sh install.sh`.
 This installs locally; it does not start the runner or enroll a worker.

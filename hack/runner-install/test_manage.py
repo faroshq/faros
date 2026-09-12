@@ -93,5 +93,28 @@ class ManagerCLITest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class PackageTest(unittest.TestCase):
+    def test_archives_contain_only_runner_manager_and_pinned_installer(self):
+        import subprocess
+        import sys
+        import tarfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for arch in ('arm64', 'amd64'):
+                (root / ('faros-runner-darwin-' + arch)).write_bytes(arch.encode())
+            subprocess.run([sys.executable, str(Path(__file__).with_name('package.py')), directory],
+                           check=True, capture_output=True)
+            for arch in ('arm64', 'amd64'):
+                archive = root / ('faros-runner-macos-' + arch + '.tar')
+                checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
+                self.assertEqual(archive.with_suffix('.tar.sha256').read_text(), checksum + '  ' + archive.name + '\n')
+                with tarfile.open(archive, 'r:') as bundle:
+                    self.assertEqual(set(bundle.getnames()), {
+                        'faros-runner-install/faros-runner', 'faros-runner-install/manage.py',
+                        'faros-runner-install/install.sh'})
+                    script = bundle.extractfile('faros-runner-install/install.sh').read().decode()
+                    self.assertIn(hashlib.sha256(arch.encode()).hexdigest(), script)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -12,11 +12,11 @@ source = Path(__file__).parent
 for arch in ('arm64', 'amd64'):
     binary = bindir / ('faros-runner-darwin-' + arch)
     sha = hashlib.sha256(binary.read_bytes()).hexdigest()
-    bundle = bindir / ('faros-runner-macos-' + arch + '.tar.gz')
+    bundle = bindir / ('faros-runner-macos-' + arch + '.tar')
     installer = ('#!/bin/sh\nset -eu\n'
                  'cd "$(dirname "$0")"\n'
                  'exec python3 ./manage.py install --binary ./faros-runner --sha256 ' + sha + '\n')
-    with tarfile.open(bundle, 'w:gz') as archive:
+    with tarfile.open(bundle, 'w') as archive:
         archive.add(binary, arcname='faros-runner-install/faros-runner', recursive=False)
         archive.add(source / 'manage.py', arcname='faros-runner-install/manage.py', recursive=False)
         content = installer.encode()
