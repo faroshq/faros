@@ -267,6 +267,49 @@ Do not copy the state directory to another machine or assume raw Codex session
 files are portable. Cross-machine continuation, migration, scheduling, and
 publication are outside this runner contract.
 
+## Optional Git result export
+
+The runner advertises `git-result-v1` in `verificationCapabilities`. A caller
+must explicitly set `exportGitResult: true` in the approved Start request to
+request the export; ordinary completed attempts produce no Git result
+artifacts. The export is intended for a separate coordinator that owns
+publication. The runner itself never pushes Git or creates a pull request.
+
+Example request field:
+
+```json
+{
+  "exportGitResult": true
+}
+```
+
+After a successful harness completion, the runner snapshots tracked and
+nonignored files from the task worktree using a temporary index. It preserves
+the worktree's normal HEAD and index, and writes owner-only artifacts below the
+runner state directory:
+
+- `git-result.json` is a bounded `git-result/v1` document containing Task and
+  Attempt identity, the approved `baseCommit`, result commit/tree identity,
+  and `noChanges`.
+- `git-result.bundle` is present only when the snapshot differs from the base.
+  It contains one deterministic sanitized snapshot commit whose sole parent is
+  the approved base commit, with fixed runner identity, timestamp, and commit
+  message. The bundle advertises only the runner-result ref.
+
+The generated names are reserved. A harness cannot submit an artifact under
+either name when export is enabled. If export fails, the attempt is failed and
+does not report completion with a partial result. If the snapshot tree equals
+the approved base tree, `noChanges` is true and the result omits commit, tree,
+bundle digest, and bundle artifact. Unstaged deletions and file/directory
+transitions are included; symlink ancestors are rejected.
+
+The exporter includes the final tracked and nonignored worktree contents. A
+caller that uses this export should instruct the harness not to place private
+planning documents, transcripts, credentials, or verification logs in that
+tree, but the exporter is not a content secret scanner. Callers must treat the
+worktree and resulting bundle as private and apply their own publication
+policy.
+
 ## Limits and verification boundary
 
 The default bounds are 256 retained events per attempt, 64 KiB per event
@@ -276,10 +319,10 @@ callers should use the advertised protocol response and error code as the
 authority. The runner supports at most one harness turn per execution and one
 simultaneous execution by default.
 
-Focused runner tests, race and vet checks, native builds, Darwin arm64 and
-amd64 builds, and two no-model Codex `0.147.0` authentication probes have
-passed for the current implementation. These checks establish protocol,
-process, and harness contracts. They do not establish that a real Mac has
-successfully completed a coding task. A real-Mac acceptance still needs an
-actual enrolled host, approved local repository, start/observe path,
-interruption, restart, and same-session resume evidence.
+Focused runner tests, race/vet/lint checks, and Linux and Darwin arm64/amd64
+builds have passed after the final exporter repair. A local artifact-consumer
+fixture also accepted the real runner artifacts. These checks establish
+protocol, process, harness, and local artifact contracts. They do not establish
+live GitHub publication or that a real Mac has completed a coding task. Live
+acceptance still needs an actual enrolled host, approved local repository,
+start/observe path, interruption, restart, and same-session resume evidence.
