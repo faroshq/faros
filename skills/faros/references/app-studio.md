@@ -327,8 +327,20 @@ sed -n 's/^data: //p' events.log | jq -r 'select(.type=="item.completed") | .pay
 ```
 
 `turn.completed` with `status: completed` is reported even when tool items
-inside the turn failed. There is no summary flag, so scan for
-`.data.status == "failed"` and read `.data.diagnostic.message`.
+inside the turn failed. The turn object (in `turn.completed` /
+`turn.failed` / `turn.interrupted` at `.payload.turn`, and in
+`GET …/threads/{t}/turns/{turn}`) carries the step outcome, each field
+omitted when zero:
+
+| Field | Counts |
+|---|---|
+| `failedItems` | tool items that ended failed |
+| `recoveredItems` | failures a linked retry repaired (not in `failedItems`) |
+| `rejectedItems` | steps whose approval was denied (their items read `failed`; not in `failedItems`) |
+| `failures` | up to 5 × `{itemID, title, category, message, referenceID}` |
+
+The detail route computes it from stored items, so it works for older turns
+too.
 
 Approval: the preference is per user and project (`GET|PATCH …/assistant/approval-mode`)
 and each turn reports it as `approvalMode`.

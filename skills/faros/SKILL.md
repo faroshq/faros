@@ -344,13 +344,21 @@ curl -sN "$AS/api/projects/shop/assistant/threads/t1/events" -H "Authorization: 
 - The events stream replays from sequence 1 unless you send `Last-Event-ID`,
   and closes after `turn.completed`, so `curl -N > file` doubles as "wait".
 - **Read the outcome, not the status.** `turn.completed` says `completed` even
-  when steps inside the turn failed. Print the reply and every failed step:
+  when steps inside the turn failed. The turn carries the step outcome
+  (`failedItems`, `rejectedItems`, and up to five `failures`, all omitted when
+  zero); print it with the reply:
 
   ```bash
-  sed -n 's/^data: //p' events.log | jq -r 'select(.type=="item.completed") | .payload.item
-    | if .type=="agentMessage" then "MSG: \(.content)"
-      elif .data.status=="failed" then "FAIL: \(.data.title): \(.data.diagnostic.message)" else empty end'
+  sed -n 's/^data: //p' events.log | jq -r '
+    if .type=="item.completed" and .payload.item.type=="agentMessage" then "MSG: \(.payload.item.content)"
+    elif .type=="turn.completed" then .payload.turn
+      | "TURN: \(.status) failed=\(.failedItems // 0) rejected=\(.rejectedItems // 0)",
+        ((.failures // [])[] | "FAIL: \(.title): \(.message)")
+    else empty end'
   ```
+
+  `GET …/threads/{t}/turns/{turn}` returns the same summary later.
+  `rejectedItems` are steps whose approval was denied, not failures.
 
   `stale_source` failures are retried by the assistant itself.
   `Private preview inspection is unavailable … FAROS_HUB_PUBLIC_URL` means it
