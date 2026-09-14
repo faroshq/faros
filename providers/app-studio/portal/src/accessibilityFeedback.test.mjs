@@ -92,6 +92,7 @@ test('uses semantic overlay layers for tooltips and annotation editing', () => {
 test('keeps the shared muted fallback readable in standalone providers', () => {
   assert.match(canonicalFarosUI, /var\(--color-text-muted, #8587a1\)/)
   assert.doesNotMatch(canonicalFarosUI, /#5d5f78/)
-  assert.equal(farosUIDestinations.length, 10)
+  // Databricks parity is verified in the private providers repository.
+  assert.equal(farosUIDestinations.length, 9)
   for (const destination of farosUIDestinations) assert.equal(destination, canonicalFarosUI)
 })
