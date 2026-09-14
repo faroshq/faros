@@ -22,7 +22,6 @@ const farosUIDestinations = await Promise.all([
   '../../../agents/portal/src/portalkit/faros-ui.css',
   './portalkit/faros-ui.css',
   '../../../code/portal/src/portalkit/faros-ui.css',
-  '../../../databricks/portal/src/portalkit/faros-ui.css',
   '../../../edges/portal/src/portalkit/faros-ui.css',
   '../../../infrastructure/portal/src/portalkit/faros-ui.css',
   '../../../kuery/portal/src/portalkit/faros-ui.css',
