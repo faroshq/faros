@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'vite'
 const vite = await createServer({ configFile: false, appType: 'custom',
+  optimizeDeps: { noDiscovery: true },
   root: new URL('../../', import.meta.url).pathname,
   server: { middlewareMode: true, hmr: false } })
 const { createProviderRouteFocus } = await vite.ssrLoadModule('/src/providers/providerRouteFocus.ts')
