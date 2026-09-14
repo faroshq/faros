@@ -120,11 +120,15 @@ func testRepositoryActionAuthority(t *testing.T, actionName string) {
 				if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
 					t.Fatal(err)
 				}
-				if envelope.RequestID != "sdk-request" || envelope.Provider != "code" || envelope.Action != "branch_head" || envelope.ActionVersion != "v1" || envelope.ResourceRef.Name != "product" || envelope.ResourceRef.Kind != "Repository" || envelope.ResourceRef.Resource != "repositories" || envelope.ResourceRef.APIVersion != "code.faros.sh/v1alpha1" {
+				if envelope.RequestID != "sdk-request" || envelope.Provider != "code" || envelope.Action != actionName || envelope.ActionVersion != "v1" || envelope.ResourceRef.Name != "product" || envelope.ResourceRef.Kind != "Repository" || envelope.ResourceRef.Resource != "repositories" || envelope.ResourceRef.APIVersion != "code.faros.sh/v1alpha1" {
 					t.Fatalf("invalid wire identity: %+v", envelope)
 				}
 				if kind == "allowed" {
-					if string(envelope.Result) != `{"head":"1111111111111111111111111111111111111111"}` || envelope.Error != nil {
+					expected := `{"head":"1111111111111111111111111111111111111111"}`
+					if actionName == "branches" {
+						expected = `{"branches":["main","release/v1"],"nextPage":0}`
+					}
+					if string(envelope.Result) != expected || envelope.Error != nil {
 						t.Fatalf("invalid result: %+v", envelope)
 					}
 				} else if envelope.Error == nil || envelope.Error.Message == "" || len(envelope.Result) != 0 {
